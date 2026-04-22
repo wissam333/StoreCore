@@ -1,8 +1,8 @@
 import type { CapacitorConfig } from "@capacitor/cli";
 
 const config: CapacitorConfig = {
-  appId: "com.medicore.app",
-  appName: "StoreCore",
+  appId: "com.example.app",
+  appName: "Al Hasan Center",
   webDir: ".output/public",
   plugins: {
     CapacitorHttp: {

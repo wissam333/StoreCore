@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">MediCore</string>
-    <string name="title_activity_main">MediCore</string>
-    <string name="package_name">com.medicore.app</string>
-    <string name="custom_url_scheme">com.medicore.app</string>
+    <string name="app_name">Al Hasan Center</string>
+    <string name="title_activity_main">Al Hasan Center</string>
+    <string name="package_name">com.Al Hasan center.app</string>
+    <string name="custom_url_scheme">com.example.app</string>
 </resources>
