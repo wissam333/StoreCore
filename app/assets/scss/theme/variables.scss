@@ -1,0 +1,17 @@
+:root {
+  --primary: #ea1c24;
+  --primary-soft: rgba(234, 28, 36, 0.1);
+  --secondary: #0c1739;
+  --bg-page: #f1f5f9;
+  --bg-surface: #ffffff;
+  --border-color: #e2e8f0;
+  --text-primary: #0c1739;
+  --text-muted: #94a3b8;
+}
+
+:root.dark {
+  --bg-page: #0f1117;
+  --bg-surface: #1a1d27;
+  --border-color: #2e3347;
+  --text-primary: #f1f5f9;
+}
