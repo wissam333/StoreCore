@@ -39,6 +39,7 @@
     "vue-router": "^4.6.3"
   },
   "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
     "@vee-validate/rules": "^4.12.6",
     "nuxt-beastcss": "^1.0.3",
     "sass": "^1.86.3",
