@@ -20,11 +20,6 @@ export const useMobileStore = () => {
     return parseFloat(r?.value ?? "15000") || 15000;
   };
 
-  const toSP = async (amount, currency) => {
-    if (currency === "USD") return amount * (await getDollarRate());
-    return amount;
-  };
-
   const deriveStatus = (totalSp, paidAmount, displayCurrency, rate) => {
     const paidSp = displayCurrency === "USD" ? paidAmount * rate : paidAmount;
     if (paidSp <= 0) return "pending";
@@ -40,14 +35,22 @@ export const useMobileStore = () => {
     return r?.value ?? "SP";
   };
 
-  // Strip computed/join fields that must never be pushed to the backend.
-  // These come from SELECT JOINs and don't exist as real columns.
-  const PRODUCT_JOIN_FIELDS = ["category_name"];
-  const ORDER_JOIN_FIELDS = ["customer_name", "customer_phone", "item_count"];
-  const CUSTOMER_JOIN_FIELDS = [];
+  // ── Strip JOIN-computed fields before enqueueing ───────────────────────────
+  // These come from SELECT JOINs and are NOT real columns — sending them to
+  // the server causes upsert to write them into columns that don't exist.
+  const PRODUCT_JOIN = ["category_name"];
+  const ORDER_JOIN = [
+    "customer_name",
+    "customer_phone",
+    "item_count",
+    "current_stock",
+    "current_name",
+  ];
+  const DUE_JOIN = ["customer_name", "customer_phone"];
+  const ITEM_JOIN = ["current_stock", "current_name"];
 
-  const stripFields = (obj, fields) => {
-    if (!obj || !fields.length) return obj;
+  const strip = (obj, fields) => {
+    if (!obj) return obj;
     const copy = { ...obj };
     for (const f of fields) delete copy[f];
     return copy;
@@ -195,7 +198,6 @@ export const useMobileStore = () => {
       if (activeOnly) {
         where += " AND p.is_active=1";
       }
-
       const data =
         (
           await db.query(
@@ -234,8 +236,7 @@ export const useMobileStore = () => {
   const saveProduct = async (p) => {
     try {
       const db = await getMobileDb();
-      // Strip JOIN-computed fields — they are not real columns in products table
-      const clean = stripFields(p, PRODUCT_JOIN_FIELDS);
+      const clean = strip(p, PRODUCT_JOIN);
       if (clean.id) {
         await db.run(
           `UPDATE products SET name=?, description=?, category_id=?, barcode=?, buy_price=?, sell_price=?, currency=?, stock=?, min_stock=?, unit=?, image_url=?, is_active=?, updated_at=datetime('now') WHERE id=?`,
@@ -305,11 +306,11 @@ export const useMobileStore = () => {
         `UPDATE products SET stock=MAX(0, stock + ?), updated_at=datetime('now') WHERE id=?`,
         [delta, id],
       );
-      const updated = (
-        await db.query(`SELECT stock FROM products WHERE id=?`, [id])
-      ).values?.[0];
-      await enqueue("products", "update", id, { id, stock: updated?.stock });
-      return { ok: true, stock: updated?.stock };
+      // FIX: send full product row so updated_at propagates correctly
+      const full = (await db.query(`SELECT * FROM products WHERE id=?`, [id]))
+        .values?.[0];
+      await enqueue("products", "update", id, full ?? { id, stock: 0 });
+      return { ok: true, stock: full?.stock };
     } catch (err) {
       return { ok: false, error: err.message };
     }
@@ -411,7 +412,6 @@ export const useMobileStore = () => {
       const db = await getMobileDb();
       const trimmed = (name ?? "").trim();
       if (!trimmed) return { ok: false, error: "Name is required" };
-
       let customer = (
         await db.query(
           `SELECT * FROM customers WHERE name=? AND _deleted=0 LIMIT 1`,
@@ -467,7 +467,6 @@ export const useMobileStore = () => {
         where += " AND date(o.order_date)<=?";
         params.push(dateTo);
       }
-
       const data =
         (
           await db.query(
@@ -495,18 +494,28 @@ export const useMobileStore = () => {
       const db = await getMobileDb();
       const order = (
         await db.query(
-          `SELECT o.*, c.name as customer_name, c.phone as customer_phone FROM orders o LEFT JOIN customers c ON o.customer_id=c.id WHERE o.id=? AND o._deleted=0`,
+          `SELECT o.*, c.name as customer_name, c.phone as customer_phone
+         FROM orders o LEFT JOIN customers c ON o.customer_id = c.id
+         WHERE o.id = ? AND o._deleted = 0`,
           [id],
         )
       ).values?.[0];
       if (!order) return { ok: false, error: "Not found" };
+
+      // FIX: product_name is a snapshot on the item — never depends on products table
+      // LEFT JOIN products only for current_stock (edit form) — won't drop rows if product missing
       order.items =
         (
           await db.query(
-            `SELECT oi.*, p.stock as current_stock FROM order_items oi LEFT JOIN products p ON oi.product_id=p.id WHERE oi.order_id=? AND oi._deleted=0`,
+            `SELECT oi.*, p.stock AS current_stock
+         FROM order_items oi
+         LEFT JOIN products p ON oi.product_id = p.id
+         WHERE oi.order_id = ? AND oi._deleted = 0
+         ORDER BY oi.id ASC`,
             [id],
           )
         ).values ?? [];
+
       return { ok: true, data: order };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -518,7 +527,6 @@ export const useMobileStore = () => {
       const db = await getMobileDb();
       const rate = await getDollarRate();
 
-      // Calc totals
       let totalSp = 0;
       for (const item of items) {
         const lineSP =
@@ -538,7 +546,6 @@ export const useMobileStore = () => {
       let orderId = order.id;
 
       if (orderId) {
-        // Restore stock from old items
         const oldItems =
           (
             await db.query(
@@ -552,20 +559,22 @@ export const useMobileStore = () => {
             [oi.quantity, oi.product_id],
           );
         }
-        await db.run(`UPDATE order_items SET _deleted=1 WHERE order_id=?`, [
-          orderId,
-        ]);
+        await db.run(
+          `UPDATE order_items SET _deleted=1, updated_at=datetime('now') WHERE order_id=?`,
+          [orderId],
+        );
+        const cleanOrder = strip(order, ORDER_JOIN);
         await db.run(
           `UPDATE orders SET customer_id=?, order_date=?, status=?, total_sp=?, total_usd=?, paid_amount=?, display_currency=?, notes=?, updated_at=datetime('now') WHERE id=?`,
           [
-            order.customer_id,
-            order.order_date,
+            cleanOrder.customer_id,
+            cleanOrder.order_date,
             status,
             totalSp,
             totalUsd,
-            order.paid_amount ?? 0,
-            order.display_currency ?? "SP",
-            order.notes,
+            cleanOrder.paid_amount ?? 0,
+            cleanOrder.display_currency ?? "SP",
+            cleanOrder.notes,
             orderId,
           ],
         );
@@ -586,7 +595,7 @@ export const useMobileStore = () => {
         orderId = r.changes?.lastId;
       }
 
-      // Insert items + decrease stock
+      // Insert new items + decrease stock
       for (const item of items) {
         const lineSP =
           item.currency_at_sale === "USD"
@@ -624,15 +633,26 @@ export const useMobileStore = () => {
         );
       }
 
+      // FIX: also mark linked dues paid AND enqueue those dues so desktop sees the change
       if (status === "paid") {
         await db.run(
           `UPDATE dues SET paid=1, paid_at=datetime('now'), updated_at=datetime('now') WHERE order_id=? AND paid=0`,
           [orderId],
         );
+        // Enqueue each updated due so the change syncs to desktop
+        const updatedDues =
+          (
+            await db.query(`SELECT * FROM dues WHERE order_id=? AND paid=1`, [
+              orderId,
+            ])
+          ).values ?? [];
+        for (const due of updatedDues) {
+          await enqueue("dues", "update", due.id, strip(due, DUE_JOIN));
+        }
       }
 
-      // Strip JOIN fields before enqueueing — they are not real columns
-      const cleanOrder = stripFields(order, ORDER_JOIN_FIELDS);
+      // Enqueue order — strip join fields
+      const cleanOrder = strip(order, ORDER_JOIN);
       await enqueue("orders", order.id ? "update" : "insert", orderId, {
         ...cleanOrder,
         id: orderId,
@@ -640,6 +660,38 @@ export const useMobileStore = () => {
         total_sp: totalSp,
         total_usd: totalUsd,
       });
+
+      // FIX: also enqueue all order_items so they sync to other devices
+      const savedItems =
+        (
+          await db.query(
+            `SELECT * FROM order_items WHERE order_id=? AND _deleted=0`,
+            [orderId],
+          )
+        ).values ?? [];
+      for (const item of savedItems) {
+        const cleanItem = strip(item, ITEM_JOIN);
+        await enqueue("order_items", "insert", item.id, cleanItem);
+      }
+
+      // FIX: enqueue updated product stocks so other devices see qty changes
+      for (const item of items) {
+        if (item.product_id) {
+          const prod = (
+            await db.query(`SELECT * FROM products WHERE id=?`, [
+              item.product_id,
+            ])
+          ).values?.[0];
+          if (prod)
+            await enqueue(
+              "products",
+              "update",
+              prod.id,
+              strip(prod, PRODUCT_JOIN),
+            );
+        }
+      }
+
       return { ok: true, id: orderId };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -653,6 +705,7 @@ export const useMobileStore = () => {
       const order = (await db.query(`SELECT * FROM orders WHERE id=?`, [id]))
         .values?.[0];
       if (!order) return { ok: false, error: "Not found" };
+
       const status = deriveStatus(
         order.total_sp,
         paid_amount,
@@ -663,18 +716,29 @@ export const useMobileStore = () => {
         `UPDATE orders SET paid_amount=?, display_currency=?, status=?, updated_at=datetime('now') WHERE id=?`,
         [paid_amount, display_currency, status, id],
       );
+
       if (status === "paid") {
         await db.run(
-          `UPDATE dues SET paid=1, paid_at=datetime('now') WHERE order_id=? AND paid=0`,
+          `UPDATE dues SET paid=1, paid_at=datetime('now'), updated_at=datetime('now') WHERE order_id=? AND paid=0`,
           [id],
         );
+        // FIX: enqueue the updated dues so desktop sees them
+        const updatedDues =
+          (
+            await db.query(`SELECT * FROM dues WHERE order_id=? AND paid=1`, [
+              id,
+            ])
+          ).values ?? [];
+        for (const due of updatedDues) {
+          await enqueue("dues", "update", due.id, strip(due, DUE_JOIN));
+        }
       }
-      await enqueue("orders", "update", id, {
-        id,
-        paid_amount,
-        display_currency,
-        status,
-      });
+
+      // FIX: send full order row so updated_at propagates
+      const updatedOrder = (
+        await db.query(`SELECT * FROM orders WHERE id=?`, [id])
+      ).values?.[0];
+      await enqueue("orders", "update", id, strip(updatedOrder, ORDER_JOIN));
       return { ok: true, status };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -696,8 +760,22 @@ export const useMobileStore = () => {
           `UPDATE products SET stock=stock+?, updated_at=datetime('now') WHERE id=?`,
           [item.quantity, item.product_id],
         );
+        // FIX: enqueue stock restoration so other devices update
+        const prod = (
+          await db.query(`SELECT * FROM products WHERE id=?`, [item.product_id])
+        ).values?.[0];
+        if (prod)
+          await enqueue(
+            "products",
+            "update",
+            prod.id,
+            strip(prod, PRODUCT_JOIN),
+          );
       }
-      await db.run(`UPDATE order_items SET _deleted=1 WHERE order_id=?`, [id]);
+      await db.run(
+        `UPDATE order_items SET _deleted=1, updated_at=datetime('now') WHERE order_id=?`,
+        [id],
+      );
       await db.run(
         `UPDATE orders SET _deleted=1, updated_at=datetime('now') WHERE id=?`,
         [id],
@@ -738,7 +816,6 @@ export const useMobileStore = () => {
         where += " AND date(d.created_at)<=?";
         params.push(dateTo);
       }
-
       const data =
         (
           await db.query(
@@ -768,23 +845,22 @@ export const useMobileStore = () => {
       const db = await getMobileDb();
       const rate = await getDollarRate();
       const amountSp = due.currency === "USD" ? due.amount * rate : due.amount;
+      const cleanDue = strip(due, DUE_JOIN);
 
       if (due.id) {
         await db.run(
           `UPDATE dues SET customer_id=?, order_id=?, amount=?, currency=?, amount_sp=?, description=?, due_date=?, updated_at=datetime('now') WHERE id=?`,
           [
-            due.customer_id,
-            due.order_id,
-            due.amount,
-            due.currency,
+            cleanDue.customer_id,
+            cleanDue.order_id,
+            cleanDue.amount,
+            cleanDue.currency,
             amountSp,
-            due.description,
-            due.due_date,
+            cleanDue.description,
+            cleanDue.due_date,
             due.id,
           ],
         );
-        // Strip any join fields (customer_name, customer_phone) before enqueue
-        const cleanDue = stripFields(due, ["customer_name", "customer_phone"]);
         await enqueue("dues", "update", due.id, {
           ...cleanDue,
           amount_sp: amountSp,
@@ -794,17 +870,16 @@ export const useMobileStore = () => {
         const r = await db.run(
           `INSERT INTO dues (customer_id, order_id, amount, currency, amount_sp, description, due_date) VALUES (?, ?, ?, ?, ?, ?, ?)`,
           [
-            due.customer_id,
-            due.order_id,
-            due.amount,
-            due.currency,
+            cleanDue.customer_id,
+            cleanDue.order_id,
+            cleanDue.amount,
+            cleanDue.currency,
             amountSp,
-            due.description,
-            due.due_date,
+            cleanDue.description,
+            cleanDue.due_date,
           ],
         );
         const id = r.changes?.lastId;
-        const cleanDue = stripFields(due, ["customer_name", "customer_phone"]);
         await enqueue("dues", "insert", id, {
           ...cleanDue,
           id,
@@ -817,6 +892,9 @@ export const useMobileStore = () => {
     }
   };
 
+  // FIX: fetch full row after update so updated_at is included in payload
+  // Without updated_at in the payload, server upsert won't update updated_at
+  // → desktop pull (WHERE updated_at > since) never sees the change
   const markDuePaid = async (id) => {
     try {
       const db = await getMobileDb();
@@ -824,7 +902,14 @@ export const useMobileStore = () => {
         `UPDATE dues SET paid=1, paid_at=datetime('now'), updated_at=datetime('now') WHERE id=?`,
         [id],
       );
-      await enqueue("dues", "update", id, { id, paid: 1 });
+      const full = (await db.query(`SELECT * FROM dues WHERE id=?`, [id]))
+        .values?.[0];
+      await enqueue(
+        "dues",
+        "update",
+        id,
+        strip(full, DUE_JOIN) ?? { id, paid: 1 },
+      );
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -939,14 +1024,10 @@ export const useMobileStore = () => {
       const rate = await getDollarRate();
       const reportCurrency = await getReportCurrency();
       const divisor = reportCurrency === "USD" ? rate : 1;
-
       const daily = (
         (
           await db.query(
-            `SELECT date(order_date) as day, SUM(total_sp) as total_sp, COUNT(*) as orders,
-         SUM(CASE WHEN status='paid' THEN total_sp ELSE 0 END) as paid_sp,
-         SUM(CASE WHEN status!='paid' THEN total_sp ELSE 0 END) as unpaid_sp
-         FROM orders WHERE _deleted=0 AND date(order_date) BETWEEN ? AND ? GROUP BY day ORDER BY day`,
+            `SELECT date(order_date) as day, SUM(total_sp) as total_sp, COUNT(*) as orders, SUM(CASE WHEN status='paid' THEN total_sp ELSE 0 END) as paid_sp, SUM(CASE WHEN status!='paid' THEN total_sp ELSE 0 END) as unpaid_sp FROM orders WHERE _deleted=0 AND date(order_date) BETWEEN ? AND ? GROUP BY day ORDER BY day`,
             [f, t],
           )
         ).values ?? []
@@ -956,7 +1037,6 @@ export const useMobileStore = () => {
         paid: row.paid_sp / divisor,
         unpaid: row.unpaid_sp / divisor,
       }));
-
       const byStatus =
         (
           await db.query(
@@ -964,30 +1044,21 @@ export const useMobileStore = () => {
             [f, t],
           )
         ).values ?? [];
-
       const topProducts = (
         (
           await db.query(
-            `SELECT oi.product_name, SUM(oi.quantity) as qty, SUM(oi.line_total_sp) as total_sp
-         FROM order_items oi JOIN orders o ON oi.order_id=o.id
-         WHERE oi._deleted=0 AND o._deleted=0 AND date(o.order_date) BETWEEN ? AND ?
-         GROUP BY oi.product_name ORDER BY qty DESC LIMIT 10`,
+            `SELECT oi.product_name, SUM(oi.quantity) as qty, SUM(oi.line_total_sp) as total_sp FROM order_items oi JOIN orders o ON oi.order_id=o.id WHERE oi._deleted=0 AND o._deleted=0 AND date(o.order_date) BETWEEN ? AND ? GROUP BY oi.product_name ORDER BY qty DESC LIMIT 10`,
             [f, t],
           )
         ).values ?? []
       ).map((row) => ({ ...row, total: row.total_sp / divisor }));
-
       const totals =
         (
           await db.query(
-            `SELECT COALESCE(SUM(total_sp),0) as revenue_sp, COUNT(*) as orders,
-         COALESCE(SUM(CASE WHEN status='paid' THEN total_sp ELSE 0 END),0) as paid_sp,
-         COALESCE(SUM(CASE WHEN status!='paid' THEN total_sp ELSE 0 END),0) as unpaid_sp
-         FROM orders WHERE _deleted=0 AND date(order_date) BETWEEN ? AND ?`,
+            `SELECT COALESCE(SUM(total_sp),0) as revenue_sp, COUNT(*) as orders, COALESCE(SUM(CASE WHEN status='paid' THEN total_sp ELSE 0 END),0) as paid_sp, COALESCE(SUM(CASE WHEN status!='paid' THEN total_sp ELSE 0 END),0) as unpaid_sp FROM orders WHERE _deleted=0 AND date(order_date) BETWEEN ? AND ?`,
             [f, t],
           )
         ).values?.[0] ?? {};
-
       return {
         ok: true,
         data: {
@@ -1016,30 +1087,20 @@ export const useMobileStore = () => {
       const rate = await getDollarRate();
       const reportCurrency = await getReportCurrency();
       const divisor = reportCurrency === "USD" ? rate : 1;
-
       const summary =
         (
           await db.query(
-            `SELECT COUNT(*) as total_dues,
-         COALESCE(SUM(CASE WHEN paid=0 THEN amount_sp ELSE 0 END),0) as unpaid_sp,
-         COALESCE(SUM(CASE WHEN paid=1 THEN amount_sp ELSE 0 END),0) as paid_sp,
-         COUNT(CASE WHEN paid=0 THEN 1 END) as unpaid_count,
-         COUNT(CASE WHEN paid=1 THEN 1 END) as paid_count
-         FROM dues WHERE _deleted=0 AND date(created_at) BETWEEN ? AND ?`,
+            `SELECT COUNT(*) as total_dues, COALESCE(SUM(CASE WHEN paid=0 THEN amount_sp ELSE 0 END),0) as unpaid_sp, COALESCE(SUM(CASE WHEN paid=1 THEN amount_sp ELSE 0 END),0) as paid_sp, COUNT(CASE WHEN paid=0 THEN 1 END) as unpaid_count, COUNT(CASE WHEN paid=1 THEN 1 END) as paid_count FROM dues WHERE _deleted=0 AND date(created_at) BETWEEN ? AND ?`,
             [f, t],
           )
         ).values?.[0] ?? {};
-
       const topDebtors = (
         (
           await db.query(
-            `SELECT c.name, c.phone, COALESCE(SUM(d.amount_sp),0) as total_sp
-         FROM dues d JOIN customers c ON d.customer_id=c.id
-         WHERE d._deleted=0 AND d.paid=0 GROUP BY d.customer_id ORDER BY total_sp DESC LIMIT 10`,
+            `SELECT c.name, c.phone, COALESCE(SUM(d.amount_sp),0) as total_sp FROM dues d JOIN customers c ON d.customer_id=c.id WHERE d._deleted=0 AND d.paid=0 GROUP BY d.customer_id ORDER BY total_sp DESC LIMIT 10`,
           )
         ).values ?? []
       ).map((r) => ({ ...r, total: r.total_sp / divisor }));
-
       return {
         ok: true,
         data: {
@@ -1139,6 +1200,7 @@ export const useMobileStore = () => {
     }
   };
 
+  // FIX: properly quoted column names, safe updated_at check, handles all tables
   const applyRemoteRow = async ({ table, row }) => {
     try {
       const db = await getMobileDb();
@@ -1151,7 +1213,8 @@ export const useMobileStore = () => {
         "dues",
         "staff",
       ]);
-      if (!ALLOWED.has(table)) return { ok: false, error: "Unknown table" };
+      if (!ALLOWED.has(table))
+        return { ok: false, error: `Unknown table: ${table}` };
 
       const normalized = {};
       for (const [k, v] of Object.entries(row)) {
@@ -1161,59 +1224,64 @@ export const useMobileStore = () => {
           normalized[k] = v !== null ? Number(v) : null;
         else normalized[k] = v;
       }
+      if (!("id" in normalized)) return { ok: false, error: "Missing row.id" };
 
-      const existing = (
-        await db.query(`SELECT updated_at FROM "${table}" WHERE id=?`, [
-          normalized.id,
-        ])
-      ).values?.[0];
-      if (existing && normalized.updated_at) {
-        if (new Date(existing.updated_at) >= new Date(normalized.updated_at))
-          return { ok: true, skipped: true };
+      // Skip if local row is newer
+      try {
+        const existing = (
+          await db.query(`SELECT updated_at FROM "${table}" WHERE id=?`, [
+            normalized.id,
+          ])
+        ).values?.[0];
+        if (existing?.updated_at && normalized.updated_at) {
+          if (
+            new Date(existing.updated_at) >= new Date(normalized.updated_at)
+          ) {
+            return { ok: true, skipped: true };
+          }
+        }
+      } catch {
+        /* table may not exist yet — proceed */
       }
 
       const cols = Object.keys(normalized);
       const placeholders = cols.map(() => "?").join(", ");
+      const vals = cols.map((c) => normalized[c]);
 
-      // Disable FK checks during upsert — pull order may not match dependency order
-      await db.run("PRAGMA foreign_keys = OFF");
-      try {
-        await db.run(
-          `INSERT OR REPLACE INTO ${table} (${cols.join(", ")}) VALUES (${placeholders})`,
-          cols.map((c) => normalized[c]),
-        );
-      } finally {
-        await db.run("PRAGMA foreign_keys = ON");
-      }
-
+      await db.run(
+        `INSERT OR REPLACE INTO "${table}" (${cols
+          .map((c) => `"${c}"`)
+          .join(", ")}) VALUES (${placeholders})`,
+        vals,
+      );
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
     }
   };
 
-  // ── FETCH DOLLAR RATE (live API) ──────────────────────────────────────────
+  // ── FETCH DOLLAR RATE ─────────────────────────────────────────────────────
   const fetchDollarRate = async () => {
     const sources = [
       {
         url: "https://sp-dollar.com/api/rates",
-        extract: (json) => {
-          const rate = json?.usd?.sell ?? json?.USD?.sell ?? json?.dollar?.sell;
-          return rate ? { rate: Number(rate), isOfficial: false } : null;
+        extract: (j) => {
+          const r = j?.usd?.sell ?? j?.USD?.sell ?? j?.dollar?.sell;
+          return r ? { rate: Number(r), isOfficial: false } : null;
         },
       },
       {
         url: "https://www.lira-rate.com/api/v1/rates/syp",
-        extract: (json) => {
-          const rate = json?.sell ?? json?.rate ?? json?.value;
-          return rate ? { rate: Number(rate), isOfficial: false } : null;
+        extract: (j) => {
+          const r = j?.sell ?? j?.rate ?? j?.value;
+          return r ? { rate: Number(r), isOfficial: false } : null;
         },
       },
       {
         url: "https://api.exchangerate-api.com/v4/latest/USD",
-        extract: (json) => {
-          const rate = json?.rates?.SYP;
-          return rate ? { rate: Number(rate), isOfficial: true } : null;
+        extract: (j) => {
+          const r = j?.rates?.SYP;
+          return r ? { rate: Number(r), isOfficial: true } : null;
         },
       },
     ];

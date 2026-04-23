@@ -8,8 +8,8 @@
       back-to="/dashboard/orders"
       :is-rtl="locale === 'ar'"
       :actions="[
-        { label: $t('edit'), icon: 'mdi:pencil-outline', variant: 'outline' },
         {
+          key: 'delete',
           label: $t('delete'),
           icon: 'mdi:trash-can-outline',
           variant: 'error',
@@ -62,7 +62,7 @@
                 : order.paid_amount + " ل.س"
             }}</span>
           </div>
-          <div class="info-item" v-if="order.notes">
+          <div v-if="order.notes" class="info-item">
             <span class="info-label">{{ $t("notes") }}</span>
             <span class="info-value">{{ order.notes }}</span>
           </div>
@@ -96,24 +96,39 @@
       <!-- Items -->
       <div class="detail-card">
         <div class="detail-section-title">{{ $t("orderItems") }}</div>
-        <SharedUiTableDataTable
-          :columns="itemCols"
-          :data="order.items || []"
-          empty-icon="mdi:cart-outline"
-          empty-text="noItems"
-        >
-          <template #cell-sell_price_at_sale="{ row }">
-            {{ row.sell_price_at_sale }} {{ row.currency_at_sale }}
-          </template>
-          <template #cell-line_total_sp="{ row }">
-            {{ fmtSP(row.line_total_sp) }}
-          </template>
-        </SharedUiTableDataTable>
 
-        <div class="items-total-row">
-          <span>{{ $t("grandTotal") }}</span>
-          <strong>{{ fmtSP(order.total_sp) }}</strong>
+        <!-- Loading items -->
+        <div v-if="itemsLoading" class="items-loading">
+          <Icon name="mdi:loading" size="24" class="spin" />
         </div>
+
+        <!-- No items -->
+        <div v-else-if="!order.items?.length" class="items-empty">
+          <Icon name="mdi:cart-outline" size="36" />
+          <p>{{ $t("noItems") }}</p>
+        </div>
+
+        <!-- Items table -->
+        <template v-else>
+          <SharedUiTableDataTable
+            :columns="itemCols"
+            :data="order.items"
+            empty-icon="mdi:cart-outline"
+            empty-text="noItems"
+          >
+            <template #cell-sell_price_at_sale="{ row }">
+              {{ row.sell_price_at_sale }} {{ row.currency_at_sale }}
+            </template>
+            <template #cell-line_total_sp="{ row }">
+              {{ fmtSP(row.line_total_sp) }}
+            </template>
+          </SharedUiTableDataTable>
+
+          <div class="items-total-row">
+            <span>{{ $t("grandTotal") }}</span>
+            <strong>{{ fmtSP(order.total_sp) }}</strong>
+          </div>
+        </template>
       </div>
     </div>
 
@@ -129,14 +144,16 @@
           <SharedUiButtonBase
             variant="outline"
             @click="showDeleteModal = false"
-            >{{ $t("cancel") }}</SharedUiButtonBase
           >
+            {{ $t("cancel") }}
+          </SharedUiButtonBase>
           <SharedUiButtonBase
             variant="error"
             :loading="deleting"
             @click="doDelete"
-            >{{ $t("delete") }}</SharedUiButtonBase
           >
+            {{ $t("delete") }}
+          </SharedUiButtonBase>
         </div>
       </template>
     </SharedUiDialogAppModal>
@@ -153,7 +170,6 @@ definePageMeta({
   },
 });
 
-// ✅ Top-level
 const { getOrderById, deleteOrder, updateOrderPayment } = useStore();
 const route = useRoute();
 const { locale, t: $t } = useI18n();
@@ -161,6 +177,7 @@ const { $toast } = useNuxtApp();
 const currency = useCurrency();
 
 const loading = ref(true);
+const itemsLoading = ref(false);
 const order = ref(null);
 const showDeleteModal = ref(false);
 const deleting = ref(false);
@@ -176,7 +193,7 @@ const currencyOptions = [
 
 const itemCols = [
   { key: "product_name", label: "product" },
-  { key: "quantity", label: "qty", },
+  { key: "quantity", label: "qty" },
   { key: "sell_price_at_sale", label: "unitPrice", align: "end" },
   { key: "line_total_sp", label: "total", align: "end" },
 ];
@@ -186,7 +203,7 @@ const statusClass = (s) =>
     pending: "badge-warning",
     partly_paid: "badge-info",
     paid: "badge-success",
-  })[s] ?? "badge-secondary";
+  }[s] ?? "badge-secondary");
 
 const load = async () => {
   loading.value = true;
@@ -195,14 +212,28 @@ const load = async () => {
     order.value = r.data;
     payAmount.value = 0;
     payCurrency.value = r.data.display_currency;
+
+    // ── Fix: if items came back empty, retry once after 800ms ──────────────
+    // On mobile after sync, order_items may not be in SQLite yet on first render.
+    if (!r.data.items?.length) {
+      itemsLoading.value = true;
+      await new Promise((res) => setTimeout(res, 800));
+      const retry = await getOrderById(Number(route.params.id));
+      if (retry.ok) order.value = retry.data;
+      itemsLoading.value = false;
+    }
   }
   loading.value = false;
 };
 
-const handleAction = ({ icon }) => {
-  if (icon === "mdi:pencil-outline")
+// ── Fix: match by action.key not action.icon ────────────────────────────────
+const handleAction = (action) => {
+  if (action.key === "edit") {
     navigateTo("/dashboard/orders/" + route.params.id + "/edit");
-  if (icon === "mdi:trash-can-outline") showDeleteModal.value = true;
+  }
+  if (action.key === "delete") {
+    showDeleteModal.value = true;
+  }
 };
 
 const doDelete = async () => {
@@ -211,7 +242,9 @@ const doDelete = async () => {
   if (r.ok) {
     $toast.success($t("deleted"));
     navigateTo("/dashboard/orders");
-  } else $toast.error(r.error);
+  } else {
+    $toast.error(r.error);
+  }
   deleting.value = false;
 };
 
@@ -225,7 +258,9 @@ const doQuickPay = async () => {
   if (r.ok) {
     $toast.success($t("paymentRecorded"));
     load();
-  } else $toast.error(r.error);
+  } else {
+    $toast.error(r.error);
+  }
   paying.value = false;
 };
 
@@ -273,11 +308,11 @@ onMounted(async () => {
 .info-value {
   font-size: 0.9rem;
   color: var(--text-primary);
-}
-.info-value.strong {
-  font-weight: 700;
-  font-size: 1.1rem;
-  color: var(--primary);
+  &.strong {
+    font-weight: 700;
+    font-size: 1.1rem;
+    color: var(--primary);
+  }
 }
 .info-link {
   color: var(--primary);
@@ -322,7 +357,21 @@ onMounted(async () => {
   align-items: flex-end;
   flex-wrap: wrap;
 }
-
+.items-loading {
+  display: flex;
+  justify-content: center;
+  padding: 2rem;
+  color: var(--text-muted);
+}
+.items-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 2rem;
+  color: var(--text-muted);
+  text-align: center;
+}
 .items-total-row {
   display: flex;
   justify-content: flex-end;

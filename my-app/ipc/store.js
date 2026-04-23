@@ -13,17 +13,13 @@ export function registerStoreHandlers(db, ipcMain) {
     "staff",
   ]);
 
-  // ── Helper: strip computed/join fields before sync queue ──────────────────
-  // These fields come from SELECT JOINs and do not exist as real columns.
-  const PRODUCT_JOIN_FIELDS = new Set(["category_name"]);
-  const ORDER_JOIN_FIELDS = new Set([
-    "customer_name",
-    "customer_phone",
-    "item_count",
-  ]);
-  const DUE_JOIN_FIELDS = new Set(["customer_name", "customer_phone"]);
+  // ── Strip JOIN-computed fields before enqueueing ───────────────────────────
+  const PRODUCT_JOIN = new Set(["category_name"]);
+  const ORDER_JOIN = new Set(["customer_name", "customer_phone", "item_count"]);
+  const DUE_JOIN = new Set(["customer_name", "customer_phone"]);
+  const ITEM_JOIN = new Set(["current_stock"]);
 
-  const stripFields = (obj, fieldSet) => {
+  const strip = (obj, fieldSet) => {
     if (!obj || !fieldSet.size) return obj;
     const copy = { ...obj };
     for (const f of fieldSet) delete copy[f];
@@ -33,10 +29,7 @@ export function registerStoreHandlers(db, ipcMain) {
   // ── Helper: enqueue sync item ──────────────────────────────────────────────
   const enqueue = (table, operation, rowId, payload = null) => {
     db.prepare(
-      `
-      INSERT INTO sync_queue (table_name, operation, row_id, payload)
-      VALUES (?, ?, ?, ?)
-    `,
+      `INSERT INTO sync_queue (table_name, operation, row_id, payload) VALUES (?, ?, ?, ?)`,
     ).run(table, operation, rowId, payload ? JSON.stringify(payload) : null);
   };
 
@@ -48,13 +41,11 @@ export function registerStoreHandlers(db, ipcMain) {
     return parseFloat(row?.value ?? "15000") || 15000;
   };
 
-  // Convert any amount to SP
   const toSP = (amount, currency) => {
     if (currency === "USD") return amount * getDollarRate();
     return amount;
   };
 
-  // Derive order status from totals
   const deriveStatus = (totalSp, paidAmount, displayCurrency) => {
     const rate = getDollarRate();
     const paidSp = displayCurrency === "USD" ? paidAmount * rate : paidAmount;
@@ -63,7 +54,7 @@ export function registerStoreHandlers(db, ipcMain) {
     return "partly_paid";
   };
 
-  // ── STATS (Dashboard) ──────────────────────────────────────────────────────
+  // ── STATS ──────────────────────────────────────────────────────────────────
   ipcMain.handle("store:getStats", () => {
     try {
       const today = new Date().toISOString().slice(0, 10);
@@ -73,7 +64,6 @@ export function registerStoreHandlers(db, ipcMain) {
         db
           .prepare(`SELECT value FROM settings WHERE key='report_currency'`)
           .get()?.value ?? "SP";
-
       const totalProducts = db
         .prepare(
           `SELECT COUNT(*) as n FROM products WHERE _deleted=0 AND is_active=1`,
@@ -92,16 +82,11 @@ export function registerStoreHandlers(db, ipcMain) {
           `SELECT COUNT(*) as n FROM orders WHERE date(order_date)=? AND _deleted=0`,
         )
         .get(today).n;
-
       const monthRevSP = db
         .prepare(
-          `
-        SELECT COALESCE(SUM(total_sp), 0) as n FROM orders
-        WHERE status='paid' AND _deleted=0 AND order_date >= ?
-      `,
+          `SELECT COALESCE(SUM(total_sp), 0) as n FROM orders WHERE status='paid' AND _deleted=0 AND order_date >= ?`,
         )
         .get(firstOfMonth).n;
-
       const unpaidDues = db
         .prepare(`SELECT COUNT(*) as n FROM dues WHERE paid=0 AND _deleted=0`)
         .get().n;
@@ -110,12 +95,10 @@ export function registerStoreHandlers(db, ipcMain) {
           `SELECT COALESCE(SUM(amount_sp),0) as n FROM dues WHERE paid=0 AND _deleted=0`,
         )
         .get().n;
-
       const monthRev =
         reportCurrency === "USD" ? monthRevSP / rate : monthRevSP;
       const duesDisplay =
         reportCurrency === "USD" ? unpaidDuesAmount / rate : unpaidDuesAmount;
-
       return {
         ok: true,
         data: {
@@ -150,18 +133,14 @@ export function registerStoreHandlers(db, ipcMain) {
     try {
       if (cat.id) {
         db.prepare(
-          `
-          UPDATE categories SET name=@name, description=@description, updated_at=datetime('now') WHERE id=@id
-        `,
+          `UPDATE categories SET name=@name, description=@description, updated_at=datetime('now') WHERE id=@id`,
         ).run(cat);
         enqueue("categories", "update", cat.id, cat);
         return { ok: true, id: cat.id };
       } else {
         const r = db
           .prepare(
-            `
-          INSERT INTO categories (name, description) VALUES (@name, @description)
-        `,
+            `INSERT INTO categories (name, description) VALUES (@name, @description)`,
           )
           .run(cat);
         enqueue("categories", "insert", r.lastInsertRowid, {
@@ -215,19 +194,11 @@ export function registerStoreHandlers(db, ipcMain) {
         if (activeOnly) {
           where += " AND p.is_active=1";
         }
-
         const data = db
           .prepare(
-            `
-        SELECT p.*, c.name as category_name
-        FROM products p
-        LEFT JOIN categories c ON p.category_id=c.id
-        WHERE ${where}
-        ORDER BY p.name ASC LIMIT ? OFFSET ?
-      `,
+            `SELECT p.*, c.name as category_name FROM products p LEFT JOIN categories c ON p.category_id=c.id WHERE ${where} ORDER BY p.name ASC LIMIT ? OFFSET ?`,
           )
           .all(...params, limit, offset);
-
         const total = db
           .prepare(`SELECT COUNT(*) as n FROM products p WHERE ${where}`)
           .get(...params).n;
@@ -242,11 +213,7 @@ export function registerStoreHandlers(db, ipcMain) {
     try {
       const data = db
         .prepare(
-          `
-        SELECT p.*, c.name as category_name FROM products p
-        LEFT JOIN categories c ON p.category_id=c.id
-        WHERE p.id=? AND p._deleted=0
-      `,
+          `SELECT p.*, c.name as category_name FROM products p LEFT JOIN categories c ON p.category_id=c.id WHERE p.id=? AND p._deleted=0`,
         )
         .get(id);
       if (!data) return { ok: false, error: "Not found" };
@@ -258,31 +225,17 @@ export function registerStoreHandlers(db, ipcMain) {
 
   ipcMain.handle("store:saveProduct", (_, p) => {
     try {
-      // Strip JOIN-computed fields — not real columns in products table
-      const clean = stripFields(p, PRODUCT_JOIN_FIELDS);
+      const clean = strip(p, PRODUCT_JOIN);
       if (clean.id) {
         db.prepare(
-          `
-          UPDATE products SET
-            name=@name, description=@description, category_id=@category_id,
-            barcode=@barcode, buy_price=@buy_price, sell_price=@sell_price,
-            currency=@currency, stock=@stock, min_stock=@min_stock,
-            unit=@unit, image_url=@image_url, is_active=@is_active,
-            updated_at=datetime('now')
-          WHERE id=@id
-        `,
+          `UPDATE products SET name=@name, description=@description, category_id=@category_id, barcode=@barcode, buy_price=@buy_price, sell_price=@sell_price, currency=@currency, stock=@stock, min_stock=@min_stock, unit=@unit, image_url=@image_url, is_active=@is_active, updated_at=datetime('now') WHERE id=@id`,
         ).run(clean);
         enqueue("products", "update", clean.id, clean);
         return { ok: true, id: clean.id };
       } else {
         const r = db
           .prepare(
-            `
-          INSERT INTO products
-            (name, description, category_id, barcode, buy_price, sell_price, currency, stock, min_stock, unit, image_url, is_active)
-          VALUES
-            (@name, @description, @category_id, @barcode, @buy_price, @sell_price, @currency, @stock, @min_stock, @unit, @image_url, @is_active)
-        `,
+            `INSERT INTO products (name, description, category_id, barcode, buy_price, sell_price, currency, stock, min_stock, unit, image_url, is_active) VALUES (@name, @description, @category_id, @barcode, @buy_price, @sell_price, @currency, @stock, @min_stock, @unit, @image_url, @is_active)`,
           )
           .run(clean);
         enqueue("products", "insert", r.lastInsertRowid, {
@@ -311,15 +264,12 @@ export function registerStoreHandlers(db, ipcMain) {
   ipcMain.handle("store:adjustStock", (_, { id, delta }) => {
     try {
       db.prepare(
-        `
-        UPDATE products SET stock=MAX(0, stock + ?), updated_at=datetime('now') WHERE id=?
-      `,
+        `UPDATE products SET stock=MAX(0, stock + ?), updated_at=datetime('now') WHERE id=?`,
       ).run(delta, id);
-      const updated = db
-        .prepare(`SELECT stock FROM products WHERE id=?`)
-        .get(id);
-      enqueue("products", "update", id, { id, stock: updated.stock });
-      return { ok: true, stock: updated.stock };
+      // FIX: send full row so updated_at propagates
+      const full = db.prepare(`SELECT * FROM products WHERE id=?`).get(id);
+      enqueue("products", "update", id, strip(full, PRODUCT_JOIN));
+      return { ok: true, stock: full.stock };
     } catch (err) {
       return { ok: false, error: err.message };
     }
@@ -333,18 +283,12 @@ export function registerStoreHandlers(db, ipcMain) {
         const like = `%${search}%`;
         const data = db
           .prepare(
-            `
-        SELECT * FROM customers
-        WHERE _deleted=0 AND (name LIKE ? OR phone LIKE ?)
-        ORDER BY name ASC LIMIT ? OFFSET ?
-      `,
+            `SELECT * FROM customers WHERE _deleted=0 AND (name LIKE ? OR phone LIKE ?) ORDER BY name ASC LIMIT ? OFFSET ?`,
           )
           .all(like, like, limit, offset);
         const total = db
           .prepare(
-            `
-        SELECT COUNT(*) as n FROM customers WHERE _deleted=0 AND (name LIKE ? OR phone LIKE ?)
-      `,
+            `SELECT COUNT(*) as n FROM customers WHERE _deleted=0 AND (name LIKE ? OR phone LIKE ?)`,
           )
           .get(like, like).n;
         return { ok: true, data, total };
@@ -360,23 +304,16 @@ export function registerStoreHandlers(db, ipcMain) {
         .prepare(`SELECT * FROM customers WHERE id=? AND _deleted=0`)
         .get(id);
       if (!customer) return { ok: false, error: "Not found" };
-
       const orders = db
         .prepare(
-          `
-        SELECT * FROM orders WHERE customer_id=? AND _deleted=0 ORDER BY order_date DESC LIMIT 50
-      `,
+          `SELECT * FROM orders WHERE customer_id=? AND _deleted=0 ORDER BY order_date DESC LIMIT 50`,
         )
         .all(id);
-
       const dues = db
         .prepare(
-          `
-        SELECT * FROM dues WHERE customer_id=? AND _deleted=0 ORDER BY created_at DESC
-      `,
+          `SELECT * FROM dues WHERE customer_id=? AND _deleted=0 ORDER BY created_at DESC`,
         )
         .all(id);
-
       return { ok: true, data: { ...customer, orders, dues } };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -387,19 +324,14 @@ export function registerStoreHandlers(db, ipcMain) {
     try {
       if (c.id) {
         db.prepare(
-          `
-          UPDATE customers SET name=@name, phone=@phone, address=@address, notes=@notes, updated_at=datetime('now')
-          WHERE id=@id
-        `,
+          `UPDATE customers SET name=@name, phone=@phone, address=@address, notes=@notes, updated_at=datetime('now') WHERE id=@id`,
         ).run(c);
         enqueue("customers", "update", c.id, c);
         return { ok: true, id: c.id };
       } else {
         const r = db
           .prepare(
-            `
-          INSERT INTO customers (name, phone, address, notes) VALUES (@name, @phone, @address, @notes)
-        `,
+            `INSERT INTO customers (name, phone, address, notes) VALUES (@name, @phone, @address, @notes)`,
           )
           .run(c);
         enqueue("customers", "insert", r.lastInsertRowid, {
@@ -429,15 +361,9 @@ export function registerStoreHandlers(db, ipcMain) {
     try {
       const trimmed = (name ?? "").trim();
       if (!trimmed) return { ok: false, error: "Name is required" };
-
       let customer = db
-        .prepare(
-          `
-        SELECT * FROM customers WHERE name=? AND _deleted=0 LIMIT 1
-      `,
-        )
+        .prepare(`SELECT * FROM customers WHERE name=? AND _deleted=0 LIMIT 1`)
         .get(trimmed);
-
       if (!customer) {
         const r = db
           .prepare(`INSERT INTO customers (name) VALUES (?)`)
@@ -447,7 +373,6 @@ export function registerStoreHandlers(db, ipcMain) {
           .get(r.lastInsertRowid);
         enqueue("customers", "insert", r.lastInsertRowid, customer);
       }
-
       return { ok: true, data: customer };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -492,28 +417,16 @@ export function registerStoreHandlers(db, ipcMain) {
           where += " AND date(o.order_date)<=?";
           params.push(dateTo);
         }
-
         const data = db
           .prepare(
-            `
-        SELECT o.*, c.name as customer_name, c.phone as customer_phone,
-               (SELECT COUNT(*) FROM order_items WHERE order_id=o.id AND _deleted=0) as item_count
-        FROM orders o
-        LEFT JOIN customers c ON o.customer_id=c.id
-        WHERE ${where}
-        ORDER BY o.order_date DESC LIMIT ? OFFSET ?
-      `,
+            `SELECT o.*, c.name as customer_name, c.phone as customer_phone, (SELECT COUNT(*) FROM order_items WHERE order_id=o.id AND _deleted=0) as item_count FROM orders o LEFT JOIN customers c ON o.customer_id=c.id WHERE ${where} ORDER BY o.order_date DESC LIMIT ? OFFSET ?`,
           )
           .all(...params, limit, offset);
-
         const total = db
           .prepare(
-            `
-        SELECT COUNT(*) as n FROM orders o LEFT JOIN customers c ON o.customer_id=c.id WHERE ${where}
-      `,
+            `SELECT COUNT(*) as n FROM orders o LEFT JOIN customers c ON o.customer_id=c.id WHERE ${where}`,
           )
           .get(...params).n;
-
         return { ok: true, data, total };
       } catch (err) {
         return { ok: false, error: err.message };
@@ -525,25 +438,15 @@ export function registerStoreHandlers(db, ipcMain) {
     try {
       const order = db
         .prepare(
-          `
-        SELECT o.*, c.name as customer_name, c.phone as customer_phone
-        FROM orders o LEFT JOIN customers c ON o.customer_id=c.id
-        WHERE o.id=? AND o._deleted=0
-      `,
+          `SELECT o.*, c.name as customer_name, c.phone as customer_phone FROM orders o LEFT JOIN customers c ON o.customer_id=c.id WHERE o.id=? AND o._deleted=0`,
         )
         .get(id);
       if (!order) return { ok: false, error: "Not found" };
-
       order.items = db
         .prepare(
-          `
-        SELECT oi.*, p.stock as current_stock FROM order_items oi
-        LEFT JOIN products p ON oi.product_id=p.id
-        WHERE oi.order_id=? AND oi._deleted=0
-      `,
+          `SELECT oi.*, p.stock as current_stock FROM order_items oi LEFT JOIN products p ON oi.product_id=p.id WHERE oi.order_id=? AND oi._deleted=0`,
         )
         .all(id);
-
       return { ok: true, data: order };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -553,17 +456,14 @@ export function registerStoreHandlers(db, ipcMain) {
   ipcMain.handle("store:saveOrder", (_, { order, items }) => {
     try {
       const rate = getDollarRate();
-
       const saveOrderAndItems = db.transaction(() => {
         let orderId = order.id;
-
         let totalSp = 0;
         for (const item of items) {
-          const lineSP = toSP(
+          totalSp += toSP(
             item.sell_price_at_sale * item.quantity,
             item.currency_at_sale,
           );
-          totalSp += lineSP;
         }
         const totalUsd = totalSp / rate;
         const status = deriveStatus(
@@ -571,6 +471,7 @@ export function registerStoreHandlers(db, ipcMain) {
           order.paid_amount ?? 0,
           order.display_currency ?? "SP",
         );
+        const cleanOrder = strip(order, ORDER_JOIN);
 
         if (orderId) {
           const oldItems = db
@@ -583,20 +484,11 @@ export function registerStoreHandlers(db, ipcMain) {
               `UPDATE products SET stock=stock+?, updated_at=datetime('now') WHERE id=?`,
             ).run(oi.quantity, oi.product_id);
           }
-          db.prepare(`UPDATE order_items SET _deleted=1 WHERE order_id=?`).run(
-            orderId,
-          );
-
-          // Strip join fields before passing to named-param query
-          const cleanOrder = stripFields(order, ORDER_JOIN_FIELDS);
           db.prepare(
-            `
-            UPDATE orders SET
-              customer_id=@customer_id, order_date=@order_date, status=@status,
-              total_sp=@total_sp, total_usd=@total_usd, paid_amount=@paid_amount,
-              display_currency=@display_currency, notes=@notes, updated_at=datetime('now')
-            WHERE id=@id
-          `,
+            `UPDATE order_items SET _deleted=1, updated_at=datetime('now') WHERE order_id=?`,
+          ).run(orderId);
+          db.prepare(
+            `UPDATE orders SET customer_id=@customer_id, order_date=@order_date, status=@status, total_sp=@total_sp, total_usd=@total_usd, paid_amount=@paid_amount, display_currency=@display_currency, notes=@notes, updated_at=datetime('now') WHERE id=@id`,
           ).run({
             ...cleanOrder,
             status,
@@ -605,13 +497,9 @@ export function registerStoreHandlers(db, ipcMain) {
             id: orderId,
           });
         } else {
-          const cleanOrder = stripFields(order, ORDER_JOIN_FIELDS);
           const r = db
             .prepare(
-              `
-            INSERT INTO orders (customer_id, order_date, status, total_sp, total_usd, paid_amount, display_currency, notes)
-            VALUES (@customer_id, @order_date, @status, @total_sp, @total_usd, @paid_amount, @display_currency, @notes)
-          `,
+              `INSERT INTO orders (customer_id, order_date, status, total_sp, total_usd, paid_amount, display_currency, notes) VALUES (@customer_id, @order_date, @status, @total_sp, @total_usd, @paid_amount, @display_currency, @notes)`,
             )
             .run({
               ...cleanOrder,
@@ -628,10 +516,7 @@ export function registerStoreHandlers(db, ipcMain) {
             item.currency_at_sale,
           );
           db.prepare(
-            `
-            INSERT INTO order_items (order_id, product_id, product_name, quantity, sell_price_at_sale, currency_at_sale, line_total_sp)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-          `,
+            `INSERT INTO order_items (order_id, product_id, product_name, quantity, sell_price_at_sale, currency_at_sale, line_total_sp) VALUES (?, ?, ?, ?, ?, ?, ?)`,
           ).run(
             orderId,
             item.product_id,
@@ -641,7 +526,6 @@ export function registerStoreHandlers(db, ipcMain) {
             item.currency_at_sale,
             lineSP,
           );
-
           if (item.product_id) {
             db.prepare(
               `UPDATE products SET stock=MAX(0, stock - ?), updated_at=datetime('now') WHERE id=?`,
@@ -651,28 +535,23 @@ export function registerStoreHandlers(db, ipcMain) {
 
         if (order.customer_id) {
           db.prepare(
-            `
-            UPDATE customers SET
-              total_orders=(SELECT COUNT(*) FROM orders WHERE customer_id=? AND _deleted=0 AND status='paid'),
-              total_spent=(SELECT COALESCE(SUM(total_sp),0) FROM orders WHERE customer_id=? AND _deleted=0 AND status='paid'),
-              last_order=datetime('now'),
-              updated_at=datetime('now')
-            WHERE id=?
-          `,
+            `UPDATE customers SET total_orders=(SELECT COUNT(*) FROM orders WHERE customer_id=? AND _deleted=0 AND status='paid'), total_spent=(SELECT COALESCE(SUM(total_sp),0) FROM orders WHERE customer_id=? AND _deleted=0 AND status='paid'), last_order=datetime('now'), updated_at=datetime('now') WHERE id=?`,
           ).run(order.customer_id, order.customer_id, order.customer_id);
         }
 
         if (status === "paid") {
           db.prepare(
-            `
-            UPDATE dues SET paid=1, paid_at=datetime('now'), updated_at=datetime('now')
-            WHERE order_id=? AND paid=0
-          `,
+            `UPDATE dues SET paid=1, paid_at=datetime('now'), updated_at=datetime('now') WHERE order_id=? AND paid=0`,
           ).run(orderId);
+          // FIX: enqueue updated dues so mobile sees them
+          const updatedDues = db
+            .prepare(`SELECT * FROM dues WHERE order_id=? AND paid=1`)
+            .all(orderId);
+          for (const due of updatedDues)
+            enqueue("dues", "update", due.id, strip(due, DUE_JOIN));
         }
 
-        // Strip join fields before enqueueing
-        const cleanOrder = stripFields(order, ORDER_JOIN_FIELDS);
+        // Enqueue order
         enqueue("orders", order.id ? "update" : "insert", orderId, {
           ...cleanOrder,
           id: orderId,
@@ -680,6 +559,25 @@ export function registerStoreHandlers(db, ipcMain) {
           total_sp: totalSp,
           total_usd: totalUsd,
         });
+
+        // FIX: enqueue all order_items so they sync to mobile
+        const savedItems = db
+          .prepare(`SELECT * FROM order_items WHERE order_id=? AND _deleted=0`)
+          .all(orderId);
+        for (const item of savedItems)
+          enqueue("order_items", "insert", item.id, strip(item, ITEM_JOIN));
+
+        // FIX: enqueue updated product stocks so mobile sees qty changes
+        for (const item of items) {
+          if (item.product_id) {
+            const prod = db
+              .prepare(`SELECT * FROM products WHERE id=?`)
+              .get(item.product_id);
+            if (prod)
+              enqueue("products", "update", prod.id, strip(prod, PRODUCT_JOIN));
+          }
+        }
+
         return orderId;
       });
 
@@ -696,31 +594,30 @@ export function registerStoreHandlers(db, ipcMain) {
       try {
         const order = db.prepare(`SELECT * FROM orders WHERE id=?`).get(id);
         if (!order) return { ok: false, error: "Not found" };
-
         const status = deriveStatus(
           order.total_sp,
           paid_amount,
           display_currency,
         );
-
         db.prepare(
-          `
-        UPDATE orders SET paid_amount=?, display_currency=?, status=?, updated_at=datetime('now') WHERE id=?
-      `,
+          `UPDATE orders SET paid_amount=?, display_currency=?, status=?, updated_at=datetime('now') WHERE id=?`,
         ).run(paid_amount, display_currency, status, id);
 
         if (status === "paid") {
           db.prepare(
-            `UPDATE dues SET paid=1, paid_at=datetime('now') WHERE order_id=? AND paid=0`,
+            `UPDATE dues SET paid=1, paid_at=datetime('now'), updated_at=datetime('now') WHERE order_id=? AND paid=0`,
           ).run(id);
+          // FIX: enqueue updated dues so mobile sees them
+          const updatedDues = db
+            .prepare(`SELECT * FROM dues WHERE order_id=? AND paid=1`)
+            .all(id);
+          for (const due of updatedDues)
+            enqueue("dues", "update", due.id, strip(due, DUE_JOIN));
         }
 
-        enqueue("orders", "update", id, {
-          id,
-          paid_amount,
-          display_currency,
-          status,
-        });
+        // FIX: send full order row so updated_at propagates
+        const updated = db.prepare(`SELECT * FROM orders WHERE id=?`).get(id);
+        enqueue("orders", "update", id, strip(updated, ORDER_JOIN));
         return { ok: true, status };
       } catch (err) {
         return { ok: false, error: err.message };
@@ -738,10 +635,16 @@ export function registerStoreHandlers(db, ipcMain) {
           db.prepare(
             `UPDATE products SET stock=stock+?, updated_at=datetime('now') WHERE id=?`,
           ).run(item.quantity, item.product_id);
+          // FIX: enqueue stock restoration
+          const prod = db
+            .prepare(`SELECT * FROM products WHERE id=?`)
+            .get(item.product_id);
+          if (prod)
+            enqueue("products", "update", prod.id, strip(prod, PRODUCT_JOIN));
         }
-        db.prepare(`UPDATE order_items SET _deleted=1 WHERE order_id=?`).run(
-          id,
-        );
+        db.prepare(
+          `UPDATE order_items SET _deleted=1, updated_at=datetime('now') WHERE order_id=?`,
+        ).run(id);
         db.prepare(
           `UPDATE orders SET _deleted=1, updated_at=datetime('now') WHERE id=?`,
         ).run(id);
@@ -754,7 +657,7 @@ export function registerStoreHandlers(db, ipcMain) {
     }
   });
 
-  // ── DUES (ديون) ────────────────────────────────────────────────────────────
+  // ── DUES ───────────────────────────────────────────────────────────────────
   ipcMain.handle(
     "store:getDues",
     (
@@ -780,29 +683,19 @@ export function registerStoreHandlers(db, ipcMain) {
           where += " AND date(d.created_at)<=?";
           params.push(dateTo);
         }
-
         const data = db
           .prepare(
-            `
-        SELECT d.*, c.name as customer_name, c.phone as customer_phone
-        FROM dues d LEFT JOIN customers c ON d.customer_id=c.id
-        WHERE ${where} ORDER BY d.created_at DESC LIMIT ? OFFSET ?
-      `,
+            `SELECT d.*, c.name as customer_name, c.phone as customer_phone FROM dues d LEFT JOIN customers c ON d.customer_id=c.id WHERE ${where} ORDER BY d.created_at DESC LIMIT ? OFFSET ?`,
           )
           .all(...params, limit, offset);
-
         const total = db
           .prepare(`SELECT COUNT(*) as n FROM dues d WHERE ${where}`)
           .get(...params).n;
         const totalUnpaidSp = db
           .prepare(
-            `
-        SELECT COALESCE(SUM(amount_sp),0) as n FROM dues d WHERE d._deleted=0 AND d.paid=0
-        ${customerId ? " AND d.customer_id=" + customerId : ""}
-      `,
+            `SELECT COALESCE(SUM(amount_sp),0) as n FROM dues d WHERE d._deleted=0 AND d.paid=0${customerId ? " AND d.customer_id=" + customerId : ""}`,
           )
           .get().n;
-
         return { ok: true, data, total, totalUnpaidSp };
       } catch (err) {
         return { ok: false, error: err.message };
@@ -812,29 +705,18 @@ export function registerStoreHandlers(db, ipcMain) {
 
   ipcMain.handle("store:saveDue", (_, due) => {
     try {
-      const rate = getDollarRate();
       const amountSp = toSP(due.amount, due.currency);
-      // Strip join fields before enqueueing
-      const cleanDue = stripFields(due, DUE_JOIN_FIELDS);
-
+      const cleanDue = strip(due, DUE_JOIN);
       if (due.id) {
         db.prepare(
-          `
-          UPDATE dues SET customer_id=@customer_id, order_id=@order_id, amount=@amount,
-          currency=@currency, amount_sp=@amount_sp, description=@description,
-          due_date=@due_date, updated_at=datetime('now')
-          WHERE id=@id
-        `,
+          `UPDATE dues SET customer_id=@customer_id, order_id=@order_id, amount=@amount, currency=@currency, amount_sp=@amount_sp, description=@description, due_date=@due_date, updated_at=datetime('now') WHERE id=@id`,
         ).run({ ...cleanDue, amount_sp: amountSp });
         enqueue("dues", "update", due.id, { ...cleanDue, amount_sp: amountSp });
         return { ok: true, id: due.id };
       } else {
         const r = db
           .prepare(
-            `
-          INSERT INTO dues (customer_id, order_id, amount, currency, amount_sp, description, due_date)
-          VALUES (@customer_id, @order_id, @amount, @currency, @amount_sp, @description, @due_date)
-        `,
+            `INSERT INTO dues (customer_id, order_id, amount, currency, amount_sp, description, due_date) VALUES (@customer_id, @order_id, @amount, @currency, @amount_sp, @description, @due_date)`,
           )
           .run({ ...cleanDue, amount_sp: amountSp });
         enqueue("dues", "insert", r.lastInsertRowid, {
@@ -849,12 +731,15 @@ export function registerStoreHandlers(db, ipcMain) {
     }
   });
 
+  // FIX: send full row so updated_at is in payload → server sets updated_at=NOW()
+  // → other device pull query (WHERE updated_at > since) picks it up
   ipcMain.handle("store:markDuePaid", (_, id) => {
     try {
       db.prepare(
         `UPDATE dues SET paid=1, paid_at=datetime('now'), updated_at=datetime('now') WHERE id=?`,
       ).run(id);
-      enqueue("dues", "update", id, { id, paid: 1 });
+      const full = db.prepare(`SELECT * FROM dues WHERE id=?`).get(id);
+      enqueue("dues", "update", id, strip(full, DUE_JOIN) ?? { id, paid: 1 });
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -879,11 +764,7 @@ export function registerStoreHandlers(db, ipcMain) {
       const like = `%${search}%`;
       const data = db
         .prepare(
-          `
-        SELECT id, full_name, username, role, phone, email, is_active, created_at
-        FROM staff WHERE _deleted=0 AND (full_name LIKE ? OR username LIKE ?)
-        ORDER BY full_name
-      `,
+          `SELECT id, full_name, username, role, phone, email, is_active, created_at FROM staff WHERE _deleted=0 AND (full_name LIKE ? OR username LIKE ?) ORDER BY full_name`,
         )
         .all(like, like);
       return { ok: true, data };
@@ -897,19 +778,11 @@ export function registerStoreHandlers(db, ipcMain) {
       if (s.id) {
         if (s.password) {
           db.prepare(
-            `
-            UPDATE staff SET full_name=@full_name, username=@username, password=@password,
-            role=@role, phone=@phone, email=@email, is_active=@is_active, updated_at=datetime('now')
-            WHERE id=@id
-          `,
+            `UPDATE staff SET full_name=@full_name, username=@username, password=@password, role=@role, phone=@phone, email=@email, is_active=@is_active, updated_at=datetime('now') WHERE id=@id`,
           ).run(s);
         } else {
           db.prepare(
-            `
-            UPDATE staff SET full_name=@full_name, username=@username,
-            role=@role, phone=@phone, email=@email, is_active=@is_active, updated_at=datetime('now')
-            WHERE id=@id
-          `,
+            `UPDATE staff SET full_name=@full_name, username=@username, role=@role, phone=@phone, email=@email, is_active=@is_active, updated_at=datetime('now') WHERE id=@id`,
           ).run(s);
         }
         enqueue("staff", "update", s.id, { ...s, password: undefined });
@@ -917,10 +790,7 @@ export function registerStoreHandlers(db, ipcMain) {
       } else {
         const r = db
           .prepare(
-            `
-          INSERT INTO staff (full_name, username, password, role, phone, email, is_active)
-          VALUES (@full_name, @username, @password, @role, @phone, @email, @is_active)
-        `,
+            `INSERT INTO staff (full_name, username, password, role, phone, email, is_active) VALUES (@full_name, @username, @password, @role, @phone, @email, @is_active)`,
           )
           .run(s);
         enqueue("staff", "insert", r.lastInsertRowid, {
@@ -955,18 +825,9 @@ export function registerStoreHandlers(db, ipcMain) {
         db
           .prepare(`SELECT value FROM settings WHERE key='report_currency'`)
           .get()?.value ?? "SP";
-
       const daily = db
         .prepare(
-          `
-        SELECT date(order_date) as day,
-               SUM(total_sp) as total_sp,
-               COUNT(*) as orders,
-               SUM(CASE WHEN status='paid' THEN total_sp ELSE 0 END) as paid_sp,
-               SUM(CASE WHEN status!='paid' THEN total_sp ELSE 0 END) as unpaid_sp
-        FROM orders WHERE _deleted=0 AND date(order_date) BETWEEN ? AND ?
-        GROUP BY day ORDER BY day
-      `,
+          `SELECT date(order_date) as day, SUM(total_sp) as total_sp, COUNT(*) as orders, SUM(CASE WHEN status='paid' THEN total_sp ELSE 0 END) as paid_sp, SUM(CASE WHEN status!='paid' THEN total_sp ELSE 0 END) as unpaid_sp FROM orders WHERE _deleted=0 AND date(order_date) BETWEEN ? AND ? GROUP BY day ORDER BY day`,
         )
         .all(f, t)
         .map((row) => ({
@@ -976,46 +837,25 @@ export function registerStoreHandlers(db, ipcMain) {
           unpaid:
             reportCurrency === "USD" ? row.unpaid_sp / rate : row.unpaid_sp,
         }));
-
       const byStatus = db
         .prepare(
-          `
-        SELECT status, COUNT(*) as count, SUM(total_sp) as total_sp
-        FROM orders WHERE _deleted=0 AND date(order_date) BETWEEN ? AND ?
-        GROUP BY status
-      `,
+          `SELECT status, COUNT(*) as count, SUM(total_sp) as total_sp FROM orders WHERE _deleted=0 AND date(order_date) BETWEEN ? AND ? GROUP BY status`,
         )
         .all(f, t);
-
       const topProducts = db
         .prepare(
-          `
-        SELECT oi.product_name, SUM(oi.quantity) as qty, SUM(oi.line_total_sp) as total_sp
-        FROM order_items oi
-        JOIN orders o ON oi.order_id=o.id
-        WHERE oi._deleted=0 AND o._deleted=0 AND date(o.order_date) BETWEEN ? AND ?
-        GROUP BY oi.product_name ORDER BY qty DESC LIMIT 10
-      `,
+          `SELECT oi.product_name, SUM(oi.quantity) as qty, SUM(oi.line_total_sp) as total_sp FROM order_items oi JOIN orders o ON oi.order_id=o.id WHERE oi._deleted=0 AND o._deleted=0 AND date(o.order_date) BETWEEN ? AND ? GROUP BY oi.product_name ORDER BY qty DESC LIMIT 10`,
         )
         .all(f, t)
         .map((row) => ({
           ...row,
           total: reportCurrency === "USD" ? row.total_sp / rate : row.total_sp,
         }));
-
       const totals = db
         .prepare(
-          `
-        SELECT
-          COALESCE(SUM(total_sp), 0) as revenue_sp,
-          COUNT(*) as orders,
-          COALESCE(SUM(CASE WHEN status='paid' THEN total_sp ELSE 0 END), 0) as paid_sp,
-          COALESCE(SUM(CASE WHEN status!='paid' THEN total_sp ELSE 0 END), 0) as unpaid_sp
-        FROM orders WHERE _deleted=0 AND date(order_date) BETWEEN ? AND ?
-      `,
+          `SELECT COALESCE(SUM(total_sp), 0) as revenue_sp, COUNT(*) as orders, COALESCE(SUM(CASE WHEN status='paid' THEN total_sp ELSE 0 END), 0) as paid_sp, COALESCE(SUM(CASE WHEN status!='paid' THEN total_sp ELSE 0 END), 0) as unpaid_sp FROM orders WHERE _deleted=0 AND date(order_date) BETWEEN ? AND ?`,
         )
         .get(f, t);
-
       const divisor = reportCurrency === "USD" ? rate : 1;
       return {
         ok: true,
@@ -1047,33 +887,17 @@ export function registerStoreHandlers(db, ipcMain) {
           .prepare(`SELECT value FROM settings WHERE key='report_currency'`)
           .get()?.value ?? "SP";
       const divisor = reportCurrency === "USD" ? rate : 1;
-
       const summary = db
         .prepare(
-          `
-        SELECT
-          COUNT(*) as total_dues,
-          COALESCE(SUM(CASE WHEN paid=0 THEN amount_sp ELSE 0 END), 0) as unpaid_sp,
-          COALESCE(SUM(CASE WHEN paid=1 THEN amount_sp ELSE 0 END), 0) as paid_sp,
-          COUNT(CASE WHEN paid=0 THEN 1 END) as unpaid_count,
-          COUNT(CASE WHEN paid=1 THEN 1 END) as paid_count
-        FROM dues WHERE _deleted=0 AND date(created_at) BETWEEN ? AND ?
-      `,
+          `SELECT COUNT(*) as total_dues, COALESCE(SUM(CASE WHEN paid=0 THEN amount_sp ELSE 0 END), 0) as unpaid_sp, COALESCE(SUM(CASE WHEN paid=1 THEN amount_sp ELSE 0 END), 0) as paid_sp, COUNT(CASE WHEN paid=0 THEN 1 END) as unpaid_count, COUNT(CASE WHEN paid=1 THEN 1 END) as paid_count FROM dues WHERE _deleted=0 AND date(created_at) BETWEEN ? AND ?`,
         )
         .get(f, t);
-
       const topDebtors = db
         .prepare(
-          `
-        SELECT c.name, c.phone, COALESCE(SUM(d.amount_sp),0) as total_sp
-        FROM dues d JOIN customers c ON d.customer_id=c.id
-        WHERE d._deleted=0 AND d.paid=0
-        GROUP BY d.customer_id ORDER BY total_sp DESC LIMIT 10
-      `,
+          `SELECT c.name, c.phone, COALESCE(SUM(d.amount_sp),0) as total_sp FROM dues d JOIN customers c ON d.customer_id=c.id WHERE d._deleted=0 AND d.paid=0 GROUP BY d.customer_id ORDER BY total_sp DESC LIMIT 10`,
         )
         .all()
         .map((r) => ({ ...r, total: r.total_sp / divisor }));
-
       return {
         ok: true,
         data: {
@@ -1106,10 +930,7 @@ export function registerStoreHandlers(db, ipcMain) {
   ipcMain.handle("store:setSetting", (_, { key, value }) => {
     try {
       db.prepare(
-        `
-        INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
-        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
-      `,
+        `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
       ).run(key, value);
       return { ok: true };
     } catch (err) {
@@ -1121,27 +942,26 @@ export function registerStoreHandlers(db, ipcMain) {
     const sources = [
       {
         url: "https://sp-dollar.com/api/rates",
-        extract: (json) => {
-          const rate = json?.usd?.sell ?? json?.USD?.sell ?? json?.dollar?.sell;
-          return rate ? { rate: Number(rate), isOfficial: false } : null;
+        extract: (j) => {
+          const r = j?.usd?.sell ?? j?.USD?.sell ?? j?.dollar?.sell;
+          return r ? { rate: Number(r), isOfficial: false } : null;
         },
       },
       {
         url: "https://www.lira-rate.com/api/v1/rates/syp",
-        extract: (json) => {
-          const rate = json?.sell ?? json?.rate ?? json?.value;
-          return rate ? { rate: Number(rate), isOfficial: false } : null;
+        extract: (j) => {
+          const r = j?.sell ?? j?.rate ?? j?.value;
+          return r ? { rate: Number(r), isOfficial: false } : null;
         },
       },
       {
         url: "https://api.exchangerate-api.com/v4/latest/USD",
-        extract: (json) => {
-          const rate = json?.rates?.SYP;
-          return rate ? { rate: Number(rate), isOfficial: true } : null;
+        extract: (j) => {
+          const r = j?.rates?.SYP;
+          return r ? { rate: Number(r), isOfficial: true } : null;
         },
       },
     ];
-
     for (const source of sources) {
       try {
         const res = await fetch(source.url, {
@@ -1150,14 +970,11 @@ export function registerStoreHandlers(db, ipcMain) {
         if (!res.ok) continue;
         const json = await res.json();
         const result = source.extract(json);
-        if (result?.rate && result.rate > 100) {
-          return { ok: true, ...result };
-        }
+        if (result?.rate && result.rate > 100) return { ok: true, ...result };
       } catch {
-        // try next source
+        /* try next */
       }
     }
-
     return { ok: false, error: "Could not fetch rate from any source" };
   });
 
@@ -1166,11 +983,7 @@ export function registerStoreHandlers(db, ipcMain) {
     try {
       const data = db
         .prepare(
-          `
-        SELECT * FROM sync_queue
-        WHERE synced_at IS NULL AND (retry_count IS NULL OR retry_count < 5)
-        ORDER BY id ASC LIMIT 500
-      `,
+          `SELECT * FROM sync_queue WHERE synced_at IS NULL AND (retry_count IS NULL OR retry_count < 5) ORDER BY id ASC LIMIT 500`,
         )
         .all();
       return { ok: true, data };
@@ -1209,10 +1022,7 @@ export function registerStoreHandlers(db, ipcMain) {
   ipcMain.handle("store:setLastSyncedAt", (_, iso) => {
     try {
       db.prepare(
-        `
-        INSERT INTO sync_meta (key, value) VALUES ('last_synced_at', ?)
-        ON CONFLICT(key) DO UPDATE SET value=excluded.value
-      `,
+        `INSERT INTO sync_meta (key, value) VALUES ('last_synced_at', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
       ).run(iso);
       return { ok: true };
     } catch (err) {
@@ -1224,7 +1034,6 @@ export function registerStoreHandlers(db, ipcMain) {
     try {
       if (!ALLOWED_TABLES.has(table))
         return { ok: false, error: `Unknown table: ${table}` };
-
       const normalized = {};
       for (const [k, v] of Object.entries(row)) {
         if (k === "synced_at") continue;
@@ -1234,20 +1043,17 @@ export function registerStoreHandlers(db, ipcMain) {
         else normalized[k] = v;
       }
       if (!("id" in normalized)) return { ok: false, error: "Missing row.id" };
-
       const existing = db
         .prepare(`SELECT updated_at FROM "${table}" WHERE id=?`)
         .get(normalized.id);
-      if (existing && normalized.updated_at) {
+      if (existing?.updated_at && normalized.updated_at) {
         if (new Date(existing.updated_at) >= new Date(normalized.updated_at))
           return { ok: true, skipped: true };
       }
-
       const cols = Object.keys(normalized);
       const colList = cols.map((c) => `"${c}"`).join(", ");
       const placeholders = cols.map(() => "?").join(", ");
       const vals = cols.map((c) => normalized[c]);
-
       db.prepare("PRAGMA foreign_keys = OFF").run();
       try {
         db.prepare(
@@ -1256,7 +1062,6 @@ export function registerStoreHandlers(db, ipcMain) {
       } finally {
         db.prepare("PRAGMA foreign_keys = ON").run();
       }
-
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };

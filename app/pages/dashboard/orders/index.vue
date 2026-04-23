@@ -86,13 +86,7 @@
           >
             <Icon name="mdi:eye-outline" />
           </button>
-          <button
-            class="action-btn"
-            :title="$t('edit')"
-            @click.stop="navigateTo('/dashboard/orders/' + row.id + '/edit')"
-          >
-            <Icon name="mdi:pencil-outline" />
-          </button>
+
           <button
             class="action-btn danger"
             :title="$t('delete')"
@@ -183,7 +177,7 @@ const statusClass = (s) =>
     pending: "badge-warning",
     partly_paid: "badge-info",
     paid: "badge-success",
-  })[s] ?? "badge-secondary";
+  }[s] ?? "badge-secondary");
 
 const load = async () => {
   loading.value = true;
