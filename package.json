@@ -14,6 +14,7 @@
     "@capacitor/android": "^8.3.1",
     "@capacitor/cli": "^8.3.1",
     "@capacitor/core": "^8.3.1",
+    "@capacitor/device": "^8.0.2",
     "@capacitor/http": "^0.0.2",
     "@capacitor/ios": "^8.3.1",
     "@capacitor/preferences": "^7.0.4",

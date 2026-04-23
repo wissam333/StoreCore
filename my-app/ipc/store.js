@@ -33,7 +33,15 @@ export function registerStoreHandlers(db, ipcMain) {
     ).run(table, operation, rowId, payload ? JSON.stringify(payload) : null);
   };
 
-  // ── Helper: get dollar rate from settings ──────────────────────────────────
+  // ── Helper: read back a freshly-written row ────────────────────────────────
+  // Always use this for enqueue payloads on UPDATE so that the fresh updated_at
+  // is in the payload. If the server upsert receives the old updated_at it won't
+  // bump the server's updated_at → the other device's pull (WHERE updated_at > since)
+  // will miss the row entirely.
+  const freshRow = (table, id) =>
+    db.prepare(`SELECT * FROM "${table}" WHERE id=?`).get(id) ?? null;
+
+  // ── Helper: dollar rate ───────────────────────────────────────────────────
   const getDollarRate = () => {
     const row = db
       .prepare(`SELECT value FROM settings WHERE key='dollar_rate'`)
@@ -41,10 +49,8 @@ export function registerStoreHandlers(db, ipcMain) {
     return parseFloat(row?.value ?? "15000") || 15000;
   };
 
-  const toSP = (amount, currency) => {
-    if (currency === "USD") return amount * getDollarRate();
-    return amount;
-  };
+  const toSP = (amount, currency) =>
+    currency === "USD" ? amount * getDollarRate() : amount;
 
   const deriveStatus = (totalSp, paidAmount, displayCurrency) => {
     const rate = getDollarRate();
@@ -135,7 +141,9 @@ export function registerStoreHandlers(db, ipcMain) {
         db.prepare(
           `UPDATE categories SET name=@name, description=@description, updated_at=datetime('now') WHERE id=@id`,
         ).run(cat);
-        enqueue("categories", "update", cat.id, cat);
+        // FIX: fresh row so updated_at propagates to the other device's pull
+        const fresh = freshRow("categories", cat.id);
+        enqueue("categories", "update", cat.id, fresh);
         return { ok: true, id: cat.id };
       } else {
         const r = db
@@ -143,10 +151,8 @@ export function registerStoreHandlers(db, ipcMain) {
             `INSERT INTO categories (name, description) VALUES (@name, @description)`,
           )
           .run(cat);
-        enqueue("categories", "insert", r.lastInsertRowid, {
-          ...cat,
-          id: r.lastInsertRowid,
-        });
+        const fresh = freshRow("categories", r.lastInsertRowid);
+        enqueue("categories", "insert", r.lastInsertRowid, fresh);
         return { ok: true, id: r.lastInsertRowid };
       }
     } catch (err) {
@@ -230,7 +236,9 @@ export function registerStoreHandlers(db, ipcMain) {
         db.prepare(
           `UPDATE products SET name=@name, description=@description, category_id=@category_id, barcode=@barcode, buy_price=@buy_price, sell_price=@sell_price, currency=@currency, stock=@stock, min_stock=@min_stock, unit=@unit, image_url=@image_url, is_active=@is_active, updated_at=datetime('now') WHERE id=@id`,
         ).run(clean);
-        enqueue("products", "update", clean.id, clean);
+        // FIX: fresh row so updated_at propagates
+        const fresh = freshRow("products", clean.id);
+        enqueue("products", "update", clean.id, strip(fresh, PRODUCT_JOIN));
         return { ok: true, id: clean.id };
       } else {
         const r = db
@@ -238,10 +246,13 @@ export function registerStoreHandlers(db, ipcMain) {
             `INSERT INTO products (name, description, category_id, barcode, buy_price, sell_price, currency, stock, min_stock, unit, image_url, is_active) VALUES (@name, @description, @category_id, @barcode, @buy_price, @sell_price, @currency, @stock, @min_stock, @unit, @image_url, @is_active)`,
           )
           .run(clean);
-        enqueue("products", "insert", r.lastInsertRowid, {
-          ...clean,
-          id: r.lastInsertRowid,
-        });
+        const fresh = freshRow("products", r.lastInsertRowid);
+        enqueue(
+          "products",
+          "insert",
+          r.lastInsertRowid,
+          strip(fresh, PRODUCT_JOIN),
+        );
         return { ok: true, id: r.lastInsertRowid };
       }
     } catch (err) {
@@ -266,10 +277,10 @@ export function registerStoreHandlers(db, ipcMain) {
       db.prepare(
         `UPDATE products SET stock=MAX(0, stock + ?), updated_at=datetime('now') WHERE id=?`,
       ).run(delta, id);
-      // FIX: send full row so updated_at propagates
-      const full = db.prepare(`SELECT * FROM products WHERE id=?`).get(id);
-      enqueue("products", "update", id, strip(full, PRODUCT_JOIN));
-      return { ok: true, stock: full.stock };
+      // FIX: fresh row so updated_at propagates
+      const fresh = freshRow("products", id);
+      enqueue("products", "update", id, strip(fresh, PRODUCT_JOIN));
+      return { ok: true, stock: fresh?.stock };
     } catch (err) {
       return { ok: false, error: err.message };
     }
@@ -326,7 +337,9 @@ export function registerStoreHandlers(db, ipcMain) {
         db.prepare(
           `UPDATE customers SET name=@name, phone=@phone, address=@address, notes=@notes, updated_at=datetime('now') WHERE id=@id`,
         ).run(c);
-        enqueue("customers", "update", c.id, c);
+        // FIX: fresh row so updated_at propagates
+        const fresh = freshRow("customers", c.id);
+        enqueue("customers", "update", c.id, fresh);
         return { ok: true, id: c.id };
       } else {
         const r = db
@@ -334,10 +347,8 @@ export function registerStoreHandlers(db, ipcMain) {
             `INSERT INTO customers (name, phone, address, notes) VALUES (@name, @phone, @address, @notes)`,
           )
           .run(c);
-        enqueue("customers", "insert", r.lastInsertRowid, {
-          ...c,
-          id: r.lastInsertRowid,
-        });
+        const fresh = freshRow("customers", r.lastInsertRowid);
+        enqueue("customers", "insert", r.lastInsertRowid, fresh);
         return { ok: true, id: r.lastInsertRowid };
       }
     } catch (err) {
@@ -368,9 +379,7 @@ export function registerStoreHandlers(db, ipcMain) {
         const r = db
           .prepare(`INSERT INTO customers (name) VALUES (?)`)
           .run(trimmed);
-        customer = db
-          .prepare(`SELECT * FROM customers WHERE id=?`)
-          .get(r.lastInsertRowid);
+        customer = freshRow("customers", r.lastInsertRowid);
         enqueue("customers", "insert", r.lastInsertRowid, customer);
       }
       return { ok: true, data: customer };
@@ -459,12 +468,11 @@ export function registerStoreHandlers(db, ipcMain) {
       const saveOrderAndItems = db.transaction(() => {
         let orderId = order.id;
         let totalSp = 0;
-        for (const item of items) {
+        for (const item of items)
           totalSp += toSP(
             item.sell_price_at_sale * item.quantity,
             item.currency_at_sale,
           );
-        }
         const totalUsd = totalSp / rate;
         const status = deriveStatus(
           totalSp,
@@ -474,19 +482,33 @@ export function registerStoreHandlers(db, ipcMain) {
         const cleanOrder = strip(order, ORDER_JOIN);
 
         if (orderId) {
+          // ── EDIT PATH ──────────────────────────────────────────────────────
+          // 1. Collect old items before soft-deleting them
           const oldItems = db
             .prepare(
               `SELECT * FROM order_items WHERE order_id=? AND _deleted=0`,
             )
             .all(orderId);
+
+          // 2. Restore stock
+          for (const oi of oldItems) {
+            if (oi.product_id)
+              db.prepare(
+                `UPDATE products SET stock=stock+?, updated_at=datetime('now') WHERE id=?`,
+              ).run(oi.quantity, oi.product_id);
+          }
+
+          // 3. Soft-delete old items and enqueue each as "delete"
+          //    FIX: previously missing — old items were never enqueued for deletion
+          //    so the other device kept showing stale line items after an edit
           for (const oi of oldItems) {
             db.prepare(
-              `UPDATE products SET stock=stock+?, updated_at=datetime('now') WHERE id=?`,
-            ).run(oi.quantity, oi.product_id);
+              `UPDATE order_items SET _deleted=1, updated_at=datetime('now') WHERE id=?`,
+            ).run(oi.id);
+            enqueue("order_items", "delete", oi.id);
           }
-          db.prepare(
-            `UPDATE order_items SET _deleted=1, updated_at=datetime('now') WHERE order_id=?`,
-          ).run(orderId);
+
+          // 4. Update order row
           db.prepare(
             `UPDATE orders SET customer_id=@customer_id, order_date=@order_date, status=@status, total_sp=@total_sp, total_usd=@total_usd, paid_amount=@paid_amount, display_currency=@display_currency, notes=@notes, updated_at=datetime('now') WHERE id=@id`,
           ).run({
@@ -497,6 +519,7 @@ export function registerStoreHandlers(db, ipcMain) {
             id: orderId,
           });
         } else {
+          // ── INSERT PATH ────────────────────────────────────────────────────
           const r = db
             .prepare(
               `INSERT INTO orders (customer_id, order_date, status, total_sp, total_usd, paid_amount, display_currency, notes) VALUES (@customer_id, @order_date, @status, @total_sp, @total_usd, @paid_amount, @display_currency, @notes)`,
@@ -510,40 +533,59 @@ export function registerStoreHandlers(db, ipcMain) {
           orderId = r.lastInsertRowid;
         }
 
+        // 5. Insert new items + decrease stock
+        //    Every new item row has a new autoincrement id — always enqueue as "insert"
+        const affectedProductIds = new Set();
         for (const item of items) {
           const lineSP = toSP(
             item.sell_price_at_sale * item.quantity,
             item.currency_at_sale,
           );
-          db.prepare(
-            `INSERT INTO order_items (order_id, product_id, product_name, quantity, sell_price_at_sale, currency_at_sale, line_total_sp) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          ).run(
-            orderId,
-            item.product_id,
-            item.product_name,
-            item.quantity,
-            item.sell_price_at_sale,
-            item.currency_at_sale,
-            lineSP,
-          );
+          const ins = db
+            .prepare(
+              `INSERT INTO order_items (order_id, product_id, product_name, quantity, sell_price_at_sale, currency_at_sale, line_total_sp) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              orderId,
+              item.product_id,
+              item.product_name,
+              item.quantity,
+              item.sell_price_at_sale,
+              item.currency_at_sale,
+              lineSP,
+            );
           if (item.product_id) {
             db.prepare(
               `UPDATE products SET stock=MAX(0, stock - ?), updated_at=datetime('now') WHERE id=?`,
             ).run(item.quantity, item.product_id);
+            affectedProductIds.add(item.product_id);
           }
+          // Enqueue new item with fresh row (correct id + timestamps)
+          const freshItem = freshRow("order_items", ins.lastInsertRowid);
+          if (freshItem)
+            enqueue(
+              "order_items",
+              "insert",
+              ins.lastInsertRowid,
+              strip(freshItem, ITEM_JOIN),
+            );
         }
 
+        // 6. Update customer stats
         if (order.customer_id) {
           db.prepare(
             `UPDATE customers SET total_orders=(SELECT COUNT(*) FROM orders WHERE customer_id=? AND _deleted=0 AND status='paid'), total_spent=(SELECT COALESCE(SUM(total_sp),0) FROM orders WHERE customer_id=? AND _deleted=0 AND status='paid'), last_order=datetime('now'), updated_at=datetime('now') WHERE id=?`,
           ).run(order.customer_id, order.customer_id, order.customer_id);
+          const freshCust = freshRow("customers", order.customer_id);
+          if (freshCust)
+            enqueue("customers", "update", order.customer_id, freshCust);
         }
 
+        // 7. Auto-pay linked dues
         if (status === "paid") {
           db.prepare(
             `UPDATE dues SET paid=1, paid_at=datetime('now'), updated_at=datetime('now') WHERE order_id=? AND paid=0`,
           ).run(orderId);
-          // FIX: enqueue updated dues so mobile sees them
           const updatedDues = db
             .prepare(`SELECT * FROM dues WHERE order_id=? AND paid=1`)
             .all(orderId);
@@ -551,31 +593,20 @@ export function registerStoreHandlers(db, ipcMain) {
             enqueue("dues", "update", due.id, strip(due, DUE_JOIN));
         }
 
-        // Enqueue order
-        enqueue("orders", order.id ? "update" : "insert", orderId, {
-          ...cleanOrder,
-          id: orderId,
-          status,
-          total_sp: totalSp,
-          total_usd: totalUsd,
-        });
+        // 8. Enqueue order — fresh row so updated_at is current
+        const freshOrder = freshRow("orders", orderId);
+        enqueue(
+          "orders",
+          order.id ? "update" : "insert",
+          orderId,
+          strip(freshOrder, ORDER_JOIN),
+        );
 
-        // FIX: enqueue all order_items so they sync to mobile
-        const savedItems = db
-          .prepare(`SELECT * FROM order_items WHERE order_id=? AND _deleted=0`)
-          .all(orderId);
-        for (const item of savedItems)
-          enqueue("order_items", "insert", item.id, strip(item, ITEM_JOIN));
-
-        // FIX: enqueue updated product stocks so mobile sees qty changes
-        for (const item of items) {
-          if (item.product_id) {
-            const prod = db
-              .prepare(`SELECT * FROM products WHERE id=?`)
-              .get(item.product_id);
-            if (prod)
-              enqueue("products", "update", prod.id, strip(prod, PRODUCT_JOIN));
-          }
+        // 9. Enqueue updated product stocks
+        for (const pid of affectedProductIds) {
+          const prod = freshRow("products", pid);
+          if (prod)
+            enqueue("products", "update", pid, strip(prod, PRODUCT_JOIN));
         }
 
         return orderId;
@@ -607,7 +638,6 @@ export function registerStoreHandlers(db, ipcMain) {
           db.prepare(
             `UPDATE dues SET paid=1, paid_at=datetime('now'), updated_at=datetime('now') WHERE order_id=? AND paid=0`,
           ).run(id);
-          // FIX: enqueue updated dues so mobile sees them
           const updatedDues = db
             .prepare(`SELECT * FROM dues WHERE order_id=? AND paid=1`)
             .all(id);
@@ -616,8 +646,8 @@ export function registerStoreHandlers(db, ipcMain) {
         }
 
         // FIX: send full order row so updated_at propagates
-        const updated = db.prepare(`SELECT * FROM orders WHERE id=?`).get(id);
-        enqueue("orders", "update", id, strip(updated, ORDER_JOIN));
+        const freshOrder = freshRow("orders", id);
+        enqueue("orders", "update", id, strip(freshOrder, ORDER_JOIN));
         return { ok: true, status };
       } catch (err) {
         return { ok: false, error: err.message };
@@ -632,19 +662,19 @@ export function registerStoreHandlers(db, ipcMain) {
           .prepare(`SELECT * FROM order_items WHERE order_id=? AND _deleted=0`)
           .all(id);
         for (const item of items) {
+          if (item.product_id) {
+            db.prepare(
+              `UPDATE products SET stock=stock+?, updated_at=datetime('now') WHERE id=?`,
+            ).run(item.quantity, item.product_id);
+            const prod = freshRow("products", item.product_id);
+            if (prod)
+              enqueue("products", "update", prod.id, strip(prod, PRODUCT_JOIN));
+          }
           db.prepare(
-            `UPDATE products SET stock=stock+?, updated_at=datetime('now') WHERE id=?`,
-          ).run(item.quantity, item.product_id);
-          // FIX: enqueue stock restoration
-          const prod = db
-            .prepare(`SELECT * FROM products WHERE id=?`)
-            .get(item.product_id);
-          if (prod)
-            enqueue("products", "update", prod.id, strip(prod, PRODUCT_JOIN));
+            `UPDATE order_items SET _deleted=1, updated_at=datetime('now') WHERE id=?`,
+          ).run(item.id);
+          enqueue("order_items", "delete", item.id);
         }
-        db.prepare(
-          `UPDATE order_items SET _deleted=1, updated_at=datetime('now') WHERE order_id=?`,
-        ).run(id);
         db.prepare(
           `UPDATE orders SET _deleted=1, updated_at=datetime('now') WHERE id=?`,
         ).run(id);
@@ -711,7 +741,9 @@ export function registerStoreHandlers(db, ipcMain) {
         db.prepare(
           `UPDATE dues SET customer_id=@customer_id, order_id=@order_id, amount=@amount, currency=@currency, amount_sp=@amount_sp, description=@description, due_date=@due_date, updated_at=datetime('now') WHERE id=@id`,
         ).run({ ...cleanDue, amount_sp: amountSp });
-        enqueue("dues", "update", due.id, { ...cleanDue, amount_sp: amountSp });
+        // FIX: fresh row so updated_at propagates
+        const fresh = freshRow("dues", due.id);
+        enqueue("dues", "update", due.id, strip(fresh, DUE_JOIN));
         return { ok: true, id: due.id };
       } else {
         const r = db
@@ -719,11 +751,8 @@ export function registerStoreHandlers(db, ipcMain) {
             `INSERT INTO dues (customer_id, order_id, amount, currency, amount_sp, description, due_date) VALUES (@customer_id, @order_id, @amount, @currency, @amount_sp, @description, @due_date)`,
           )
           .run({ ...cleanDue, amount_sp: amountSp });
-        enqueue("dues", "insert", r.lastInsertRowid, {
-          ...cleanDue,
-          id: r.lastInsertRowid,
-          amount_sp: amountSp,
-        });
+        const fresh = freshRow("dues", r.lastInsertRowid);
+        enqueue("dues", "insert", r.lastInsertRowid, strip(fresh, DUE_JOIN));
         return { ok: true, id: r.lastInsertRowid };
       }
     } catch (err) {
@@ -731,15 +760,14 @@ export function registerStoreHandlers(db, ipcMain) {
     }
   });
 
-  // FIX: send full row so updated_at is in payload → server sets updated_at=NOW()
-  // → other device pull query (WHERE updated_at > since) picks it up
   ipcMain.handle("store:markDuePaid", (_, id) => {
     try {
       db.prepare(
         `UPDATE dues SET paid=1, paid_at=datetime('now'), updated_at=datetime('now') WHERE id=?`,
       ).run(id);
-      const full = db.prepare(`SELECT * FROM dues WHERE id=?`).get(id);
-      enqueue("dues", "update", id, strip(full, DUE_JOIN) ?? { id, paid: 1 });
+      // FIX: fresh row so updated_at propagates
+      const fresh = freshRow("dues", id);
+      enqueue("dues", "update", id, strip(fresh, DUE_JOIN));
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -785,7 +813,14 @@ export function registerStoreHandlers(db, ipcMain) {
             `UPDATE staff SET full_name=@full_name, username=@username, role=@role, phone=@phone, email=@email, is_active=@is_active, updated_at=datetime('now') WHERE id=@id`,
           ).run(s);
         }
-        enqueue("staff", "update", s.id, { ...s, password: undefined });
+        // FIX: fresh row, strip password
+        const fresh = freshRow("staff", s.id);
+        enqueue(
+          "staff",
+          "update",
+          s.id,
+          fresh ? { ...fresh, password: undefined } : { id: s.id },
+        );
         return { ok: true, id: s.id };
       } else {
         const r = db
@@ -793,11 +828,15 @@ export function registerStoreHandlers(db, ipcMain) {
             `INSERT INTO staff (full_name, username, password, role, phone, email, is_active) VALUES (@full_name, @username, @password, @role, @phone, @email, @is_active)`,
           )
           .run(s);
-        enqueue("staff", "insert", r.lastInsertRowid, {
-          ...s,
-          id: r.lastInsertRowid,
-          password: undefined,
-        });
+        const fresh = freshRow("staff", r.lastInsertRowid);
+        enqueue(
+          "staff",
+          "insert",
+          r.lastInsertRowid,
+          fresh
+            ? { ...fresh, password: undefined }
+            : { id: r.lastInsertRowid, ...s, password: undefined },
+        );
         return { ok: true, id: r.lastInsertRowid };
       }
     } catch (err) {

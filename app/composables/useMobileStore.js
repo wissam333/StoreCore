@@ -39,21 +39,27 @@ export const useMobileStore = () => {
   // These come from SELECT JOINs and are NOT real columns — sending them to
   // the server causes upsert to write them into columns that don't exist.
   const PRODUCT_JOIN = ["category_name"];
-  const ORDER_JOIN = [
-    "customer_name",
-    "customer_phone",
-    "item_count",
-    "current_stock",
-    "current_name",
-  ];
+  const ORDER_JOIN = ["customer_name", "customer_phone", "item_count"];
   const DUE_JOIN = ["customer_name", "customer_phone"];
-  const ITEM_JOIN = ["current_stock", "current_name"];
+  const ITEM_JOIN = ["current_stock"];
 
   const strip = (obj, fields) => {
     if (!obj) return obj;
     const copy = { ...obj };
     for (const f of fields) delete copy[f];
     return copy;
+  };
+
+  // Re-read a row from DB so the payload always carries the freshly-written
+  // updated_at. This is critical: if the enqueue payload has a stale/missing
+  // updated_at the server upsert won't bump it past the other device's
+  // watermark → the other device's pull (WHERE updated_at > since) misses it.
+  const freshRow = async (table, id) => {
+    const db = await getMobileDb();
+    return (
+      (await db.query(`SELECT * FROM "${table}" WHERE id=?`, [id]))
+        .values?.[0] ?? null
+    );
   };
 
   // ── STATS ──────────────────────────────────────────────────────────────────
@@ -144,7 +150,10 @@ export const useMobileStore = () => {
           `UPDATE categories SET name=?, description=?, updated_at=datetime('now') WHERE id=?`,
           [cat.name, cat.description, cat.id],
         );
-        await enqueue("categories", "update", cat.id, cat);
+        // FIX: read back the fresh row — payload must have the new updated_at
+        // so the server bumps updated_at past the other device's watermark
+        const fresh = await freshRow("categories", cat.id);
+        await enqueue("categories", "update", cat.id, fresh);
         return { ok: true, id: cat.id };
       } else {
         const r = await db.run(
@@ -152,7 +161,8 @@ export const useMobileStore = () => {
           [cat.name, cat.description],
         );
         const id = r.changes?.lastId;
-        await enqueue("categories", "insert", id, { ...cat, id });
+        const fresh = await freshRow("categories", id);
+        await enqueue("categories", "insert", id, fresh);
         return { ok: true, id };
       }
     } catch (err) {
@@ -256,7 +266,14 @@ export const useMobileStore = () => {
             clean.id,
           ],
         );
-        await enqueue("products", "update", clean.id, clean);
+        // FIX: always enqueue the fresh DB row — input object may have stale/missing updated_at
+        const fresh = await freshRow("products", clean.id);
+        await enqueue(
+          "products",
+          "update",
+          clean.id,
+          strip(fresh, PRODUCT_JOIN),
+        );
         return { ok: true, id: clean.id };
       } else {
         const r = await db.run(
@@ -277,7 +294,8 @@ export const useMobileStore = () => {
           ],
         );
         const id = r.changes?.lastId;
-        await enqueue("products", "insert", id, { ...clean, id });
+        const fresh = await freshRow("products", id);
+        await enqueue("products", "insert", id, strip(fresh, PRODUCT_JOIN));
         return { ok: true, id };
       }
     } catch (err) {
@@ -306,11 +324,9 @@ export const useMobileStore = () => {
         `UPDATE products SET stock=MAX(0, stock + ?), updated_at=datetime('now') WHERE id=?`,
         [delta, id],
       );
-      // FIX: send full product row so updated_at propagates correctly
-      const full = (await db.query(`SELECT * FROM products WHERE id=?`, [id]))
-        .values?.[0];
-      await enqueue("products", "update", id, full ?? { id, stock: 0 });
-      return { ok: true, stock: full?.stock };
+      const fresh = await freshRow("products", id);
+      await enqueue("products", "update", id, strip(fresh, PRODUCT_JOIN));
+      return { ok: true, stock: fresh?.stock };
     } catch (err) {
       return { ok: false, error: err.message };
     }
@@ -377,7 +393,9 @@ export const useMobileStore = () => {
           `UPDATE customers SET name=?, phone=?, address=?, notes=?, updated_at=datetime('now') WHERE id=?`,
           [c.name, c.phone, c.address, c.notes, c.id],
         );
-        await enqueue("customers", "update", c.id, c);
+        // FIX: fresh row so updated_at is current
+        const fresh = await freshRow("customers", c.id);
+        await enqueue("customers", "update", c.id, fresh);
         return { ok: true, id: c.id };
       } else {
         const r = await db.run(
@@ -385,7 +403,8 @@ export const useMobileStore = () => {
           [c.name, c.phone, c.address, c.notes],
         );
         const id = r.changes?.lastId;
-        await enqueue("customers", "insert", id, { ...c, id });
+        const fresh = await freshRow("customers", id);
+        await enqueue("customers", "insert", id, fresh);
         return { ok: true, id };
       }
     } catch (err) {
@@ -501,21 +520,15 @@ export const useMobileStore = () => {
         )
       ).values?.[0];
       if (!order) return { ok: false, error: "Not found" };
-
-      // FIX: product_name is a snapshot on the item — never depends on products table
-      // LEFT JOIN products only for current_stock (edit form) — won't drop rows if product missing
       order.items =
         (
           await db.query(
             `SELECT oi.*, p.stock AS current_stock
-         FROM order_items oi
-         LEFT JOIN products p ON oi.product_id = p.id
-         WHERE oi.order_id = ? AND oi._deleted = 0
-         ORDER BY oi.id ASC`,
+         FROM order_items oi LEFT JOIN products p ON oi.product_id = p.id
+         WHERE oi.order_id = ? AND oi._deleted = 0 ORDER BY oi.id ASC`,
             [id],
           )
         ).values ?? [];
-
       return { ok: true, data: order };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -546,6 +559,8 @@ export const useMobileStore = () => {
       let orderId = order.id;
 
       if (orderId) {
+        // ── EDIT PATH ────────────────────────────────────────────────────────
+        // 1. Read old items BEFORE soft-deleting them
         const oldItems =
           (
             await db.query(
@@ -553,32 +568,45 @@ export const useMobileStore = () => {
               [orderId],
             )
           ).values ?? [];
+
+        // 2. Restore old stock
+        for (const oi of oldItems) {
+          if (oi.product_id) {
+            await db.run(
+              `UPDATE products SET stock=stock+?, updated_at=datetime('now') WHERE id=?`,
+              [oi.quantity, oi.product_id],
+            );
+          }
+        }
+
+        // 3. Soft-delete old items and enqueue each deletion
+        //    FIX: previously items were never enqueued as "delete" on edit →
+        //    other device kept showing stale items
         for (const oi of oldItems) {
           await db.run(
-            `UPDATE products SET stock=stock+?, updated_at=datetime('now') WHERE id=?`,
-            [oi.quantity, oi.product_id],
+            `UPDATE order_items SET _deleted=1, updated_at=datetime('now') WHERE id=?`,
+            [oi.id],
           );
+          await enqueue("order_items", "delete", oi.id);
         }
-        await db.run(
-          `UPDATE order_items SET _deleted=1, updated_at=datetime('now') WHERE order_id=?`,
-          [orderId],
-        );
-        const cleanOrder = strip(order, ORDER_JOIN);
+
+        // 4. Update the order row
         await db.run(
           `UPDATE orders SET customer_id=?, order_date=?, status=?, total_sp=?, total_usd=?, paid_amount=?, display_currency=?, notes=?, updated_at=datetime('now') WHERE id=?`,
           [
-            cleanOrder.customer_id,
-            cleanOrder.order_date,
+            order.customer_id,
+            order.order_date,
             status,
             totalSp,
             totalUsd,
-            cleanOrder.paid_amount ?? 0,
-            cleanOrder.display_currency ?? "SP",
-            cleanOrder.notes,
+            order.paid_amount ?? 0,
+            order.display_currency ?? "SP",
+            order.notes,
             orderId,
           ],
         );
       } else {
+        // ── INSERT PATH ──────────────────────────────────────────────────────
         const r = await db.run(
           `INSERT INTO orders (customer_id, order_date, status, total_sp, total_usd, paid_amount, display_currency, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           [
@@ -595,13 +623,15 @@ export const useMobileStore = () => {
         orderId = r.changes?.lastId;
       }
 
-      // Insert new items + decrease stock
+      // 5. Insert new items + decrease stock
+      //    All newly inserted items get a fresh DB id — always enqueue as "insert"
+      const affectedProductIds = new Set();
       for (const item of items) {
         const lineSP =
           item.currency_at_sale === "USD"
             ? item.sell_price_at_sale * item.quantity * rate
             : item.sell_price_at_sale * item.quantity;
-        await db.run(
+        const ins = await db.run(
           `INSERT INTO order_items (order_id, product_id, product_name, quantity, sell_price_at_sale, currency_at_sale, line_total_sp) VALUES (?, ?, ?, ?, ?, ?, ?)`,
           [
             orderId,
@@ -618,10 +648,21 @@ export const useMobileStore = () => {
             `UPDATE products SET stock=MAX(0, stock - ?), updated_at=datetime('now') WHERE id=?`,
             [item.quantity, item.product_id],
           );
+          affectedProductIds.add(item.product_id);
         }
+        // Enqueue new item with fresh row (has correct id + timestamps)
+        const newItemId = ins.changes?.lastId;
+        const freshItem = await freshRow("order_items", newItemId);
+        if (freshItem)
+          await enqueue(
+            "order_items",
+            "insert",
+            newItemId,
+            strip(freshItem, ITEM_JOIN),
+          );
       }
 
-      // Update customer stats
+      // 6. Update customer stats
       if (order.customer_id) {
         await db.run(
           `UPDATE customers SET
@@ -631,65 +672,41 @@ export const useMobileStore = () => {
            WHERE id=?`,
           [order.customer_id, order.customer_id, order.customer_id],
         );
+        const freshCust = await freshRow("customers", order.customer_id);
+        if (freshCust)
+          await enqueue("customers", "update", order.customer_id, freshCust);
       }
 
-      // FIX: also mark linked dues paid AND enqueue those dues so desktop sees the change
+      // 7. Auto-pay linked dues
       if (status === "paid") {
         await db.run(
           `UPDATE dues SET paid=1, paid_at=datetime('now'), updated_at=datetime('now') WHERE order_id=? AND paid=0`,
           [orderId],
         );
-        // Enqueue each updated due so the change syncs to desktop
         const updatedDues =
           (
             await db.query(`SELECT * FROM dues WHERE order_id=? AND paid=1`, [
               orderId,
             ])
           ).values ?? [];
-        for (const due of updatedDues) {
+        for (const due of updatedDues)
           await enqueue("dues", "update", due.id, strip(due, DUE_JOIN));
-        }
       }
 
-      // Enqueue order — strip join fields
-      const cleanOrder = strip(order, ORDER_JOIN);
-      await enqueue("orders", order.id ? "update" : "insert", orderId, {
-        ...cleanOrder,
-        id: orderId,
-        status,
-        total_sp: totalSp,
-        total_usd: totalUsd,
-      });
+      // 8. Enqueue the order — fresh row so updated_at is current
+      const freshOrder = await freshRow("orders", orderId);
+      await enqueue(
+        "orders",
+        order.id ? "update" : "insert",
+        orderId,
+        strip(freshOrder, ORDER_JOIN),
+      );
 
-      // FIX: also enqueue all order_items so they sync to other devices
-      const savedItems =
-        (
-          await db.query(
-            `SELECT * FROM order_items WHERE order_id=? AND _deleted=0`,
-            [orderId],
-          )
-        ).values ?? [];
-      for (const item of savedItems) {
-        const cleanItem = strip(item, ITEM_JOIN);
-        await enqueue("order_items", "insert", item.id, cleanItem);
-      }
-
-      // FIX: enqueue updated product stocks so other devices see qty changes
-      for (const item of items) {
-        if (item.product_id) {
-          const prod = (
-            await db.query(`SELECT * FROM products WHERE id=?`, [
-              item.product_id,
-            ])
-          ).values?.[0];
-          if (prod)
-            await enqueue(
-              "products",
-              "update",
-              prod.id,
-              strip(prod, PRODUCT_JOIN),
-            );
-        }
+      // 9. Enqueue updated product stocks so other devices see qty changes
+      for (const pid of affectedProductIds) {
+        const prod = await freshRow("products", pid);
+        if (prod)
+          await enqueue("products", "update", pid, strip(prod, PRODUCT_JOIN));
       }
 
       return { ok: true, id: orderId };
@@ -722,23 +739,19 @@ export const useMobileStore = () => {
           `UPDATE dues SET paid=1, paid_at=datetime('now'), updated_at=datetime('now') WHERE order_id=? AND paid=0`,
           [id],
         );
-        // FIX: enqueue the updated dues so desktop sees them
         const updatedDues =
           (
             await db.query(`SELECT * FROM dues WHERE order_id=? AND paid=1`, [
               id,
             ])
           ).values ?? [];
-        for (const due of updatedDues) {
+        for (const due of updatedDues)
           await enqueue("dues", "update", due.id, strip(due, DUE_JOIN));
-        }
       }
 
-      // FIX: send full order row so updated_at propagates
-      const updatedOrder = (
-        await db.query(`SELECT * FROM orders WHERE id=?`, [id])
-      ).values?.[0];
-      await enqueue("orders", "update", id, strip(updatedOrder, ORDER_JOIN));
+      // FIX: read fresh order row — not a partial object — so updated_at propagates
+      const freshOrder = await freshRow("orders", id);
+      await enqueue("orders", "update", id, strip(freshOrder, ORDER_JOIN));
       return { ok: true, status };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -756,26 +769,26 @@ export const useMobileStore = () => {
           )
         ).values ?? [];
       for (const item of items) {
-        await db.run(
-          `UPDATE products SET stock=stock+?, updated_at=datetime('now') WHERE id=?`,
-          [item.quantity, item.product_id],
-        );
-        // FIX: enqueue stock restoration so other devices update
-        const prod = (
-          await db.query(`SELECT * FROM products WHERE id=?`, [item.product_id])
-        ).values?.[0];
-        if (prod)
-          await enqueue(
-            "products",
-            "update",
-            prod.id,
-            strip(prod, PRODUCT_JOIN),
+        if (item.product_id) {
+          await db.run(
+            `UPDATE products SET stock=stock+?, updated_at=datetime('now') WHERE id=?`,
+            [item.quantity, item.product_id],
           );
+          const prod = await freshRow("products", item.product_id);
+          if (prod)
+            await enqueue(
+              "products",
+              "update",
+              prod.id,
+              strip(prod, PRODUCT_JOIN),
+            );
+        }
+        await db.run(
+          `UPDATE order_items SET _deleted=1, updated_at=datetime('now') WHERE id=?`,
+          [item.id],
+        );
+        await enqueue("order_items", "delete", item.id);
       }
-      await db.run(
-        `UPDATE order_items SET _deleted=1, updated_at=datetime('now') WHERE order_id=?`,
-        [id],
-      );
       await db.run(
         `UPDATE orders SET _deleted=1, updated_at=datetime('now') WHERE id=?`,
         [id],
@@ -861,10 +874,9 @@ export const useMobileStore = () => {
             due.id,
           ],
         );
-        await enqueue("dues", "update", due.id, {
-          ...cleanDue,
-          amount_sp: amountSp,
-        });
+        // FIX: fresh row so updated_at propagates
+        const fresh = await freshRow("dues", due.id);
+        await enqueue("dues", "update", due.id, strip(fresh, DUE_JOIN));
         return { ok: true, id: due.id };
       } else {
         const r = await db.run(
@@ -880,11 +892,8 @@ export const useMobileStore = () => {
           ],
         );
         const id = r.changes?.lastId;
-        await enqueue("dues", "insert", id, {
-          ...cleanDue,
-          id,
-          amount_sp: amountSp,
-        });
+        const fresh = await freshRow("dues", id);
+        await enqueue("dues", "insert", id, strip(fresh, DUE_JOIN));
         return { ok: true, id };
       }
     } catch (err) {
@@ -892,9 +901,6 @@ export const useMobileStore = () => {
     }
   };
 
-  // FIX: fetch full row after update so updated_at is included in payload
-  // Without updated_at in the payload, server upsert won't update updated_at
-  // → desktop pull (WHERE updated_at > since) never sees the change
   const markDuePaid = async (id) => {
     try {
       const db = await getMobileDb();
@@ -902,14 +908,8 @@ export const useMobileStore = () => {
         `UPDATE dues SET paid=1, paid_at=datetime('now'), updated_at=datetime('now') WHERE id=?`,
         [id],
       );
-      const full = (await db.query(`SELECT * FROM dues WHERE id=?`, [id]))
-        .values?.[0];
-      await enqueue(
-        "dues",
-        "update",
-        id,
-        strip(full, DUE_JOIN) ?? { id, paid: 1 },
-      );
+      const fresh = await freshRow("dues", id);
+      await enqueue("dues", "update", id, strip(fresh, DUE_JOIN));
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -980,7 +980,14 @@ export const useMobileStore = () => {
             ],
           );
         }
-        await enqueue("staff", "update", s.id, { ...s, password: undefined });
+        // FIX: fresh row, strip password from payload
+        const fresh = await freshRow("staff", s.id);
+        await enqueue(
+          "staff",
+          "update",
+          s.id,
+          fresh ? { ...fresh, password: undefined } : { id: s.id },
+        );
         return { ok: true, id: s.id };
       } else {
         const r = await db.run(
@@ -996,7 +1003,15 @@ export const useMobileStore = () => {
           ],
         );
         const id = r.changes?.lastId;
-        await enqueue("staff", "insert", id, { ...s, id, password: undefined });
+        const fresh = await freshRow("staff", id);
+        await enqueue(
+          "staff",
+          "insert",
+          id,
+          fresh
+            ? { ...fresh, password: undefined }
+            : { id, ...s, password: undefined },
+        );
         return { ok: true, id };
       }
     } catch (err) {
@@ -1200,7 +1215,6 @@ export const useMobileStore = () => {
     }
   };
 
-  // FIX: properly quoted column names, safe updated_at check, handles all tables
   const applyRemoteRow = async ({ table, row }) => {
     try {
       const db = await getMobileDb();
@@ -1248,12 +1262,18 @@ export const useMobileStore = () => {
       const placeholders = cols.map(() => "?").join(", ");
       const vals = cols.map((c) => normalized[c]);
 
-      await db.run(
-        `INSERT OR REPLACE INTO "${table}" (${cols
-          .map((c) => `"${c}"`)
-          .join(", ")}) VALUES (${placeholders})`,
-        vals,
-      );
+      // FIX: disable FK checks so parent rows missing locally don't reject the upsert
+      await db.run("PRAGMA foreign_keys = OFF");
+      try {
+        await db.run(
+          `INSERT OR REPLACE INTO "${table}" (${cols
+            .map((c) => `"${c}"`)
+            .join(", ")}) VALUES (${placeholders})`,
+          vals,
+        );
+      } finally {
+        await db.run("PRAGMA foreign_keys = ON");
+      }
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
