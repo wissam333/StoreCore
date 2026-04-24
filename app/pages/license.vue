@@ -54,13 +54,14 @@ const licenseKey = ref("");
 const isActivating = ref(false);
 const error = ref("");
 
-// Platform detection
 const isElectron = typeof window !== "undefined" && !!window.license;
-const isMobile = import.meta.client && !isElectron;
+const isCapacitor =
+  typeof window !== "undefined" &&
+  typeof Capacitor !== "undefined" &&
+  Capacitor.isNativePlatform?.();
 
-// Mobile license composable (lazy to avoid SSR issues)
 let mobileLicense = null;
-if (isMobile) {
+if (isCapacitor) {
   mobileLicense = useMobileLicense();
 }
 
@@ -73,16 +74,15 @@ const activate = async () => {
     let result;
 
     if (isElectron) {
-      // Electron: use window.license from preload
       result = await window.license.activate(licenseKey.value.trim());
       if (result.ok) {
         window.license.onActivated();
       }
     } else {
-      // Mobile
       result = await mobileLicense.activate(licenseKey.value.trim());
       if (result.ok) {
-        await navigateTo("/dashboard", { replace: true });
+        // On mobile: reload the page so app.vue re-initializes with the new key
+        window.location.reload();
       }
     }
 

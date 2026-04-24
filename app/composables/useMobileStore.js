@@ -123,10 +123,16 @@ export const useMobileStore = () => {
     }
   };
 
+  const ensureDb = async () => {
+    const db = await getMobileDb();
+    if (!db) throw new Error("Database not initialized");
+    return db;
+  };
+
   // ── CATEGORIES ─────────────────────────────────────────────────────────────
   const getCategories = async () => {
     try {
-      const db = await getMobileDb();
+      const db = await ensureDb();
       const data =
         (
           await db.query(
