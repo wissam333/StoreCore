@@ -1,7 +1,7 @@
 <!-- store-app/app.vue -->
 <template>
   <div>
-    <!-- Loading: waiting for Capacitor + DB + License -->
+    <!-- Loading -->
     <template v-if="phase === 'loading'">
       <div class="app-loading">
         <Icon name="mdi:loading" size="32" class="spin" />
@@ -18,9 +18,9 @@
       </div>
     </template>
 
-    <!-- License screen -->
+    <!-- License screen — rendered directly, no router needed -->
     <template v-else-if="phase === 'license'">
-      <NuxtPage />
+      <MobileLicensePage @activated="onLicenseActivated" />
     </template>
 
     <!-- Full app -->
@@ -37,52 +37,67 @@
 </template>
 
 <script setup>
-const { locale, t: $t } = useI18n();
+const { t: $t } = useI18n();
+
 const phase = ref("loading"); // 'loading' | 'error' | 'license' | 'app'
 const error = ref("");
 
-// Platform detection
 const isElectron = typeof window !== "undefined" && !!window.license;
 const isCapacitor =
   typeof window !== "undefined" &&
   typeof Capacitor !== "undefined" &&
   Capacitor.isNativePlatform?.();
 
+// Called by MobileLicensePage after a successful activation
+const onLicenseActivated = async () => {
+  phase.value = "loading";
+  try {
+    await initDb();
+    phase.value = "app";
+  } catch (err) {
+    error.value = err.message || "Failed to initialize database";
+    phase.value = "error";
+  }
+};
+
+const initDb = async () => {
+  const { initMobileSchema } = await import("~/composables/useMobileSchema");
+  await initMobileSchema();
+};
+
 const init = async () => {
   phase.value = "loading";
   error.value = "";
 
   try {
-    // ── Electron path ──────────────────────────────────────────────────────
+    // ── Electron ───────────────────────────────────────────────────────────
     if (isElectron) {
       const key = await window.license.getKey();
       phase.value = key ? "app" : "license";
       return;
     }
 
-    // ── Mobile (Capacitor) path ────────────────────────────────────────────
+    // ── Capacitor (mobile) ─────────────────────────────────────────────────
     if (isCapacitor) {
-      // 1. Initialize DB first (this waits for deviceready internally)
-      const { initMobileSchema } = await import(
-        "~/composables/useMobileSchema"
-      );
-      await initMobileSchema();
-
-      // 2. Check license
+      // Step 1: License check — pure HTTP + Capacitor Preferences, no SQLite.
+      //         This MUST happen before DB init so a crash in SQLite doesn't
+      //         hide the license screen.
       const { verify } = useMobileLicense();
       const result = await verify();
 
-      if (result.ok) {
-        phase.value = "app";
-      } else {
-        // Redirect to license page
-        await navigateTo("/license", { replace: true });
+      if (!result.ok) {
+        // Show inline license page — no router.push, no navigateTo race.
         phase.value = "license";
+        return;
       }
+
+      // Step 2: Only init the DB when we know the license is valid.
+      await initDb();
+      phase.value = "app";
       return;
     }
 
-    // ── Web/SSR fallback ───────────────────────────────────────────────────
+    // ── Web / SSR fallback ─────────────────────────────────────────────────
     phase.value = "app";
   } catch (err) {
     console.error("[app.vue] Init failed:", err);

@@ -43,21 +43,21 @@ export const useMobileLicense = () => {
   };
 
   // ── Persist to SQLite settings (lazy import to avoid composable issues) ────
-const persistToSettings = async (key) => {
-  try {
-    // Lazy import to avoid composable context issues
-    const { useMobileStore } = await import('./useMobileStore');
-    const { setSetting, getSettings } = useMobileStore();
-    await setSetting({ key: "license_key", value: key });
+  const persistToSettings = async (key) => {
+    try {
+      // Lazy import to avoid composable context issues
+      const { useMobileStore } = await import("./useMobileStore");
+      const { setSetting, getSettings } = useMobileStore();
+      await setSetting({ key: "license_key", value: key });
 
-    const r = await getSettings();
-    if (r.ok && !r.data?.sync_base?.trim()) {
-      await setSetting({ key: "sync_base", value: LICENSE_SERVER });
+      const r = await getSettings();
+      if (r.ok && !r.data?.sync_base?.trim()) {
+        await setSetting({ key: "sync_base", value: LICENSE_SERVER });
+      }
+    } catch (err) {
+      console.warn("[mobile-license] Could not persist to SQLite:", err);
     }
-  } catch (err) {
-    console.warn("[mobile-license] Could not persist to SQLite:", err);
-  }
-};
+  };
 
   const removeFromSettings = async () => {
     try {
@@ -86,6 +86,7 @@ const persistToSettings = async (key) => {
         await persistToSettings(key);
         return { ok: true };
       }
+
       return { ok: false, error: json.error ?? "Activation failed" };
     } catch {
       return { ok: false, error: "Cannot reach license server" };
