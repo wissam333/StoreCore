@@ -163,7 +163,6 @@ const statusOptions = [
 ];
 
 const cols = [
-  { key: "id", label: "#", width: "60px" },
   { key: "customer_name", label: "customer" },
   { key: "order_date", label: "date" },
   { key: "item_count", label: "items" },

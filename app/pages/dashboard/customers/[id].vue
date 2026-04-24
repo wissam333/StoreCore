@@ -205,7 +205,6 @@ const tabs = [
 ];
 
 const orderCols = [
-  { key: "id", label: "#", width: "60px" },
   { key: "order_date", label: "date", sortable: true },
   { key: "total_sp", label: "total", align: "end" },
   { key: "status", label: "status" },
@@ -223,11 +222,11 @@ const statusClass = (s) =>
     pending: "badge-warning",
     partly_paid: "badge-info",
     paid: "badge-success",
-  })[s] ?? "";
+  }[s] ?? "");
 
 const load = async () => {
   loading.value = true;
-  const r = await getCustomerById(Number(route.params.id));
+  const r = await getCustomerById(route.params.id);
   if (r.ok) {
     customer.value = r.data;
     Object.assign(editForm, {
@@ -242,7 +241,7 @@ const load = async () => {
 
 const saveEdit = async () => {
   saving.value = true;
-  const r = await saveCustomer({ ...editForm, id: Number(route.params.id) });
+  const r = await saveCustomer({ ...editForm, id: route.params.id });
   if (r.ok) {
     $toast.success($t("saved"));
     showEditModal.value = false;

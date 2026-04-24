@@ -1,3 +1,4 @@
+// store-app/license/licenseManager.js
 import pkg from "node-machine-id";
 const { machineIdSync } = pkg;
 import { app } from "electron";
@@ -57,9 +58,37 @@ const isWithinGrace = () => {
   return diff < GRACE_DAYS;
 };
 
+// ── Persist to SQLite settings ────────────────────────────────────────────────
+const persistToSettings = (db, key) => {
+  if (!db) return;
+  try {
+    db.prepare(
+      `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
+       ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
+    ).run("license_key", key);
+
+    const existing = db
+      .prepare(`SELECT value FROM settings WHERE key='sync_base'`)
+      .get();
+    if (!existing?.value?.trim()) {
+      db.prepare(
+        `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
+      ).run("sync_base", LICENSE_SERVER);
+    }
+  } catch (err) {
+    console.warn("[license] Could not persist key to SQLite:", err.message);
+  }
+};
+
+const removeFromSettings = (db) => {
+  if (!db) return;
+  try {
+    db.prepare(`DELETE FROM settings WHERE key='license_key'`).run();
+  } catch {}
+};
+
 // ── Activate ──────────────────────────────────────────────────────────────────
-// db is passed in from main.js so we can also persist the key to SQLite settings.
-// This means useStoreSync can read it via getSettings() without any user config.
 export const activateLicense = async (key, db) => {
   const machine_id = getMachineId();
   try {
@@ -67,55 +96,32 @@ export const activateLicense = async (key, db) => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key, machine_id, platform: "desktop" }),
+      signal: AbortSignal.timeout(8000),
     });
     const json = await res.json();
     if (json.ok) {
-      // 1. Save to license.json (used by verifyLicense / grace period)
       saveLicense(key);
-
-      // 2. Also persist into SQLite settings so sync composable can read it
-      if (db) {
-        try {
-          db.prepare(
-            `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
-          ).run("license_key", key);
-
-          // Auto-set sync_base if not already configured
-          const existing = db
-            .prepare(`SELECT value FROM settings WHERE key='sync_base'`)
-            .get();
-          if (!existing?.value?.trim()) {
-            db.prepare(
-              `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
-               ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
-            ).run("sync_base", LICENSE_SERVER);
-          }
-        } catch (dbErr) {
-          console.warn(
-            "[license] Could not persist key to SQLite:",
-            dbErr.message,
-          );
-        }
-      }
-
+      persistToSettings(db, key);
       return { ok: true };
     }
-    return { ok: false, error: json.error };
+    return { ok: false, error: json.error ?? "Activation failed" };
   } catch {
     return { ok: false, error: "Cannot reach license server" };
   }
 };
 
+// ── Verify ────────────────────────────────────────────────────────────────────
 export const verifyLicense = async () => {
   const key = store.get("license_key");
   if (!key) return { ok: false, reason: "no_license" };
+
   const machine_id = getMachineId();
   try {
     const res = await fetch(`${LICENSE_SERVER}/license/verify`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key, machine_id, platform: "desktop" }),
+      signal: AbortSignal.timeout(8000),
     });
     const json = await res.json();
     if (json.ok) {
@@ -140,19 +146,13 @@ export const deactivateLicense = async (db) => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key, machine_id, platform: "desktop" }),
+      signal: AbortSignal.timeout(8000),
     });
     const json = await res.json();
     if (json.ok) {
       store.delete("license_key");
       store.delete("last_verified_at");
-
-      // Also remove from SQLite settings
-      if (db) {
-        try {
-          db.prepare(`DELETE FROM settings WHERE key='license_key'`).run();
-        } catch {}
-      }
-
+      removeFromSettings(db);
       return { ok: true };
     }
     return { ok: false, error: json.error };

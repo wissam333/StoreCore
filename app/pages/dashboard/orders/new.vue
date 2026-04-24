@@ -332,7 +332,7 @@ const statusClass = (s) =>
     pending: "badge-warning",
     partly_paid: "badge-info",
     paid: "badge-success",
-  })[s] ?? "";
+  }[s] ?? "");
 
 // ── Save ──────────────────────────────────────────────────────────────────────
 const saving = ref(false);
@@ -348,7 +348,7 @@ const save = async () => {
   saving.value = true;
   const r = await saveOrder({
     order: {
-      id: isEdit.value ? Number(route.params.id) : undefined,
+      id: isEdit.value ? route.params.id : undefined,
       customer_id: selectedCustomer.value?.id ?? null,
       order_date: new Date().toISOString(),
       paid_amount: paidAmount.value,
@@ -380,7 +380,7 @@ const save = async () => {
 // ── Load for edit ─────────────────────────────────────────────────────────────
 const loadEdit = async () => {
   if (!isEdit.value || !route.params.id) return;
-  const r = await getOrderById(Number(route.params.id));
+  const r = await getOrderById(route.params.id);
   if (!r.ok) return;
   const o = r.data;
   // Restore customer — use both id and name so chip shows correctly

@@ -1,4 +1,4 @@
-<!-- pages/license.vue -->
+<!-- store-app/pages/license.vue -->
 <template>
   <div class="license-page" :dir="locale === 'ar' ? 'rtl' : 'ltr'">
     <div class="license-card">
@@ -45,15 +45,24 @@
 </template>
 
 <script setup>
+definePageMeta({
+  layout: false,
+});
+
 const { locale } = useI18n();
-const { $toast } = useNuxtApp();
-
-const isMobile = import.meta.client && !window.license;
-const mobileLicense = isMobile ? useMobileLicense() : null;
-
 const licenseKey = ref("");
 const isActivating = ref(false);
 const error = ref("");
+
+// Platform detection
+const isElectron = typeof window !== "undefined" && !!window.license;
+const isMobile = import.meta.client && !isElectron;
+
+// Mobile license composable (lazy to avoid SSR issues)
+let mobileLicense = null;
+if (isMobile) {
+  mobileLicense = useMobileLicense();
+}
 
 const activate = async () => {
   if (!licenseKey.value.trim()) return;
@@ -63,24 +72,25 @@ const activate = async () => {
   try {
     let result;
 
-    if (window.license) {
-      // Electron desktop — platform: 'desktop' sent inside activateLicense()
+    if (isElectron) {
+      // Electron: use window.license from preload
       result = await window.license.activate(licenseKey.value.trim());
-      if (result.ok) window.license.onActivated();
+      if (result.ok) {
+        window.license.onActivated();
+      }
     } else {
-      // Mobile — platform: 'mobile' sent inside useMobileLicense.activate()
+      // Mobile
       result = await mobileLicense.activate(licenseKey.value.trim());
       if (result.ok) {
-        $toast.success($t("license.activated"));
-        window.location.reload();
+        await navigateTo("/dashboard", { replace: true });
       }
     }
 
     if (!result.ok) {
-      error.value = result.error || $t("license.failed");
+      error.value = result.error || "Activation failed";
     }
-  } catch {
-    error.value = $t("license.error");
+  } catch (err) {
+    error.value = err.message || "Activation error";
   } finally {
     isActivating.value = false;
   }

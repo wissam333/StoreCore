@@ -6,109 +6,116 @@ export const initMobileSchema = async () => {
 
   await db.execute(`
     CREATE TABLE IF NOT EXISTS categories (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      name        TEXT NOT NULL,
+      id          TEXT    PRIMARY KEY,
+      name        TEXT    NOT NULL,
       description TEXT,
-      created_at  TEXT DEFAULT (datetime('now')),
-      updated_at  TEXT DEFAULT (datetime('now')),
+      version     INTEGER NOT NULL DEFAULT 1,
+      created_at  TEXT    DEFAULT (datetime('now')),
+      updated_at  TEXT    DEFAULT (datetime('now')),
       _deleted    INTEGER DEFAULT 0,
       synced_at   TEXT
     );
 
     CREATE TABLE IF NOT EXISTS products (
-      id           INTEGER PRIMARY KEY AUTOINCREMENT,
-      name         TEXT NOT NULL,
+      id           TEXT    PRIMARY KEY,
+      name         TEXT    NOT NULL,
       description  TEXT,
-      category_id  INTEGER,
+      category_id  TEXT,
       barcode      TEXT,
-      buy_price    REAL NOT NULL DEFAULT 0,
-      sell_price   REAL NOT NULL DEFAULT 0,
-      currency     TEXT NOT NULL DEFAULT 'SP',
+      buy_price    REAL    NOT NULL DEFAULT 0,
+      sell_price   REAL    NOT NULL DEFAULT 0,
+      currency     TEXT    NOT NULL DEFAULT 'SP',
       stock        INTEGER NOT NULL DEFAULT 0,
       min_stock    INTEGER DEFAULT 0,
-      unit         TEXT DEFAULT 'piece',
+      unit         TEXT    DEFAULT 'piece',
       image_url    TEXT,
       is_active    INTEGER DEFAULT 1,
-      created_at   TEXT DEFAULT (datetime('now')),
-      updated_at   TEXT DEFAULT (datetime('now')),
+      version      INTEGER NOT NULL DEFAULT 1,
+      created_at   TEXT    DEFAULT (datetime('now')),
+      updated_at   TEXT    DEFAULT (datetime('now')),
       _deleted     INTEGER DEFAULT 0,
       synced_at    TEXT
     );
 
     CREATE TABLE IF NOT EXISTS customers (
-      id           INTEGER PRIMARY KEY AUTOINCREMENT,
-      name         TEXT NOT NULL,
+      id           TEXT    PRIMARY KEY,
+      name         TEXT    NOT NULL,
       phone        TEXT,
       address      TEXT,
       notes        TEXT,
       total_orders INTEGER DEFAULT 0,
-      total_spent  REAL DEFAULT 0,
+      total_spent  REAL    DEFAULT 0,
       last_order   TEXT,
-      created_at   TEXT DEFAULT (datetime('now')),
-      updated_at   TEXT DEFAULT (datetime('now')),
+      version      INTEGER NOT NULL DEFAULT 1,
+      created_at   TEXT    DEFAULT (datetime('now')),
+      updated_at   TEXT    DEFAULT (datetime('now')),
       _deleted     INTEGER DEFAULT 0,
       synced_at    TEXT
     );
 
     CREATE TABLE IF NOT EXISTS orders (
-      id               INTEGER PRIMARY KEY AUTOINCREMENT,
-      customer_id      INTEGER,
-      order_date       TEXT DEFAULT (datetime('now')),
-      status           TEXT NOT NULL DEFAULT 'pending',
-      total_sp         REAL DEFAULT 0,
-      total_usd        REAL DEFAULT 0,
-      paid_amount      REAL DEFAULT 0,
-      display_currency TEXT DEFAULT 'SP',
+      id               TEXT    PRIMARY KEY,
+      customer_id      TEXT,
+      order_date       TEXT    DEFAULT (datetime('now')),
+      status           TEXT    NOT NULL DEFAULT 'pending',
+      total_sp         REAL    DEFAULT 0,
+      total_usd        REAL    DEFAULT 0,
+      paid_amount      REAL    DEFAULT 0,
+      display_currency TEXT    DEFAULT 'SP',
       notes            TEXT,
-      created_at       TEXT DEFAULT (datetime('now')),
-      updated_at       TEXT DEFAULT (datetime('now')),
+      version          INTEGER NOT NULL DEFAULT 1,
+      created_at       TEXT    DEFAULT (datetime('now')),
+      updated_at       TEXT    DEFAULT (datetime('now')),
       _deleted         INTEGER DEFAULT 0,
       synced_at        TEXT
     );
 
     CREATE TABLE IF NOT EXISTS order_items (
-      id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-      order_id           INTEGER NOT NULL,
-      product_id         INTEGER,
-      product_name       TEXT NOT NULL,
+      id                 TEXT    PRIMARY KEY,
+      order_id           TEXT    NOT NULL,
+      product_id         TEXT,
+      product_name       TEXT    NOT NULL,
       quantity           INTEGER NOT NULL DEFAULT 1,
-      sell_price_at_sale REAL NOT NULL,
-      currency_at_sale   TEXT NOT NULL DEFAULT 'SP',
-      line_total_sp      REAL NOT NULL DEFAULT 0,
-      created_at         TEXT DEFAULT (datetime('now')),
-      updated_at         TEXT DEFAULT (datetime('now')),
+      sell_price_at_sale REAL    NOT NULL,
+      currency_at_sale   TEXT    NOT NULL DEFAULT 'SP',
+      line_total_sp      REAL    NOT NULL DEFAULT 0,
+      version            INTEGER NOT NULL DEFAULT 1,
+      created_at         TEXT    DEFAULT (datetime('now')),
+      updated_at         TEXT    DEFAULT (datetime('now')),
       _deleted           INTEGER DEFAULT 0,
       synced_at          TEXT
     );
 
     CREATE TABLE IF NOT EXISTS dues (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      customer_id INTEGER,
-      order_id    INTEGER,
-      amount      REAL NOT NULL,
-      currency    TEXT NOT NULL DEFAULT 'SP',
-      amount_sp   REAL NOT NULL DEFAULT 0,
+      id          TEXT    PRIMARY KEY,
+      customer_id TEXT,
+      order_id    TEXT,
+      amount      REAL    NOT NULL,
+      currency    TEXT    NOT NULL DEFAULT 'SP',
+      amount_sp   REAL    NOT NULL DEFAULT 0,
       description TEXT,
       due_date    TEXT,
       paid        INTEGER DEFAULT 0,
       paid_at     TEXT,
-      created_at  TEXT DEFAULT (datetime('now')),
-      updated_at  TEXT DEFAULT (datetime('now')),
+      version     INTEGER NOT NULL DEFAULT 1,
+      created_at  TEXT    DEFAULT (datetime('now')),
+      updated_at  TEXT    DEFAULT (datetime('now')),
       _deleted    INTEGER DEFAULT 0,
       synced_at   TEXT
     );
 
     CREATE TABLE IF NOT EXISTS staff (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      full_name   TEXT NOT NULL,
-      username    TEXT UNIQUE,
+      id          TEXT    PRIMARY KEY,
+      full_name   TEXT    NOT NULL,
+      username    TEXT    UNIQUE,
       password    TEXT,
       role        TEXT,
       phone       TEXT,
       email       TEXT,
       is_active   INTEGER DEFAULT 1,
-      created_at  TEXT DEFAULT (datetime('now')),
-      updated_at  TEXT DEFAULT (datetime('now')),
+      version     INTEGER NOT NULL DEFAULT 1,
+      created_at  TEXT    DEFAULT (datetime('now')),
+      updated_at  TEXT    DEFAULT (datetime('now')),
       _deleted    INTEGER DEFAULT 0,
       synced_at   TEXT
     );
@@ -121,11 +128,11 @@ export const initMobileSchema = async () => {
 
     CREATE TABLE IF NOT EXISTS sync_queue (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      table_name  TEXT NOT NULL,
-      operation   TEXT NOT NULL,
-      row_id      INTEGER NOT NULL,
+      table_name  TEXT    NOT NULL,
+      operation   TEXT    NOT NULL,
+      row_id      TEXT    NOT NULL,
       payload     TEXT,
-      queued_at   TEXT DEFAULT (datetime('now')),
+      queued_at   TEXT    DEFAULT (datetime('now')),
       synced_at   TEXT,
       retry_count INTEGER DEFAULT 0
     );
@@ -135,6 +142,26 @@ export const initMobileSchema = async () => {
       value TEXT
     );
   `);
+
+  // ── Migration: add version + convert id to TEXT for existing installs ──────
+  // Safe to run multiple times — ALTER TABLE IF NOT EXISTS column is not
+  // supported in older SQLite so we catch errors silently.
+  const migrations = [
+    `ALTER TABLE categories  ADD COLUMN version INTEGER NOT NULL DEFAULT 1`,
+    `ALTER TABLE products    ADD COLUMN version INTEGER NOT NULL DEFAULT 1`,
+    `ALTER TABLE customers   ADD COLUMN version INTEGER NOT NULL DEFAULT 1`,
+    `ALTER TABLE orders      ADD COLUMN version INTEGER NOT NULL DEFAULT 1`,
+    `ALTER TABLE order_items ADD COLUMN version INTEGER NOT NULL DEFAULT 1`,
+    `ALTER TABLE dues        ADD COLUMN version INTEGER NOT NULL DEFAULT 1`,
+    `ALTER TABLE staff       ADD COLUMN version INTEGER NOT NULL DEFAULT 1`,
+  ];
+  for (const sql of migrations) {
+    try {
+      await db.run(sql);
+    } catch {
+      /* column already exists — ignore */
+    }
+  }
 
   await db.execute(`
     INSERT OR IGNORE INTO settings (key, value) VALUES
@@ -152,14 +179,19 @@ export const initMobileSchema = async () => {
   // Seed admin if empty
   const staffResult = await db.query(`SELECT COUNT(*) as n FROM staff`);
   if ((staffResult.values?.[0]?.n ?? 0) === 0) {
+    const { generateUuid } = await import("./useUuid");
     await db.run(
-      `INSERT INTO staff (full_name, username, password, role, is_active) VALUES (?, ?, ?, ?, ?)`,
-      ["Admin", "admin", "admin", "admin", 1],
+      `INSERT INTO staff (id, full_name, username, password, role, is_active) VALUES (?, ?, ?, ?, ?, ?)`,
+      [generateUuid(), "Admin", "admin", "admin", "admin", 1],
     );
   }
 
   const catResult = await db.query(`SELECT COUNT(*) as n FROM categories`);
   if ((catResult.values?.[0]?.n ?? 0) === 0) {
-    await db.run(`INSERT INTO categories (name) VALUES (?)`, ["General"]);
+    const { generateUuid } = await import("./useUuid");
+    await db.run(`INSERT INTO categories (id, name) VALUES (?, ?)`, [
+      generateUuid(),
+      "General",
+    ]);
   }
 };

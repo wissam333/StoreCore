@@ -3,7 +3,7 @@
 <template>
   <div>
     <SharedUiHeaderPage
-      :title="$t('editOrder') + ' #' + route.params.id"
+      :title="$t('editOrder')"
       icon="mdi:receipt-text-edit-outline"
       show-back
       :back-to="'/dashboard/orders/' + route.params.id"
@@ -254,7 +254,7 @@ const statusClass = (s) =>
     pending: "badge-warning",
     partly_paid: "badge-info",
     paid: "badge-success",
-  })[s] ?? "";
+  }[s] ?? "");
 
 let customerTimer;
 const onCustomerInput = () => {
@@ -302,7 +302,7 @@ const save = async () => {
   saving.value = true;
   const r = await saveOrder({
     order: {
-      id: Number(route.params.id),
+      id: route.params.id,
       customer_id: selectedCustomer.value?.id ?? null,
       order_date: new Date().toISOString(),
       paid_amount: paidAmount.value,
@@ -330,7 +330,7 @@ onMounted(async () => {
   });
   const [pR, oR] = await Promise.all([
     getProducts({ limit: 500, activeOnly: true }),
-    getOrderById(Number(route.params.id)),
+    getOrderById(route.params.id),
   ]);
   if (pR.ok) allProducts.value = pR.data;
   if (oR.ok) {

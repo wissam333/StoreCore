@@ -1,3 +1,4 @@
+// store-app/main.js
 import { app, BrowserWindow, ipcMain, protocol, net } from "electron";
 import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
@@ -67,12 +68,11 @@ let licenseWindow = null;
 // ── Load window helper ────────────────────────────────────────────────────────
 const isDev = process.env.NODE_ENV === "development";
 
-const loadWindow = async (win) => {
-  if (isDev) {
-    await win.loadURL("http://localhost:3000");
-  } else {
-    await win.loadURL("app://./index.html");
-  }
+const loadWindow = async (win, route = "") => {
+  const url = isDev
+    ? `http://localhost:3000${route}`
+    : `app://./index.html${route ? "#" + route : ""}`;
+  await win.loadURL(url);
 };
 
 // ── Register app:// protocol handler ─────────────────────────────────────────
@@ -92,7 +92,11 @@ const registerProtocol = () => {
 
 // ── Create main app window ────────────────────────────────────────────────────
 const createWindow = async () => {
-  console.log("[createWindow] creating MAIN window");
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.focus();
+    return;
+  }
+
   mainWindow = new BrowserWindow({
     icon: path.join(__dirname, "../public/logo/logo.ico"),
     width: 1200,
@@ -114,12 +118,15 @@ const createWindow = async () => {
 
 // ── Create license window ─────────────────────────────────────────────────────
 const createLicenseWindow = async () => {
-  console.log("[createLicenseWindow] creating LICENSE window");
+  if (licenseWindow && !licenseWindow.isDestroyed()) {
+    licenseWindow.focus();
+    return;
+  }
 
   licenseWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
-    resizable: true,
+    width: 500,
+    height: 600,
+    resizable: false,
     center: true,
     frame: true,
     webPreferences: {
@@ -130,111 +137,70 @@ const createLicenseWindow = async () => {
     },
   });
 
-  licenseWindow.webContents.on("dom-ready", () => {
-    console.log("[main] dom-ready fired");
-    licenseWindow.webContents
-      .executeJavaScript(
-        `
-      window.__SHOW_LICENSE__ = true;
-      window.dispatchEvent(new CustomEvent('force-license-screen'));
-    `,
-      )
-      .catch(console.error);
-  });
+  // Load the /license route directly
+  await loadWindow(licenseWindow, "/license");
 
   licenseWindow.on("closed", () => {
     licenseWindow = null;
+    // If no main window exists, quit the app
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      app.quit();
+    }
   });
-
-  await loadWindow(licenseWindow);
 };
 
-// ── License IPC handlers ──────────────────────────────────────────────────────
+// ── DB init (once) ────────────────────────────────────────────────────────────
+const db = getDb();
+initSchema(db);
+registerStoreHandlers(db, ipcMain);
 
+// ── License IPC handlers ──────────────────────────────────────────────────────
 ipcMain.handle("license:activate", async (_, key) => {
-  return await activateLicense(key, db); // ← add db
+  return await activateLicense(key, db);
 });
+
 ipcMain.handle("license:deactivate", async () => {
-  return await deactivateLicense(db); // ← add db
+  return await deactivateLicense(db);
 });
+
 ipcMain.handle("license:getKey", () => getSavedKey());
 ipcMain.handle("license:getMachineId", () => getMachineId());
 
 ipcMain.on("license:activated", async () => {
-  console.log("[main] license:activated received");
+  log("[main] license:activated received");
   if (licenseWindow && !licenseWindow.isDestroyed()) {
     licenseWindow.close();
+    licenseWindow = null;
   }
-  await openMainApp();
+  await createWindow();
 });
 
 ipcMain.on("app:quit", () => {
   app.quit();
 });
 
-// ── DB init ───────────────────────────────────────────────────────────────────
-const db = getDb();
-
-// ── Open main app ─────────────────────────────────────────────────────────────
-const openMainApp = async () => {
-  if (!openMainApp._initialized) {
-    initSchema(db);
-    registerStoreHandlers(db, ipcMain);
-    openMainApp._initialized = true;
-  }
-  await createWindow();
-};
-openMainApp._initialized = false;
-
 // ── App ready ─────────────────────────────────────────────────────────────────
 app.whenReady().then(async () => {
   log("[1] app ready");
-  log("[userData]", app.getPath("userData"));
-  log("[resourcesPath]", process.resourcesPath);
-
-  const publicDir = app.isPackaged
-    ? path.join(process.resourcesPath, "app.asar.unpacked", ".output", "public")
-    : path.join(__dirname, "../.output/public");
-
-  log("[publicDir]", publicDir);
-  log("[publicDir exists]", fs.existsSync(publicDir));
-
-  // Log what's actually in resourcesPath
-  if (app.isPackaged) {
-    try {
-      log(
-        "[resources contents]",
-        fs.readdirSync(process.resourcesPath).join(", "),
-      );
-    } catch (e) {
-      log("[resources read error]", e.message);
-    }
-  }
 
   registerProtocol();
-
-  initSchema(db);
-  registerStoreHandlers(db, ipcMain);
-  openMainApp._initialized = true;
 
   let license;
   try {
     license = await verifyLicense();
-    console.log("[2] license result:", JSON.stringify(license));
+    log("[2] license result:", JSON.stringify(license));
   } catch (err) {
-    console.error("[2] verifyLicense THREW:", err.message);
+    log("[2] verifyLicense THREW:", err.message);
     license = { ok: false, reason: "error" };
   }
 
-  console.log("[3] license.ok =", license.ok);
-
   if (!license.ok) {
-    console.log("[4] opening license window");
+    log("[3] opening license window");
     await createLicenseWindow();
     return;
   }
 
-  console.log("[4] opening main app");
+  log("[3] opening main app");
   await createWindow();
 });
 
@@ -242,13 +208,9 @@ app.whenReady().then(async () => {
 app.on("activate", async () => {
   if (BrowserWindow.getAllWindows().length === 0) {
     const license = await verifyLicense();
-    if (license.ok) await openMainApp();
+    if (license.ok) await createWindow();
     else await createLicenseWindow();
   }
-});
-
-app.on("browser-window-created", (_, win) => {
-  console.log("[window created] id:", win.id);
 });
 
 app.on("window-all-closed", () => {

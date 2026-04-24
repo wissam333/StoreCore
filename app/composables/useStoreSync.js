@@ -28,7 +28,7 @@ export const useStoreSyncManager = () => {
 
   const refreshPendingCount = async () => {
     const r = await getSyncQueue();
-    pendingCount.value = r.ok ? (r.data?.length ?? 0) : 0;
+    pendingCount.value = r.ok ? r.data?.length ?? 0 : 0;
   };
 
   // Reads sync_base + license_key from settings.
@@ -42,6 +42,16 @@ export const useStoreSyncManager = () => {
     return { base, token: licenseKey };
   };
 
+  const PUSH_ORDER = {
+    categories: 1,
+    customers: 2,
+    staff: 3,
+    products: 4,
+    orders: 5,
+    order_items: 6,
+    dues: 7,
+  };
+
   // ── PHASE 1: Push ─────────────────────────────────────────────────────────
   const push = async (base, token) => {
     let hasMore = true;
@@ -51,6 +61,10 @@ export const useStoreSyncManager = () => {
       if (!r.ok || !r.data?.length) break;
 
       const batch = r.data.slice(0, 50);
+      batch.sort(
+        (a, b) =>
+          (PUSH_ORDER[a.table_name] || 99) - (PUSH_ORDER[b.table_name] || 99),
+      );
       const synced = [];
 
       for (const item of batch) {
@@ -114,7 +128,9 @@ export const useStoreSyncManager = () => {
 
     while (hasMore) {
       const res = await fetch(
-        `${base}/changes?since=${encodeURIComponent(since)}&limit=${limit}&offset=${offset}`,
+        `${base}/changes?since=${encodeURIComponent(
+          since,
+        )}&limit=${limit}&offset=${offset}`,
         { headers },
       );
       if (res.status === 401)
@@ -165,12 +181,9 @@ export const useStoreSyncManager = () => {
   // ── Auto-sync every 3 minutes ─────────────────────────────────────────────
   let intervalId = null;
   const startAutoSync = () => {
-    intervalId = setInterval(
-      () => {
-        if (isOnline.value) sync();
-      },
-      3 * 60 * 1000,
-    );
+    intervalId = setInterval(() => {
+      if (isOnline.value) sync();
+    }, 3 * 60 * 1000);
   };
   const stopAutoSync = () => {
     if (intervalId) clearInterval(intervalId);

@@ -2,7 +2,7 @@
 <template>
   <div>
     <SharedUiHeaderPage
-      :title="$t('order') + ' #' + route.params.id"
+      :title="$t('order')"
       icon="mdi:receipt-text-outline"
       show-back
       back-to="/dashboard/orders"
@@ -207,21 +207,11 @@ const statusClass = (s) =>
 
 const load = async () => {
   loading.value = true;
-  const r = await getOrderById(Number(route.params.id));
+  const r = await getOrderById(route.params.id);
   if (r.ok) {
     order.value = r.data;
     payAmount.value = 0;
     payCurrency.value = r.data.display_currency;
-
-    // ── Fix: if items came back empty, retry once after 800ms ──────────────
-    // On mobile after sync, order_items may not be in SQLite yet on first render.
-    if (!r.data.items?.length) {
-      itemsLoading.value = true;
-      await new Promise((res) => setTimeout(res, 800));
-      const retry = await getOrderById(Number(route.params.id));
-      if (retry.ok) order.value = retry.data;
-      itemsLoading.value = false;
-    }
   }
   loading.value = false;
 };
@@ -238,7 +228,7 @@ const handleAction = (action) => {
 
 const doDelete = async () => {
   deleting.value = true;
-  const r = await deleteOrder(Number(route.params.id));
+  const r = await deleteOrder(route.params.id); 
   if (r.ok) {
     $toast.success($t("deleted"));
     navigateTo("/dashboard/orders");
@@ -251,7 +241,7 @@ const doDelete = async () => {
 const doQuickPay = async () => {
   paying.value = true;
   const r = await updateOrderPayment({
-    id: Number(route.params.id),
+    id: route.params.id,
     paid_amount: payAmount.value,
     display_currency: payCurrency.value,
   });

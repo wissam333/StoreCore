@@ -88,12 +88,12 @@
         </div>
         <div v-else class="order-list">
           <div
-            v-for="o in recentOrders"
-            :key="o.id"
+            v-for="(o, i) in recentOrders"
+            :key="i"
             class="order-row"
             @click="navigateTo('/dashboard/orders/' + o.id)"
           >
-            <div class="or-id">#{{ o.id }}</div>
+            <div class="or-id">#{{ i }}</div>
             <div class="or-info">
               <span class="or-customer">{{
                 o.customer_name || $t("unknown")
@@ -191,7 +191,7 @@ const statusClass = (s) =>
     pending: "badge-warning",
     partly_paid: "badge-info",
     paid: "badge-success",
-  })[s] ?? "badge-secondary";
+  }[s] ?? "badge-secondary");
 
 const statCards = computed(() => [
   {
@@ -300,9 +300,7 @@ onMounted(load);
   flex-direction: column;
   gap: 10px;
   animation: fadeUp 0.4s ease both;
-  transition:
-    box-shadow 0.2s,
-    transform 0.2s;
+  transition: box-shadow 0.2s, transform 0.2s;
   position: relative;
   overflow: hidden;
 

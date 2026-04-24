@@ -352,7 +352,7 @@ const save = async () => {
     ...form,
     is_active: form.is_active ? 1 : 0,
   };
-  if (isEdit.value) payload.id = Number(route.params.id);
+  if (isEdit.value) payload.id = route.params.id;
   const r = await saveProduct(payload);
   saving.value = false;
   if (r.ok) {
@@ -365,7 +365,7 @@ const save = async () => {
 
 const doDelete = async () => {
   deleting.value = true;
-  const r = await deleteProduct(Number(route.params.id));
+  const r = await deleteProduct(route.params.id);
   deleting.value = false;
   if (r.ok) {
     $toast.success($t("deleted"));
@@ -380,7 +380,7 @@ onMounted(async () => {
   const rc = await getCategories();
   if (rc.ok) categories.value = rc.data;
   if (isEdit.value && route.params.id) {
-    const p = await getProductById(Number(route.params.id));
+    const p = await getProductById(route.params.id);
     if (p.ok) {
       Object.assign(form, { ...p.data, is_active: !!p.data.is_active });
       // Restore image preview if product has one
@@ -444,9 +444,7 @@ onMounted(async () => {
   justify-content: center;
   cursor: pointer;
   overflow: hidden;
-  transition:
-    border-color 0.2s,
-    background 0.2s;
+  transition: border-color 0.2s, background 0.2s;
   background: var(--bg-elevated);
 
   &:hover {
