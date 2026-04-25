@@ -52,11 +52,26 @@ const isNativeMobile = async () => {
   }
 };
 
+// ── License check ─────────────────────────────────────────────────────────────
+// Uses useMobileLicense().verify() which checks:
+//   1. Is there a key in Preferences? No → show license screen
+//   2. Is the key valid on the server? No → show license screen
+//   3. Server offline but within grace period? → allow (offline mode)
+//   4. Server offline, no grace period? → show license screen
+// This cannot be bypassed by a stale key sitting in Preferences.
+const checkLicense = async () => {
+  const { verify } = useMobileLicense();
+  const result = await verify();
+  return result.ok;
+};
+
+// ── DB init ───────────────────────────────────────────────────────────────────
 const initDb = async () => {
   const { initMobileSchema } = await import("~/composables/useMobileSchema");
   await initMobileSchema();
 };
 
+// ── After activation ──────────────────────────────────────────────────────────
 const onLicenseActivated = async () => {
   phase.value = "loading";
   loadingMsg.value = "Opening database…";
@@ -72,6 +87,7 @@ const onLicenseActivated = async () => {
   }
 };
 
+// ── Bootstrap ─────────────────────────────────────────────────────────────────
 const init = async () => {
   phase.value = "loading";
   error.value = "";
@@ -89,10 +105,9 @@ const init = async () => {
     }
 
     if (await isNativeMobile()) {
-      // License check — local Preferences only, instant, no network
-      loadingMsg.value = "Checking license…";
-      const { useLicenseGuard } = await import("~/composables/useLicenseGuard");
-      const { licensed } = await useLicenseGuard().check();
+      // Step 1: verify license (server check + grace period fallback)
+      loadingMsg.value = "Verifying license…";
+      const licensed = await checkLicense();
 
       if (!licensed) {
         phase.value = "license";
@@ -100,27 +115,12 @@ const init = async () => {
         return;
       }
 
-      // Open DB (sql.js WASM — no native plugin)
+      // Step 2: open DB
       loadingMsg.value = "Opening database…";
       await initDb();
 
       phase.value = "app";
       loadingMsg.value = "";
-
-      // Background server verify — non-blocking, 3s after app opens
-      setTimeout(async () => {
-        try {
-          const { verify } = useMobileLicense();
-          const result = await verify();
-          if (
-            !result.ok &&
-            (result.reason === "invalid" || result.reason === "no_license")
-          ) {
-            phase.value = "license";
-          }
-        } catch {}
-      }, 3000);
-
       return;
     }
 
@@ -135,15 +135,13 @@ const init = async () => {
 onMounted(() => {
   init();
 
-  // Save DB to disk when app goes to background
-  if (typeof document !== "undefined") {
-    document.addEventListener("pause", async () => {
-      try {
-        const { flushMobileDb } = await import("~/composables/useMobileDb");
-        await flushMobileDb();
-      } catch {}
-    });
-  }
+  // Save DB when app goes to background
+  document.addEventListener("pause", async () => {
+    try {
+      const { flushMobileDb } = await import("~/composables/useMobileDb");
+      await flushMobileDb();
+    } catch {}
+  });
 });
 </script>
 
