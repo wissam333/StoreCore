@@ -42,38 +42,48 @@ const { t: $t } = useI18n();
 const phase = ref("loading"); // 'loading' | 'error' | 'license' | 'app'
 const error = ref("");
 
-// Both checks must match the isElectron() helper in useMobileLicense so the
-// two files agree on which environment they're in.
-const isElectron =
-  typeof window !== "undefined" && !!window.license && !!window.store;
+// ─────────────────────────────────────────────────────────────────────────────
+// IMPORTANT: Never evaluate isElectron / isCapacitor at module scope.
+//
+// On Android the Capacitor WebView bridge (window.Capacitor) is injected
+// AFTER the JS bundle is parsed. Checking it during <script setup> evaluation
+// always returns undefined → isCapacitor = false → license gate is skipped.
+//
+// Always call getEnv() inside functions that run after onMounted.
+// ─────────────────────────────────────────────────────────────────────────────
+const getEnv = () => {
+  const isElectron =
+    typeof window !== "undefined" && !!window.license && !!window.store;
 
-const isCapacitor =
-  typeof window !== "undefined" &&
-  typeof Capacitor !== "undefined" &&
-  Capacitor.isNativePlatform?.();
+  const isCapacitor =
+    !isElectron &&
+    typeof window !== "undefined" &&
+    typeof Capacitor !== "undefined" &&
+    Capacitor.isNativePlatform?.() === true;
 
-// ── DB init ───────────────────────────────────────────────────────────────
-// Only ever called on Capacitor. Electron uses window.store (IPC to
-// better-sqlite3 in main process) — calling initMobileSchema() there throws
-// "SQLite only available on native platforms".
+  return { isElectron, isCapacitor };
+};
+
+// ── DB init ───────────────────────────────────────────────────────────────────
+// Only safe to call on Capacitor. Electron uses window.store (IPC bridge to
+// better-sqlite3 in main process) — getMobileDb() throws on Electron because
+// Capacitor.isNativePlatform() is false there.
 const initDb = async () => {
-  if (!isCapacitor) {
-    console.warn("[app.vue] initDb called outside Capacitor — skipped.");
-    return;
-  }
   const { initMobileSchema } = await import("~/composables/useMobileSchema");
   await initMobileSchema();
 };
 
-// Called by MobileLicensePage after a successful mobile activation.
-// At this point the DB doesn't exist yet (license gate runs before DB init),
-// so we init it now that the license is confirmed valid.
-// This is only ever reached on Capacitor — Electron uses window.license.onActivated()
-// which sends IPC to main, which closes the license window and opens the main window.
+// ── Called by MobileLicensePage after successful activation ───────────────────
+// Must re-check environment here — onLicenseActivated is also reachable on
+// Electron (the license phase renders MobileLicensePage on both platforms).
+// Electron does NOT need initDb: the main process owns better-sqlite3.
 const onLicenseActivated = async () => {
   phase.value = "loading";
+  const { isCapacitor } = getEnv();
   try {
-    await initDb(); // safe: guarded inside initDb for non-Capacitor
+    if (isCapacitor) {
+      await initDb();
+    }
     phase.value = "app";
   } catch (err) {
     error.value = err.message || "Failed to initialize database";
@@ -81,37 +91,34 @@ const onLicenseActivated = async () => {
   }
 };
 
+// ── Main init ─────────────────────────────────────────────────────────────────
 const init = async () => {
   phase.value = "loading";
   error.value = "";
 
   try {
-    // ── Electron ───────────────────────────────────────────────────────────
-    // window.store = IPC bridge to better-sqlite3 in main process.
-    // window.license = IPC bridge to licenseManager.js in main process.
-    // The main process already verified the license before creating this
-    // window (or created the license window instead). So here we just check
-    // whether a key is saved — if yes, go straight to app. Never call initDb.
+    // Always detect inside init() — Capacitor bridge is ready by onMounted
+    const { isElectron, isCapacitor } = getEnv();
+
+    // ── Electron ────────────────────────────────────────────────────────────
+    // Main process verified the license before opening this window.
+    // Just check if a saved key exists. Never call initDb().
     if (isElectron) {
       const key = await window.license.getKey();
       phase.value = key ? "app" : "license";
       return;
     }
 
-    // ── Capacitor (mobile) ─────────────────────────────────────────────────
+    // ── Capacitor (mobile) ──────────────────────────────────────────────────
     if (isCapacitor) {
-      // Step 1: License check using Capacitor Preferences only — no SQLite.
-      // Wrapped in its own try/catch so any composable-level crash (e.g.
-      // Preferences plugin not ready) shows the license screen rather than
-      // falling through to phase='app' and bypassing the gate entirely.
+      // Step 1: verify via Capacitor Preferences only — no SQLite yet
       let result;
       try {
         const { verify } = useMobileLicense();
         result = await verify();
       } catch (licErr) {
         console.error("[app.vue] License verify threw:", licErr);
-        // Treat verify errors as "no license" — safer than granting access
-        result = { ok: false, reason: "verify_error" };
+        result = { ok: false, reason: "verify_error" }; // fail closed
       }
 
       if (!result.ok) {
@@ -119,13 +126,13 @@ const init = async () => {
         return;
       }
 
-      // Step 2: License confirmed — now safe to init SQLite.
+      // Step 2: license confirmed — safe to init SQLite
       await initDb();
       phase.value = "app";
       return;
     }
 
-    // ── Web / SSR fallback ─────────────────────────────────────────────────
+    // ── Web / SSR fallback ──────────────────────────────────────────────────
     phase.value = "app";
   } catch (err) {
     console.error("[app.vue] Init failed:", err);
