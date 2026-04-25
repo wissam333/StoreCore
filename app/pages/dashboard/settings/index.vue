@@ -316,6 +316,8 @@ const saveAll = async () => {
 };
 
 onMounted(load);
+
+watch(useSyncTick(), () => load());
 </script>
 
 <style lang="scss" scoped>

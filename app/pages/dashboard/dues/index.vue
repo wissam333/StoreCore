@@ -401,8 +401,8 @@ const load = async () => {
     filterPaid.value === "1"
       ? true
       : filterPaid.value === "0"
-        ? false
-        : undefined;
+      ? false
+      : undefined;
 
   const r = await getDues({
     search: search.value,
@@ -432,6 +432,8 @@ onMounted(async () => {
   await loadSettings();
   await load();
 });
+
+watch(useSyncTick(), () => load());
 </script>
 
 <style lang="scss" scoped>

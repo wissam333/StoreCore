@@ -228,6 +228,8 @@ onMounted(async () => {
   fmtSP.value = currency.fmtSP;
   await load();
 });
+
+watch(useSyncTick(), () => load());
 </script>
 
 <style lang="scss" scoped>

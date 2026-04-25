@@ -228,7 +228,7 @@ const handleAction = (action) => {
 
 const doDelete = async () => {
   deleting.value = true;
-  const r = await deleteOrder(route.params.id); 
+  const r = await deleteOrder(route.params.id);
   if (r.ok) {
     $toast.success($t("deleted"));
     navigateTo("/dashboard/orders");
@@ -259,6 +259,8 @@ onMounted(async () => {
   fmtSP.value = currency.fmtSP;
   await load();
 });
+
+watch(useSyncTick(), () => load());
 </script>
 
 <style lang="scss" scoped>

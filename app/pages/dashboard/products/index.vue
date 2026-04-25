@@ -245,6 +245,7 @@ onMounted(async () => {
   if (r.ok) categories.value = r.data;
   await load();
 });
+watch(useSyncTick(), () => load());
 </script>
 
 <style lang="scss" scoped>

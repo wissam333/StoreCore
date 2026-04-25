@@ -204,10 +204,10 @@ const statusClass = (s) =>
     pending: "badge-warning",
     partly_paid: "badge-info",
     paid: "badge-success",
-  })[s] ?? "";
+  }[s] ?? "");
 const statusColor = (s) =>
-  ({ pending: "#f59e0b", partly_paid: "#06b6d4", paid: "#10b981" })[s] ??
-  "#94a3b8";
+  ({ pending: "#f59e0b", partly_paid: "#06b6d4", paid: "#10b981" }[s] ??
+  "#94a3b8");
 
 const load = async () => {
   loading.value = true;
@@ -223,6 +223,8 @@ onMounted(async () => {
   await loadSettings();
   load();
 });
+
+watch(useSyncTick(), () => load());
 </script>
 
 <style lang="scss" scoped>

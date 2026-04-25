@@ -135,6 +135,8 @@ onMounted(async () => {
   await loadSettings();
   load();
 });
+
+watch(useSyncTick(), () => load());
 </script>
 
 <style lang="scss" scoped>
