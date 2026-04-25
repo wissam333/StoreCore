@@ -1,4 +1,14 @@
 <!-- store-app/pages/license.vue -->
+<!--
+  Electron-only. Uses window.license IPC — never useMobileLicense().
+
+  FIX: activate() no longer calls window.license.onActivated() itself.
+  Instead, main.js's license:activate handler now confirms the key is on
+  disk before returning ok:true. If ok:true comes back, THEN we call
+  onActivated(). This means the IPC round-trip acts as the save-confirmation,
+  and the user always gets a visible error if something goes wrong — they
+  never get stuck with a dead input field.
+-->
 <template>
   <div class="license-page" :dir="locale === 'ar' ? 'rtl' : 'ltr'">
     <div class="license-card">
@@ -15,6 +25,9 @@
           class="key-input"
           :placeholder="$t('license.keyPlaceholder')"
           :disabled="isActivating"
+          autocorrect="off"
+          autocapitalize="characters"
+          spellcheck="false"
           @keyup.enter="activate"
         />
       </div>
@@ -45,53 +58,42 @@
 </template>
 
 <script setup>
-definePageMeta({
-  layout: false,
-});
+definePageMeta({ layout: false });
 
 const { locale } = useI18n();
 const licenseKey = ref("");
 const isActivating = ref(false);
 const error = ref("");
 
-const isElectron = typeof window !== "undefined" && !!window.license;
-const isCapacitor =
-  typeof window !== "undefined" &&
-  typeof Capacitor !== "undefined" &&
-  Capacitor.isNativePlatform?.();
-
-let mobileLicense = null;
-if (isCapacitor) {
-  mobileLicense = useMobileLicense();
-}
-
 const activate = async () => {
-  if (!licenseKey.value.trim()) return;
+  const key = licenseKey.value.trim();
+  if (!key) return;
+
   isActivating.value = true;
   error.value = "";
 
   try {
-    let result;
-
-    if (isElectron) {
-      result = await window.license.activate(licenseKey.value.trim());
-      if (result.ok) {
-        window.license.onActivated();
-      }
-    } else {
-      result = await mobileLicense.activate(licenseKey.value.trim());
-      if (result.ok) {
-        // On mobile: reload the page so app.vue re-initializes with the new key
-        window.location.reload();
-      }
+    if (typeof window === "undefined" || !window.license) {
+      error.value = "License system unavailable";
+      isActivating.value = false;
+      return;
     }
 
-    if (!result.ok) {
+    // main.js's license:activate handler now verifies the key landed on disk
+    // before returning ok:true — so if we get ok:true here, it's safe to proceed.
+    const result = await window.license.activate(key);
+
+    if (result.ok) {
+      // Key is confirmed saved on disk — now tell main to open the app window.
+      window.license.onActivated();
+      // Keep spinner running while main closes this window and opens the app.
+    } else {
+      // Show the real error (server rejection OR storage failure) — input stays open.
       error.value = result.error || "Activation failed";
+      isActivating.value = false;
     }
   } catch (err) {
     error.value = err.message || "Activation error";
-  } finally {
     isActivating.value = false;
   }
 };
@@ -159,6 +161,7 @@ const activate = async () => {
   text-align: center;
   letter-spacing: 0.05em;
   font-family: monospace;
+  box-sizing: border-box;
   &:focus {
     border-color: var(--primary);
   }

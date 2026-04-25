@@ -2,63 +2,105 @@
 import pkg from "node-machine-id";
 const { machineIdSync } = pkg;
 import { app } from "electron";
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  fsyncSync,
+  closeSync,
+} from "fs";
 import path from "path";
 
 const LICENSE_SERVER = "https://storecore-backend.onrender.com";
 const GRACE_DAYS = 7;
 
-// ── Simple file-based store ───────────────────────────────────────────────────
+// ── File store ────────────────────────────────────────────────────────────────
 const getStorePath = () => path.join(app.getPath("userData"), "license.json");
 
 const store = {
   get: (key) => {
     try {
-      if (!existsSync(getStorePath())) return null;
-      const data = JSON.parse(readFileSync(getStorePath(), "utf8"));
+      const p = getStorePath();
+      if (!existsSync(p)) return null;
+      const data = JSON.parse(readFileSync(p, "utf8"));
       return data[key] ?? null;
     } catch {
       return null;
     }
   },
+
+  // FIX: Added mkdirSync guard + fsync to force OS flush before returning.
+  // Without fsync, writeFileSync can return before the data hits disk on
+  // Windows (write-back caching), causing getSavedKey() to return null
+  // immediately after a successful write.
   set: (key, value) => {
-    try {
-      let data = {};
-      if (existsSync(getStorePath())) {
-        data = JSON.parse(readFileSync(getStorePath(), "utf8"));
+    const p = getStorePath();
+    const dir = path.dirname(p);
+
+    // Ensure the directory exists
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
+
+    // Read existing data
+    let data = {};
+    if (existsSync(p)) {
+      try {
+        data = JSON.parse(readFileSync(p, "utf8"));
+      } catch {
+        data = {}; // corrupt — start fresh
       }
-      data[key] = value;
-      writeFileSync(getStorePath(), JSON.stringify(data, null, 2));
-    } catch {}
+    }
+
+    data[key] = value;
+    const json = JSON.stringify(data, null, 2);
+
+    // Write and force-flush to disk before returning
+    const fd = openSync(p, "w");
+    try {
+      writeFileSync(p, json, "utf8"); // write content
+      fsyncSync(fd); // flush OS write-back cache
+    } finally {
+      closeSync(fd);
+    }
   },
+
   delete: (key) => {
     try {
-      if (!existsSync(getStorePath())) return;
-      const data = JSON.parse(readFileSync(getStorePath(), "utf8"));
+      const p = getStorePath();
+      if (!existsSync(p)) return;
+      const data = JSON.parse(readFileSync(p, "utf8"));
       delete data[key];
-      writeFileSync(getStorePath(), JSON.stringify(data, null, 2));
+      writeFileSync(p, JSON.stringify(data, null, 2), "utf8");
     } catch {}
   },
 };
 
-// ── Machine ID ────────────────────────────────────────────────────────────────
-export const getMachineId = () => machineIdSync({ original: true });
+// ── Machine ID ─────────────────────────────────────────────────────────────────
+export const getMachineId = () => {
+  try {
+    return machineIdSync({ original: true });
+  } catch (err) {
+    console.error("[license] getMachineId failed:", err.message);
+    return "unknown";
+  }
+};
 
-// ── Save license locally after activation ─────────────────────────────────────
 const saveLicense = (key) => {
   store.set("license_key", key);
   store.set("last_verified_at", new Date().toISOString());
 };
 
-// ── Check grace period ────────────────────────────────────────────────────────
 const isWithinGrace = () => {
   const last = store.get("last_verified_at");
   if (!last) return false;
-  const diff = (Date.now() - new Date(last).getTime()) / (1000 * 60 * 60 * 24);
-  return diff < GRACE_DAYS;
+  const ts = new Date(last).getTime();
+  if (isNaN(ts)) return false;
+  return (Date.now() - ts) / 86400000 < GRACE_DAYS;
 };
 
-// ── Persist to SQLite settings ────────────────────────────────────────────────
 const persistToSettings = (db, key) => {
   if (!db) return;
   try {
@@ -66,7 +108,6 @@ const persistToSettings = (db, key) => {
       `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
     ).run("license_key", key);
-
     const existing = db
       .prepare(`SELECT value FROM settings WHERE key='sync_base'`)
       .get();
@@ -77,43 +118,55 @@ const persistToSettings = (db, key) => {
       ).run("sync_base", LICENSE_SERVER);
     }
   } catch (err) {
-    console.warn("[license] Could not persist key to SQLite:", err.message);
+    console.warn("[license] persistToSettings failed:", err.message);
   }
 };
 
 const removeFromSettings = (db) => {
   if (!db) return;
   try {
-    db.prepare(`DELETE FROM settings WHERE key='license_key'`).run();
+    db.prepare(`UPDATE settings SET value='' WHERE key='license_key'`).run();
   } catch {}
 };
 
-// ── Activate ──────────────────────────────────────────────────────────────────
+// ── Activate ───────────────────────────────────────────────────────────────────
 export const activateLicense = async (key, db) => {
+  if (!key?.trim()) return { ok: false, error: "License key cannot be empty" };
+
   const machine_id = getMachineId();
   try {
     const res = await fetch(`${LICENSE_SERVER}/license/activate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key, machine_id, platform: "desktop" }),
-      signal: AbortSignal.timeout(8000),
+      body: JSON.stringify({
+        key: key.trim(),
+        machine_id,
+        platform: "desktop",
+      }),
+      signal: AbortSignal.timeout(12000),
     });
-    const json = await res.json();
-    if (json.ok) {
-      saveLicense(key);
-      persistToSettings(db, key);
+    const json = await res.json().catch(() => ({}));
+    if (res.ok && json.ok) {
+      saveLicense(key.trim());
+      persistToSettings(db, key.trim());
       return { ok: true };
     }
-    return { ok: false, error: json.error ?? "Activation failed" };
-  } catch {
-    return { ok: false, error: "Cannot reach license server" };
+    return {
+      ok: false,
+      error: json.error ?? `Server error (HTTP ${res.status})`,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      error: "Cannot reach license server. Check your internet connection.",
+    };
   }
 };
 
-// ── Verify ────────────────────────────────────────────────────────────────────
+// ── Verify ─────────────────────────────────────────────────────────────────────
 export const verifyLicense = async () => {
   const key = store.get("license_key");
-  if (!key) return { ok: false, reason: "no_license" };
+  if (!key?.trim()) return { ok: false, reason: "no_license" };
 
   const machine_id = getMachineId();
   try {
@@ -121,10 +174,14 @@ export const verifyLicense = async () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key, machine_id, platform: "desktop" }),
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(10000),
     });
-    const json = await res.json();
-    if (json.ok) {
+    if (res.status >= 500) {
+      if (isWithinGrace()) return { ok: true, offline: true };
+      return { ok: false, reason: "server_error" };
+    }
+    const json = await res.json().catch(() => ({}));
+    if (res.ok && json.ok) {
       store.set("last_verified_at", new Date().toISOString());
       return { ok: true };
     }
@@ -135,7 +192,7 @@ export const verifyLicense = async () => {
   }
 };
 
-// ── Deactivate ────────────────────────────────────────────────────────────────
+// ── Deactivate ─────────────────────────────────────────────────────────────────
 export const deactivateLicense = async (db) => {
   const key = store.get("license_key");
   if (!key) return { ok: false, error: "No license found" };
@@ -146,18 +203,21 @@ export const deactivateLicense = async (db) => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key, machine_id, platform: "desktop" }),
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(12000),
     });
-    const json = await res.json();
-    if (json.ok) {
+    const json = await res.json().catch(() => ({}));
+    if (res.ok && json.ok) {
       store.delete("license_key");
       store.delete("last_verified_at");
       removeFromSettings(db);
       return { ok: true };
     }
-    return { ok: false, error: json.error };
+    return {
+      ok: false,
+      error: json.error ?? `Server error (HTTP ${res.status})`,
+    };
   } catch {
-    return { ok: false, error: "Cannot reach license server" };
+    return { ok: false, error: "Cannot reach license server." };
   }
 };
 

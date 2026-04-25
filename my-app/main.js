@@ -17,17 +17,18 @@ import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 
 // ── File logger ───────────────────────────────────────────────────────────────
-const logFile = path.join(app.getPath("userData"), "app.log");
+const getLogFile = () => path.join(app.getPath("userData"), "app.log");
 const log = (...args) => {
   const line = `[${new Date().toISOString()}] ${args.join(" ")}\n`;
-  fs.appendFileSync(logFile, line);
+  try {
+    fs.appendFileSync(getLogFile(), line);
+  } catch {}
   console.log(...args);
 };
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ── Squirrel startup (must be first) ──────────────────────────────────────────
 if (require("electron-squirrel-startup")) app.quit();
 
 if (process.platform === "win32") {
@@ -48,7 +49,6 @@ if (process.platform === "win32") {
   }
 }
 
-// ── Register app:// protocol (must be before app ready) ───────────────────────
 protocol.registerSchemesAsPrivileged([
   {
     scheme: "app",
@@ -61,11 +61,8 @@ protocol.registerSchemesAsPrivileged([
   },
 ]);
 
-// ── Window references ─────────────────────────────────────────────────────────
 let mainWindow = null;
 let licenseWindow = null;
-
-// ── Load window helper ────────────────────────────────────────────────────────
 const isDev = process.env.NODE_ENV === "development";
 
 const loadWindow = async (win, route = "") => {
@@ -75,28 +72,23 @@ const loadWindow = async (win, route = "") => {
   await win.loadURL(url);
 };
 
-// ── Register app:// protocol handler ─────────────────────────────────────────
 const registerProtocol = () => {
   const publicDir = app.isPackaged
     ? path.join(process.resourcesPath, "app.asar.unpacked", "public_nuxt")
     : path.join(__dirname, "../.output/public");
-
   protocol.handle("app", (request) => {
     let filePath = request.url.slice("app://./".length);
     filePath = filePath.split("?")[0].split("#")[0];
     if (!filePath || !path.extname(filePath)) filePath = "index.html";
-    const fullPath = path.join(publicDir, filePath);
-    return net.fetch(pathToFileURL(fullPath).toString());
+    return net.fetch(pathToFileURL(path.join(publicDir, filePath)).toString());
   });
 };
 
-// ── Create main app window ────────────────────────────────────────────────────
 const createWindow = async () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.focus();
     return;
   }
-
   mainWindow = new BrowserWindow({
     icon: path.join(__dirname, "../public/logo/logo.ico"),
     width: 1200,
@@ -108,21 +100,17 @@ const createWindow = async () => {
       preload: path.join(__dirname, "preload.mjs"),
     },
   });
-
   await loadWindow(mainWindow);
-
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
 };
 
-// ── Create license window ─────────────────────────────────────────────────────
 const createLicenseWindow = async () => {
   if (licenseWindow && !licenseWindow.isDestroyed()) {
     licenseWindow.focus();
     return;
   }
-
   licenseWindow = new BrowserWindow({
     width: 500,
     height: 600,
@@ -136,38 +124,78 @@ const createLicenseWindow = async () => {
       preload: path.join(__dirname, "preload.mjs"),
     },
   });
-
-  // Load the /license route directly
   await loadWindow(licenseWindow, "/license");
-
   licenseWindow.on("closed", () => {
     licenseWindow = null;
-    // If no main window exists, quit the app
-    if (!mainWindow || mainWindow.isDestroyed()) {
-      app.quit();
-    }
+    if (!mainWindow || mainWindow.isDestroyed()) app.quit();
   });
 };
 
-// ── DB init (once) ────────────────────────────────────────────────────────────
+// ── DB ────────────────────────────────────────────────────────────────────────
 const db = getDb();
 initSchema(db);
 registerStoreHandlers(db, ipcMain);
 
-// ── License IPC handlers ──────────────────────────────────────────────────────
+// ── License IPC ───────────────────────────────────────────────────────────────
+
+// KEY FIX: activate handler now checks that the key was actually written to
+// disk before returning ok:true. If storage fails, we return ok:false with a
+// diagnostic error so the license page shows it — the user keeps the input
+// field and can try again. We never call onActivated() unless save confirmed.
 ipcMain.handle("license:activate", async (_, key) => {
-  return await activateLicense(key, db);
+  log("[license:activate] key:", key?.slice(0, 8) + "...");
+
+  const result = await activateLicense(key, db);
+  log("[license:activate] server result:", JSON.stringify(result));
+
+  if (!result.ok) return result; // server rejected — pass error straight through
+
+  // Confirm the key landed on disk
+  const saved = getSavedKey();
+  log("[license:activate] getSavedKey after save:", saved ? "OK ✓" : "NULL ✗");
+
+  if (!saved) {
+    // Run storage diagnostics so we can see the cause in app.log
+    const userData = app.getPath("userData");
+    const storePath = path.join(userData, "license.json");
+    let diag = `userData=${userData}`;
+    try {
+      fs.accessSync(userData, fs.constants.W_OK);
+      diag += " writable=YES";
+    } catch {
+      diag += " writable=NO";
+    }
+    diag += fs.existsSync(storePath) ? " file=EXISTS" : " file=MISSING";
+    log("[license:activate] STORAGE FAILURE —", diag);
+
+    return {
+      ok: false,
+      // Tell the user what happened without a dead-end.
+      // The input field stays open so they can retry.
+      error:
+        "Your license was accepted by the server but could not be saved on this PC. " +
+        `Check app.log at: ${getLogFile()}`,
+    };
+  }
+
+  // Key is on disk — safe to proceed
+  return { ok: true };
 });
 
-ipcMain.handle("license:deactivate", async () => {
-  return await deactivateLicense(db);
+ipcMain.handle("license:deactivate", async () => deactivateLicense(db));
+
+ipcMain.handle("license:getKey", () => {
+  const k = getSavedKey();
+  log("[license:getKey]", k ? k.slice(0, 8) + "..." : "null");
+  return k;
 });
 
-ipcMain.handle("license:getKey", () => getSavedKey());
 ipcMain.handle("license:getMachineId", () => getMachineId());
 
+// This is only sent after activate() confirmed ok:true AND key is on disk.
+// So we can open the main window unconditionally here.
 ipcMain.on("license:activated", async () => {
-  log("[main] license:activated received");
+  log("[main] license:activated — opening main window");
   if (licenseWindow && !licenseWindow.isDestroyed()) {
     licenseWindow.close();
     licenseWindow = null;
@@ -175,22 +203,19 @@ ipcMain.on("license:activated", async () => {
   await createWindow();
 });
 
-ipcMain.on("app:quit", () => {
-  app.quit();
-});
+ipcMain.on("app:quit", () => app.quit());
 
 // ── App ready ─────────────────────────────────────────────────────────────────
 app.whenReady().then(async () => {
-  log("[1] app ready");
-
+  log("[1] app ready — userData:", app.getPath("userData"));
   registerProtocol();
 
   let license;
   try {
     license = await verifyLicense();
-    log("[2] license result:", JSON.stringify(license));
+    log("[2] license:", JSON.stringify(license));
   } catch (err) {
-    log("[2] verifyLicense THREW:", err.message);
+    log("[2] verifyLicense threw:", err.message);
     license = { ok: false, reason: "error" };
   }
 
@@ -200,15 +225,14 @@ app.whenReady().then(async () => {
     return;
   }
 
-  log("[3] opening main app");
+  log("[3] opening main window");
   await createWindow();
 });
 
-// ── macOS dock re-open ────────────────────────────────────────────────────────
 app.on("activate", async () => {
   if (BrowserWindow.getAllWindows().length === 0) {
-    const license = await verifyLicense();
-    if (license.ok) await createWindow();
+    const lic = await verifyLicense();
+    if (lic.ok) await createWindow();
     else await createLicenseWindow();
   }
 });
