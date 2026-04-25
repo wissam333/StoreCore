@@ -73,7 +73,6 @@
       <div class="settings-card">
         <div class="card-title">{{ $t("syncSettings") }}</div>
         <div class="form-col">
-          <!-- License key is read from Preferences (source of truth), not SQLite -->
           <div class="license-key-box" :class="{ active: !!licenseKey }">
             <div class="license-key-label">
               <Icon
@@ -164,9 +163,12 @@ const saving = ref(false);
 const rateNote = ref("");
 const rateNoteType = ref("info");
 
-// License key is kept separate — it comes from Preferences, not SQLite.
-// SQLite's settings.license_key is just a mirror that may lag or fail silently.
-// Preferences is written synchronously during activate() so it is always current.
+// License key is displayed separately from the main settings object.
+// Source depends on platform:
+//   Electron  → window.license.getKey() (IPC → licenseManager.js file store)
+//   Mobile    → useMobileLicense().getKey() (Capacitor Preferences)
+// We never read it from SQLite because persistToSettings() is deferred
+// and may not have run yet, or may have failed silently.
 const licenseKey = ref("");
 
 const s = reactive({
@@ -183,26 +185,49 @@ const currencyOptions = [
   { label: "USD ($) — US Dollar", value: "USD" },
 ];
 
-// ── Load settings ─────────────────────────────────────────────────────────────
+// ── Read license key from the correct source for this platform ────────────────
+const loadLicenseKey = async () => {
+  try {
+    // Electron: window.license is exposed by the preload script via contextBridge
+    if (
+      typeof window !== "undefined" &&
+      window.__ELECTRON__ &&
+      window.license?.getKey
+    ) {
+      licenseKey.value = (await window.license.getKey()) ?? "";
+      return;
+    }
+
+    // Native mobile: read from Capacitor Preferences
+    if (
+      typeof window !== "undefined" &&
+      window?.Capacitor?.isNativePlatform?.()
+    ) {
+      const { getKey } = useMobileLicense();
+      licenseKey.value = (await getKey()) ?? "";
+      return;
+    }
+
+    // Web / unknown — no license key concept
+    licenseKey.value = "";
+  } catch (err) {
+    console.warn("[settings] loadLicenseKey failed:", err?.message ?? err);
+    licenseKey.value = "";
+  }
+};
+
+// ── Load all settings ─────────────────────────────────────────────────────────
 const load = async () => {
-  // 1. Read DB settings (everything except license_key)
   const r = await getSettings();
   if (r.ok) {
-    const { license_key, ...rest } = r.data;
+    // Pull everything except license_key — that comes from loadLicenseKey()
+    const { license_key, ...rest } = r.data ?? {};
     Object.assign(s, rest);
   }
   if (!s.sync_base?.trim())
     s.sync_base = "https://storecore-backend.onrender.com";
 
-  // 2. Read license key directly from Preferences — this is always accurate
-  //    regardless of whether persistToSettings() succeeded after activation.
-  try {
-    const { getKey } = useMobileLicense();
-    licenseKey.value = (await getKey()) ?? "";
-  } catch {
-    // Not on mobile or Preferences unavailable — leave empty
-    licenseKey.value = "";
-  }
+  await loadLicenseKey();
 };
 
 const fetchRate = async () => {
@@ -235,7 +260,7 @@ const formatTime = (date) => {
 
 const saveAll = async () => {
   saving.value = true;
-  // license_key is never saved from this page — it is managed by useMobileLicense
+  // Never write license_key from this page — it is managed by the license system
   const skip = new Set(["license_key"]);
   for (const key of Object.keys(s)) {
     if (skip.has(key)) continue;

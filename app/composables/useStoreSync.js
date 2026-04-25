@@ -1,8 +1,47 @@
 // store-app/composables/useStoreSync.js
 // Two-phase sync: push local outbox → remote, then pull remote changes → local.
 // Auth uses the activated license key as the Bearer token.
+//
+// FIX: getRemoteConfig() previously read license_key only from SQLite settings.
+// On mobile, persistToSettings() is deferred and often hasn't written the key
+// yet (or failed silently), so license_key in SQLite was empty → cfg was null
+// → sync() returned immediately with no error → "sync complete" with no data.
+//
+// NEW: license key is read from the correct source per platform:
+//   Mobile  → Capacitor Preferences (written synchronously during activate())
+//   Electron → window.license.getKey() via IPC
+//   Fallback → SQLite settings (for any edge case)
 
 import { useNetwork } from "@vueuse/core";
+
+// ── Read license key from the authoritative source for this platform ──────────
+const getLicenseKey = async () => {
+  // Electron: IPC bridge
+  if (
+    typeof window !== "undefined" &&
+    window.__ELECTRON__ &&
+    window.license?.getKey
+  ) {
+    try {
+      return (await window.license.getKey()) ?? null;
+    } catch {}
+  }
+
+  // Native mobile: Capacitor Preferences — always written synchronously by activate()
+  if (
+    typeof window !== "undefined" &&
+    window?.Capacitor?.isNativePlatform?.()
+  ) {
+    try {
+      const { Preferences } = await import("@capacitor/preferences");
+      const r = await Preferences.get({ key: "license_key" });
+      return r?.value ?? null;
+    } catch {}
+  }
+
+  // Fallback: SQLite settings (web/dev or if Preferences unavailable)
+  return null;
+};
 
 export const useStoreSyncManager = () => {
   const { isOnline } = useNetwork();
@@ -20,7 +59,7 @@ export const useStoreSyncManager = () => {
   const pendingCount = ref(0);
   const syncError = ref(null);
 
-  // ── Helpers ──────────────────────────────────────────────────────────────
+  // ── Helpers ───────────────────────────────────────────────────────────────
   const loadLastSynced = async () => {
     const r = await getLastSyncedAt();
     if (r.ok) lastSyncedAt.value = r.data ? new Date(r.data) : null;
@@ -31,14 +70,27 @@ export const useStoreSyncManager = () => {
     pendingCount.value = r.ok ? r.data?.length ?? 0 : 0;
   };
 
-  // Reads sync_base + license_key from settings.
-  // license_key is saved automatically on activation — no manual token needed.
+  // ── Remote config ─────────────────────────────────────────────────────────
+  // sync_base comes from SQLite settings (user-editable in the Settings page).
+  // license_key comes from the authoritative platform source — NOT SQLite —
+  // because the SQLite mirror may be empty if persistToSettings() failed.
   const getRemoteConfig = async () => {
+    // Always read sync_base from SQLite settings
     const r = await getSettings();
-    if (!r.ok) return null;
-    const base = r.data?.sync_base?.trim();
-    const licenseKey = r.data?.license_key?.trim();
-    if (!base || !licenseKey) return null;
+    const base = r.ok ? r.data?.sync_base?.trim() : "";
+
+    if (!base) return null;
+
+    // Read license key from the correct platform source
+    let licenseKey = await getLicenseKey();
+
+    // Final fallback: SQLite (covers Electron dev mode / web)
+    if (!licenseKey && r.ok) {
+      licenseKey = r.data?.license_key?.trim() ?? "";
+    }
+
+    if (!licenseKey) return null;
+
     return { base, token: licenseKey };
   };
 
@@ -93,14 +145,11 @@ export const useStoreSyncManager = () => {
             body: method !== "DELETE" ? JSON.stringify(payload) : undefined,
           });
 
-          if (res.status === 401) {
-            // Wrong or expired license — stop immediately, no point retrying
+          if (res.status === 401)
             throw new Error("Unauthorized — check license key in Settings");
-          }
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           synced.push(item.id);
         } catch (err) {
-          // Re-throw auth errors to surface them in the UI
           if (err.message.includes("Unauthorized")) throw err;
           console.warn(
             `[store-sync] Push failed for queue item ${item.id}:`,
@@ -159,8 +208,16 @@ export const useStoreSyncManager = () => {
   // ── Full sync cycle ───────────────────────────────────────────────────────
   const sync = async () => {
     if (!isOnline.value || isSyncing.value) return;
+
     const cfg = await getRemoteConfig();
-    if (!cfg) return; // no sync_base or license_key configured yet
+    if (!cfg) {
+      // Make the reason visible in the UI instead of silently doing nothing
+      console.warn(
+        "[store-sync] Skipping sync — no sync_base or license key configured",
+      );
+      syncError.value = "Sync not configured — check Settings";
+      return;
+    }
 
     isSyncing.value = true;
     syncError.value = null;
@@ -197,6 +254,7 @@ export const useStoreSyncManager = () => {
   });
 
   onUnmounted(() => stopAutoSync());
+
   watch(isOnline, (online) => {
     if (online) sync();
   });

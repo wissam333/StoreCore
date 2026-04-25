@@ -95,9 +95,7 @@ const isWithinGrace = async () => {
   }
 };
 
-// ── Clear stale license data from storage ─────────────────────────────────────
-// Called when the server tells us this key is no longer valid for this device.
-// Clears the key so the license screen appears on next launch too.
+// ── Clear stale license from storage ─────────────────────────────────────────
 const clearStoredLicense = async () => {
   try {
     await prefRemove("license_key");
@@ -105,7 +103,7 @@ const clearStoredLicense = async () => {
   } catch {}
 };
 
-// ── Persist activated key to SQLite settings ──────────────────────────────────
+// ── Persist key to SQLite settings (deferred, non-fatal) ─────────────────────
 const persistToSettings = async (key) => {
   try {
     const { useMobileStore } = await import("./useMobileStore");
@@ -137,16 +135,12 @@ const removeFromSettings = async () => {
 
 // ── Verify ────────────────────────────────────────────────────────────────────
 //
-// FIX: previously trusted ok:true from the server even when bound:false,
-// meaning an unactivated license key sitting in Preferences would silently
-// pass and open the app.
-//
-// NEW BEHAVIOUR:
-//  - No key in storage              → show license screen (no_license)
-//  - Server returns 4xx             → clear stale key, show license screen
-//  - Server returns ok:true         → verified, open app
-//  - Server unreachable + grace     → allow offline (grace period)
-//  - Server unreachable, no grace   → show license screen
+// TIMEOUT NOTE:
+// The backend runs on Render's free tier which cold-starts in 50-90 seconds
+// after inactivity. We use a 100-second timeout so a cold start doesn't look
+// like a network failure and incorrectly expire the grace period.
+// The loading message in app.vue ("Verifying license…") stays visible during
+// this wait — the user sees progress, not a frozen screen.
 const verify = async () => {
   let key = null;
   try {
@@ -156,7 +150,6 @@ const verify = async () => {
     return { ok: false, reason: "no_license" };
   }
 
-  // No key stored at all → must activate
   if (!key || !key.trim()) return { ok: false, reason: "no_license" };
 
   let machine_id;
@@ -171,32 +164,28 @@ const verify = async () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key: key.trim(), machine_id, platform: "mobile" }),
-      signal: AbortSignal.timeout(10000),
+      // 100s timeout — long enough to survive a Render cold start (50-90s)
+      signal: AbortSignal.timeout(100_000),
     });
 
     if (res.ok) {
       const json = await res.json();
       if (json.ok) {
-        // Confirmed valid and bound to this device
         await prefSet("last_verified_at", new Date().toISOString());
         return { ok: true };
       }
-      // Server said ok:false despite 200 — treat as invalid
       await clearStoredLicense();
       return { ok: false, reason: "invalid", error: json.error };
     }
 
-    // 4xx — key is invalid, wrong device, not activated, or expired
-    // Clear the stale key so the license screen appears on next launch too
+    // 4xx — invalid key, wrong device, not activated, expired
     const errJson = await res.json().catch(() => ({}));
     const reason = errJson?.reason ?? "invalid";
     const errorMsg = errJson?.error ?? `HTTP ${res.status}`;
     console.warn("[mobile-license] verify rejected:", res.status, errorMsg);
-
     await clearStoredLicense();
     return { ok: false, reason, error: errorMsg };
   } catch (err) {
-    // Network error — apply grace period
     console.warn("[mobile-license] verify: network error:", err?.message);
     const grace = await isWithinGrace();
     if (grace) return { ok: true, offline: true };
@@ -221,7 +210,7 @@ const activate = async (key) => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key: key.trim(), machine_id, platform: "mobile" }),
-      signal: AbortSignal.timeout(12000),
+      signal: AbortSignal.timeout(100_000),
     });
 
     const json = await res.json().catch(() => ({}));
@@ -229,8 +218,6 @@ const activate = async (key) => {
     if (res.ok && json.ok) {
       await prefSet("license_key", key.trim());
       await prefSet("last_verified_at", new Date().toISOString());
-
-      // Deferred so it runs after app.vue calls initDb()
       setTimeout(() => {
         persistToSettings(key.trim()).catch((e) =>
           console.warn(
@@ -239,7 +226,6 @@ const activate = async (key) => {
           ),
         );
       }, 0);
-
       return { ok: true };
     }
 
@@ -277,7 +263,7 @@ const deactivate = async () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key, machine_id, platform: "mobile" }),
-      signal: AbortSignal.timeout(12000),
+      signal: AbortSignal.timeout(100_000),
     });
     const json = await res.json().catch(() => ({}));
 
