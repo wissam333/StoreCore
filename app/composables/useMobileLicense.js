@@ -1,15 +1,4 @@
 // store-app/composables/useMobileLicense.js
-//
-// FIXES vs previous version:
-//  1. persistToSettings() — now fire-and-forget via setTimeout(0). It was
-//     previously called synchronously inside activate(), which imported
-//     useMobileStore → getMobileDb() BEFORE app.vue called initDb(). On
-//     Android this caused the "capacitorSQLitePlugin: null" crash because
-//     the SQLite plugin wasn't registered yet at activation time.
-//     The key is already in Preferences after activate() — the settings
-//     row is a nice-to-have that can safely lag by one event-loop tick.
-//  2. No other logic changes — all bug fixes from the previous version
-//     (device fingerprint, grace period guard, error surfacing) are kept.
 
 const LICENSE_SERVER = "https://storecore-backend.onrender.com";
 const GRACE_DAYS = 7;
@@ -42,9 +31,8 @@ const hashString = async (str) => {
       .slice(0, 40);
   } catch {
     let h = 5381;
-    for (let i = 0; i < str.length; i++) {
+    for (let i = 0; i < str.length; i++)
       h = ((h << 5) + h + str.charCodeAt(i)) >>> 0;
-    }
     return h.toString(16).padStart(8, "0");
   }
 };
@@ -52,7 +40,6 @@ const hashString = async (str) => {
 const getDeviceId = async () => {
   try {
     const { Device } = await import("@capacitor/device");
-
     const idInfo = await Device.getId();
     if (
       idInfo?.identifier &&
@@ -62,7 +49,6 @@ const getDeviceId = async () => {
       await prefSet("device_uuid", idInfo.identifier).catch(() => {});
       return idInfo.identifier;
     }
-
     const devInfo = await Device.getInfo();
     const fingerprint = [
       devInfo.model ?? "",
@@ -92,12 +78,11 @@ const getDeviceId = async () => {
     typeof crypto !== "undefined" && crypto.randomUUID
       ? crypto.randomUUID()
       : Math.random().toString(36).slice(2) + Date.now().toString(36);
-
   await prefSet("device_uuid", uuid).catch(() => {});
   return uuid;
 };
 
-// ── Grace period ───────────────────────────────────────────────────────────────
+// ── Grace period ──────────────────────────────────────────────────────────────
 const isWithinGrace = async () => {
   try {
     const last = await prefGet("last_verified_at");
@@ -110,25 +95,28 @@ const isWithinGrace = async () => {
   }
 };
 
-// ── Persist key to SQLite ──────────────────────────────────────────────────────
-// FIX: This is now called with setTimeout(0) from activate() so it runs AFTER
-// app.vue's initDb() has opened the database connection. Calling it
-// synchronously during the license phase caused getMobileDb() to be invoked
-// before the CapacitorSQLite plugin was registered → "capacitorSQLitePlugin: null".
+// ── Clear stale license data from storage ─────────────────────────────────────
+// Called when the server tells us this key is no longer valid for this device.
+// Clears the key so the license screen appears on next launch too.
+const clearStoredLicense = async () => {
+  try {
+    await prefRemove("license_key");
+    await prefRemove("last_verified_at");
+  } catch {}
+};
+
+// ── Persist activated key to SQLite settings ──────────────────────────────────
 const persistToSettings = async (key) => {
   try {
     const { useMobileStore } = await import("./useMobileStore");
     const { setSetting, getSettings } = useMobileStore();
     await setSetting({ key: "license_key", value: key });
     const r = await getSettings();
-    if (r.ok && !r.data?.sync_base?.trim()) {
+    if (r.ok && !r.data?.sync_base?.trim())
       await setSetting({ key: "sync_base", value: LICENSE_SERVER });
-    }
   } catch (err) {
-    // Non-fatal: the key is already in Preferences. DB write will be retried
-    // on next app launch when initDb() runs before this path.
     console.warn(
-      "[mobile-license] persistToSettings failed (DB may not be ready yet):",
+      "[mobile-license] persistToSettings failed:",
       err?.message ?? err,
     );
   }
@@ -147,7 +135,18 @@ const removeFromSettings = async () => {
   }
 };
 
-// ── Verify ─────────────────────────────────────────────────────────────────────
+// ── Verify ────────────────────────────────────────────────────────────────────
+//
+// FIX: previously trusted ok:true from the server even when bound:false,
+// meaning an unactivated license key sitting in Preferences would silently
+// pass and open the app.
+//
+// NEW BEHAVIOUR:
+//  - No key in storage              → show license screen (no_license)
+//  - Server returns 4xx             → clear stale key, show license screen
+//  - Server returns ok:true         → verified, open app
+//  - Server unreachable + grace     → allow offline (grace period)
+//  - Server unreachable, no grace   → show license screen
 const verify = async () => {
   let key = null;
   try {
@@ -157,6 +156,7 @@ const verify = async () => {
     return { ok: false, reason: "no_license" };
   }
 
+  // No key stored at all → must activate
   if (!key || !key.trim()) return { ok: false, reason: "no_license" };
 
   let machine_id;
@@ -174,25 +174,29 @@ const verify = async () => {
       signal: AbortSignal.timeout(10000),
     });
 
-    if (!res.ok) {
-      const errJson = await res.json().catch(() => ({}));
-      const reason = errJson?.error ?? `HTTP ${res.status}`;
-      console.warn("[mobile-license] verify: server rejected:", reason);
-      if (res.status >= 500) {
-        const grace = await isWithinGrace();
-        if (grace) return { ok: true, offline: true };
+    if (res.ok) {
+      const json = await res.json();
+      if (json.ok) {
+        // Confirmed valid and bound to this device
+        await prefSet("last_verified_at", new Date().toISOString());
+        return { ok: true };
       }
-      return { ok: false, reason: "invalid", error: reason };
+      // Server said ok:false despite 200 — treat as invalid
+      await clearStoredLicense();
+      return { ok: false, reason: "invalid", error: json.error };
     }
 
-    const json = await res.json();
-    if (json.ok) {
-      await prefSet("last_verified_at", new Date().toISOString());
-      return { ok: true };
-    }
+    // 4xx — key is invalid, wrong device, not activated, or expired
+    // Clear the stale key so the license screen appears on next launch too
+    const errJson = await res.json().catch(() => ({}));
+    const reason = errJson?.reason ?? "invalid";
+    const errorMsg = errJson?.error ?? `HTTP ${res.status}`;
+    console.warn("[mobile-license] verify rejected:", res.status, errorMsg);
 
-    return { ok: false, reason: "invalid", error: json.error };
+    await clearStoredLicense();
+    return { ok: false, reason, error: errorMsg };
   } catch (err) {
+    // Network error — apply grace period
     console.warn("[mobile-license] verify: network error:", err?.message);
     const grace = await isWithinGrace();
     if (grace) return { ok: true, offline: true };
@@ -200,11 +204,10 @@ const verify = async () => {
   }
 };
 
-// ── Activate ───────────────────────────────────────────────────────────────────
+// ── Activate ──────────────────────────────────────────────────────────────────
 const activate = async (key) => {
-  if (!key || !key.trim()) {
+  if (!key || !key.trim())
     return { ok: false, error: "License key cannot be empty" };
-  }
 
   let machine_id;
   try {
@@ -227,10 +230,7 @@ const activate = async (key) => {
       await prefSet("license_key", key.trim());
       await prefSet("last_verified_at", new Date().toISOString());
 
-      // FIX: Deferred so it runs AFTER app.vue calls initDb().
-      // The emit("activated") in MobileLicensePage triggers app.vue's
-      // onLicenseActivated → initDb() → DB open. By using setTimeout(0) here
-      // we ensure the DB is open before persistToSettings tries getMobileDb().
+      // Deferred so it runs after app.vue calls initDb()
       setTimeout(() => {
         persistToSettings(key.trim()).catch((e) =>
           console.warn(
@@ -256,7 +256,7 @@ const activate = async (key) => {
   }
 };
 
-// ── Deactivate ─────────────────────────────────────────────────────────────────
+// ── Deactivate ────────────────────────────────────────────────────────────────
 const deactivate = async () => {
   let key = null;
   try {
