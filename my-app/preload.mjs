@@ -68,6 +68,11 @@ contextBridge.exposeInMainWorld("license", {
   onActivated: () => ipcRenderer.send("license:activated"),
 });
 
-contextBridge.exposeInMainWorld('electronAPI', {
-  nativeFetch: (url) => ipcRenderer.invoke('native-fetch', url)
+contextBridge.exposeInMainWorld("electronAPI", {
+  nativeFetch: (url) => ipcRenderer.invoke("native-fetch", url),
 });
+
+// ── Safe Electron marker ─────────────────────────────────────────────────────
+// app.vue uses this instead of generic globals (window.store) which can
+// collide with Capacitor polyfills / browser extensions.
+contextBridge.exposeInMainWorld("__ELECTRON__", true);

@@ -39,8 +39,12 @@ const phase = ref("loading");
 const error = ref("");
 const loadingMsg = ref("");
 
+// ── Environment detection ─────────────────────────────────────────────────────
+// Use the custom flag exposed by Electron preload. Never use generic names
+// like window.store — Capacitor polyfills or browser extensions can define
+// them and cause a false-positive Electron detection.
 const isElectronEnv = () =>
-  typeof window !== "undefined" && !!window.license && !!window.store;
+  typeof window !== "undefined" && !!window.__ELECTRON__;
 
 const isNativeMobile = async () => {
   if (isElectronEnv()) return false;
