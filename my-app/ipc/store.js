@@ -1,6 +1,12 @@
 // store-app/ipc/store.js
 // Register all store IPC handlers.
 // Call registerStoreHandlers(db, ipcMain) from main.js after DB is ready.
+//
+// SYNC UPGRADE: Field-level change tracking.
+// Every enqueue() call now records which fields actually changed (changedFields).
+// The sync push sends PATCH + _changed_fields so the server can merge
+// concurrent edits to different columns of the same row without data loss.
+// e.g. User A edits product.name, User B edits product.stock → both survive.
 
 export function registerStoreHandlers(db, ipcMain) {
   const ALLOWED_TABLES = new Set([
@@ -31,11 +37,92 @@ export function registerStoreHandlers(db, ipcMain) {
     return copy;
   };
 
-  // ── Helper: enqueue sync item ─────────────────────────────────────────────
-  const enqueue = (table, operation, rowId, payload = null) => {
+  // ── Editable field lists per table (used for changedFields diffing) ───────
+  const EDITABLE_FIELDS = {
+    categories: ["name", "description"],
+    products: [
+      "name",
+      "description",
+      "category_id",
+      "barcode",
+      "buy_price",
+      "sell_price",
+      "currency",
+      "stock",
+      "min_stock",
+      "unit",
+      "image_url",
+      "is_active",
+    ],
+    customers: ["name", "phone", "address", "notes"],
+    orders: [
+      "customer_id",
+      "order_date",
+      "status",
+      "total_sp",
+      "total_usd",
+      "paid_amount",
+      "display_currency",
+      "notes",
+    ],
+    order_items: [
+      "order_id",
+      "product_id",
+      "product_name",
+      "quantity",
+      "sell_price_at_sale",
+      "currency_at_sale",
+      "line_total_sp",
+    ],
+    dues: [
+      "customer_id",
+      "order_id",
+      "amount",
+      "currency",
+      "amount_sp",
+      "description",
+      "due_date",
+      "paid",
+      "paid_at",
+    ],
+    staff: [
+      "full_name",
+      "username",
+      "password",
+      "role",
+      "phone",
+      "email",
+      "is_active",
+    ],
+  };
+
+  // ── Diff two rows, return array of field names that changed ───────────────
+  const diffFields = (table, before, after) => {
+    const fields = EDITABLE_FIELDS[table] ?? [];
+    if (!before) return fields; // insert — all fields are "new"
+    return fields.filter(
+      (f) => String(before[f] ?? "") !== String(after[f] ?? ""),
+    );
+  };
+
+  // ── Helper: enqueue sync item (now includes changedFields) ────────────────
+  const enqueue = (
+    table,
+    operation,
+    rowId,
+    payload = null,
+    changedFields = null,
+  ) => {
     db.prepare(
-      `INSERT INTO sync_queue (table_name, operation, row_id, payload) VALUES (?, ?, ?, ?)`,
-    ).run(table, operation, rowId, payload ? JSON.stringify(payload) : null);
+      `INSERT INTO sync_queue (table_name, operation, row_id, payload, changed_fields)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(
+      table,
+      operation,
+      rowId,
+      payload ? JSON.stringify(payload) : null,
+      changedFields ? JSON.stringify(changedFields) : null,
+    );
   };
 
   // ── Helper: read back a freshly-written row ───────────────────────────────
@@ -138,6 +225,7 @@ export function registerStoreHandlers(db, ipcMain) {
   ipcMain.handle("store:saveCategory", (_, cat) => {
     try {
       if (cat.id) {
+        const before = freshRow("categories", cat.id);
         db.prepare(
           `UPDATE categories
            SET name=@name, description=@description,
@@ -145,7 +233,8 @@ export function registerStoreHandlers(db, ipcMain) {
            WHERE id=@id`,
         ).run(cat);
         const fresh = freshRow("categories", cat.id);
-        enqueue("categories", "update", cat.id, fresh);
+        const changedFields = diffFields("categories", before, fresh);
+        enqueue("categories", "update", cat.id, fresh, changedFields);
         return { ok: true, id: cat.id };
       } else {
         const id = uuid();
@@ -153,7 +242,7 @@ export function registerStoreHandlers(db, ipcMain) {
           `INSERT INTO categories (id, name, description) VALUES (?, ?, ?)`,
         ).run(id, cat.name, cat.description);
         const fresh = freshRow("categories", id);
-        enqueue("categories", "insert", id, fresh);
+        enqueue("categories", "insert", id, fresh, null);
         return { ok: true, id };
       }
     } catch (err) {
@@ -166,7 +255,7 @@ export function registerStoreHandlers(db, ipcMain) {
       db.prepare(
         `UPDATE categories SET _deleted=1, version=version+1, updated_at=datetime('now') WHERE id=?`,
       ).run(id);
-      enqueue("categories", "delete", id);
+      enqueue("categories", "delete", id, null, null);
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -240,6 +329,7 @@ export function registerStoreHandlers(db, ipcMain) {
     try {
       const clean = strip(p, PRODUCT_JOIN);
       if (clean.id) {
+        const before = freshRow("products", clean.id);
         db.prepare(
           `UPDATE products
            SET name=@name, description=@description, category_id=@category_id,
@@ -250,7 +340,14 @@ export function registerStoreHandlers(db, ipcMain) {
            WHERE id=@id`,
         ).run(clean);
         const fresh = freshRow("products", clean.id);
-        enqueue("products", "update", clean.id, strip(fresh, PRODUCT_JOIN));
+        const changedFields = diffFields("products", before, fresh);
+        enqueue(
+          "products",
+          "update",
+          clean.id,
+          strip(fresh, PRODUCT_JOIN),
+          changedFields,
+        );
         return { ok: true, id: clean.id };
       } else {
         const id = uuid();
@@ -275,7 +372,7 @@ export function registerStoreHandlers(db, ipcMain) {
           clean.is_active,
         );
         const fresh = freshRow("products", id);
-        enqueue("products", "insert", id, strip(fresh, PRODUCT_JOIN));
+        enqueue("products", "insert", id, strip(fresh, PRODUCT_JOIN), null);
         return { ok: true, id };
       }
     } catch (err) {
@@ -288,7 +385,7 @@ export function registerStoreHandlers(db, ipcMain) {
       db.prepare(
         `UPDATE products SET _deleted=1, version=version+1, updated_at=datetime('now') WHERE id=?`,
       ).run(id);
-      enqueue("products", "delete", id);
+      enqueue("products", "delete", id, null, null);
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -303,7 +400,8 @@ export function registerStoreHandlers(db, ipcMain) {
          WHERE id=?`,
       ).run(delta, id);
       const fresh = freshRow("products", id);
-      enqueue("products", "update", id, strip(fresh, PRODUCT_JOIN));
+      // Only stock changed — be precise so other fields aren't stomped
+      enqueue("products", "update", id, strip(fresh, PRODUCT_JOIN), ["stock"]);
       return { ok: true, stock: fresh?.stock };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -365,6 +463,7 @@ export function registerStoreHandlers(db, ipcMain) {
   ipcMain.handle("store:saveCustomer", (_, c) => {
     try {
       if (c.id) {
+        const before = freshRow("customers", c.id);
         db.prepare(
           `UPDATE customers
            SET name=@name, phone=@phone, address=@address, notes=@notes,
@@ -372,7 +471,8 @@ export function registerStoreHandlers(db, ipcMain) {
            WHERE id=@id`,
         ).run(c);
         const fresh = freshRow("customers", c.id);
-        enqueue("customers", "update", c.id, fresh);
+        const changedFields = diffFields("customers", before, fresh);
+        enqueue("customers", "update", c.id, fresh, changedFields);
         return { ok: true, id: c.id };
       } else {
         const id = uuid();
@@ -380,7 +480,7 @@ export function registerStoreHandlers(db, ipcMain) {
           `INSERT INTO customers (id, name, phone, address, notes) VALUES (?, ?, ?, ?, ?)`,
         ).run(id, c.name, c.phone, c.address, c.notes);
         const fresh = freshRow("customers", id);
-        enqueue("customers", "insert", id, fresh);
+        enqueue("customers", "insert", id, fresh, null);
         return { ok: true, id };
       }
     } catch (err) {
@@ -393,7 +493,7 @@ export function registerStoreHandlers(db, ipcMain) {
       db.prepare(
         `UPDATE customers SET _deleted=1, version=version+1, updated_at=datetime('now') WHERE id=?`,
       ).run(id);
-      enqueue("customers", "delete", id);
+      enqueue("customers", "delete", id, null, null);
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -414,7 +514,7 @@ export function registerStoreHandlers(db, ipcMain) {
           trimmed,
         );
         customer = freshRow("customers", id);
-        enqueue("customers", "insert", id, customer);
+        enqueue("customers", "insert", id, customer, null);
       }
       return { ok: true, data: customer };
     } catch (err) {
@@ -529,7 +629,8 @@ export function registerStoreHandlers(db, ipcMain) {
         const cleanOrder = strip(order, ORDER_JOIN);
 
         if (orderId) {
-          // ── EDIT PATH ───────────────────────────────────────────────────
+          // ── EDIT PATH ─────────────────────────────────────────────────────
+          const orderBefore = freshRow("orders", orderId);
           const oldItems = db
             .prepare(
               `SELECT * FROM order_items WHERE order_id=? AND _deleted=0`,
@@ -549,7 +650,7 @@ export function registerStoreHandlers(db, ipcMain) {
             db.prepare(
               `UPDATE order_items SET _deleted=1, version=version+1, updated_at=datetime('now') WHERE id=?`,
             ).run(oi.id);
-            enqueue("order_items", "delete", oi.id);
+            enqueue("order_items", "delete", oi.id, null, null);
           }
 
           // Update order row
@@ -567,8 +668,18 @@ export function registerStoreHandlers(db, ipcMain) {
             total_usd: totalUsd,
             id: orderId,
           });
+
+          const freshOrder = freshRow("orders", orderId);
+          const orderChanged = diffFields("orders", orderBefore, freshOrder);
+          enqueue(
+            "orders",
+            "update",
+            orderId,
+            strip(freshOrder, ORDER_JOIN),
+            orderChanged,
+          );
         } else {
-          // ── INSERT PATH ─────────────────────────────────────────────────
+          // ── INSERT PATH ───────────────────────────────────────────────────
           orderId = uuid();
           db.prepare(
             `INSERT INTO orders
@@ -585,6 +696,14 @@ export function registerStoreHandlers(db, ipcMain) {
             cleanOrder.paid_amount ?? 0,
             cleanOrder.display_currency ?? "SP",
             cleanOrder.notes,
+          );
+          const freshOrder = freshRow("orders", orderId);
+          enqueue(
+            "orders",
+            "insert",
+            orderId,
+            strip(freshOrder, ORDER_JOIN),
+            null,
           );
         }
 
@@ -624,11 +743,13 @@ export function registerStoreHandlers(db, ipcMain) {
               "insert",
               itemId,
               strip(freshItem, ITEM_JOIN),
+              null,
             );
         }
 
         // Update customer stats
         if (order.customer_id) {
+          const custBefore = freshRow("customers", order.customer_id);
           db.prepare(
             `UPDATE customers
              SET total_orders=(SELECT COUNT(*) FROM orders WHERE customer_id=? AND _deleted=0 AND status='paid'),
@@ -639,8 +760,15 @@ export function registerStoreHandlers(db, ipcMain) {
              WHERE id=?`,
           ).run(order.customer_id, order.customer_id, order.customer_id);
           const freshCust = freshRow("customers", order.customer_id);
+          const custChanged = diffFields("customers", custBefore, freshCust);
           if (freshCust)
-            enqueue("customers", "update", order.customer_id, freshCust);
+            enqueue(
+              "customers",
+              "update",
+              order.customer_id,
+              freshCust,
+              custChanged,
+            );
         }
 
         // Auto-pay linked dues
@@ -653,23 +781,19 @@ export function registerStoreHandlers(db, ipcMain) {
             .prepare(`SELECT * FROM dues WHERE order_id=? AND paid=1`)
             .all(orderId);
           for (const due of updatedDues)
-            enqueue("dues", "update", due.id, strip(due, DUE_JOIN));
+            enqueue("dues", "update", due.id, strip(due, DUE_JOIN), [
+              "paid",
+              "paid_at",
+            ]);
         }
-
-        // Enqueue the order
-        const freshOrder = freshRow("orders", orderId);
-        enqueue(
-          "orders",
-          order.id ? "update" : "insert",
-          orderId,
-          strip(freshOrder, ORDER_JOIN),
-        );
 
         // Enqueue affected product stocks
         for (const pid of affectedProductIds) {
           const prod = freshRow("products", pid);
           if (prod)
-            enqueue("products", "update", pid, strip(prod, PRODUCT_JOIN));
+            enqueue("products", "update", pid, strip(prod, PRODUCT_JOIN), [
+              "stock",
+            ]);
         }
 
         return orderId;
@@ -696,25 +820,32 @@ export function registerStoreHandlers(db, ipcMain) {
         );
         db.prepare(
           `UPDATE orders
-         SET paid_amount=?, display_currency=?, status=?,
-             version=version+1, updated_at=datetime('now')
-         WHERE id=?`,
+           SET paid_amount=?, display_currency=?, status=?,
+               version=version+1, updated_at=datetime('now')
+           WHERE id=?`,
         ).run(paid_amount, display_currency, status, id);
 
         if (status === "paid") {
           db.prepare(
             `UPDATE dues SET paid=1, paid_at=datetime('now'), version=version+1, updated_at=datetime('now')
-           WHERE order_id=? AND paid=0`,
+             WHERE order_id=? AND paid=0`,
           ).run(id);
           const updatedDues = db
             .prepare(`SELECT * FROM dues WHERE order_id=? AND paid=1`)
             .all(id);
           for (const due of updatedDues)
-            enqueue("dues", "update", due.id, strip(due, DUE_JOIN));
+            enqueue("dues", "update", due.id, strip(due, DUE_JOIN), [
+              "paid",
+              "paid_at",
+            ]);
         }
 
         const freshOrder = freshRow("orders", id);
-        enqueue("orders", "update", id, strip(freshOrder, ORDER_JOIN));
+        enqueue("orders", "update", id, strip(freshOrder, ORDER_JOIN), [
+          "paid_amount",
+          "display_currency",
+          "status",
+        ]);
         return { ok: true, status };
       } catch (err) {
         return { ok: false, error: err.message };
@@ -735,17 +866,23 @@ export function registerStoreHandlers(db, ipcMain) {
             ).run(item.quantity, item.product_id);
             const prod = freshRow("products", item.product_id);
             if (prod)
-              enqueue("products", "update", prod.id, strip(prod, PRODUCT_JOIN));
+              enqueue(
+                "products",
+                "update",
+                prod.id,
+                strip(prod, PRODUCT_JOIN),
+                ["stock"],
+              );
           }
           db.prepare(
             `UPDATE order_items SET _deleted=1, version=version+1, updated_at=datetime('now') WHERE id=?`,
           ).run(item.id);
-          enqueue("order_items", "delete", item.id);
+          enqueue("order_items", "delete", item.id, null, null);
         }
         db.prepare(
           `UPDATE orders SET _deleted=1, version=version+1, updated_at=datetime('now') WHERE id=?`,
         ).run(id);
-        enqueue("orders", "delete", id);
+        enqueue("orders", "delete", id, null, null);
       });
       restoreStock();
       return { ok: true };
@@ -793,7 +930,8 @@ export function registerStoreHandlers(db, ipcMain) {
           .get(...params).n;
         const totalUnpaidSp = db
           .prepare(
-            `SELECT COALESCE(SUM(amount_sp),0) as n FROM dues d WHERE d._deleted=0 AND d.paid=0${customerId ? " AND d.customer_id=?" : ""}`,
+            `SELECT COALESCE(SUM(amount_sp),0) as n FROM dues d
+             WHERE d._deleted=0 AND d.paid=0${customerId ? " AND d.customer_id=?" : ""}`,
           )
           .get(...(customerId ? [customerId] : [])).n;
         return { ok: true, data, total, totalUnpaidSp };
@@ -808,6 +946,7 @@ export function registerStoreHandlers(db, ipcMain) {
       const amountSp = toSP(due.amount, due.currency);
       const cleanDue = strip(due, DUE_JOIN);
       if (due.id) {
+        const before = freshRow("dues", due.id);
         db.prepare(
           `UPDATE dues
            SET customer_id=@customer_id, order_id=@order_id, amount=@amount,
@@ -816,7 +955,14 @@ export function registerStoreHandlers(db, ipcMain) {
            WHERE id=@id`,
         ).run({ ...cleanDue, amount_sp: amountSp });
         const fresh = freshRow("dues", due.id);
-        enqueue("dues", "update", due.id, strip(fresh, DUE_JOIN));
+        const changedFields = diffFields("dues", before, fresh);
+        enqueue(
+          "dues",
+          "update",
+          due.id,
+          strip(fresh, DUE_JOIN),
+          changedFields,
+        );
         return { ok: true, id: due.id };
       } else {
         const id = uuid();
@@ -835,7 +981,7 @@ export function registerStoreHandlers(db, ipcMain) {
           cleanDue.due_date,
         );
         const fresh = freshRow("dues", id);
-        enqueue("dues", "insert", id, strip(fresh, DUE_JOIN));
+        enqueue("dues", "insert", id, strip(fresh, DUE_JOIN), null);
         return { ok: true, id };
       }
     } catch (err) {
@@ -849,7 +995,11 @@ export function registerStoreHandlers(db, ipcMain) {
         `UPDATE dues SET paid=1, paid_at=datetime('now'), version=version+1, updated_at=datetime('now') WHERE id=?`,
       ).run(id);
       const fresh = freshRow("dues", id);
-      enqueue("dues", "update", id, strip(fresh, DUE_JOIN));
+      // Only paid + paid_at changed — be precise
+      enqueue("dues", "update", id, strip(fresh, DUE_JOIN), [
+        "paid",
+        "paid_at",
+      ]);
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -861,7 +1011,7 @@ export function registerStoreHandlers(db, ipcMain) {
       db.prepare(
         `UPDATE dues SET _deleted=1, version=version+1, updated_at=datetime('now') WHERE id=?`,
       ).run(id);
-      enqueue("dues", "delete", id);
+      enqueue("dues", "delete", id, null, null);
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -889,6 +1039,7 @@ export function registerStoreHandlers(db, ipcMain) {
   ipcMain.handle("store:saveStaff", (_, s) => {
     try {
       if (s.id) {
+        const before = freshRow("staff", s.id);
         if (s.password) {
           db.prepare(
             `UPDATE staff
@@ -907,11 +1058,16 @@ export function registerStoreHandlers(db, ipcMain) {
           ).run(s);
         }
         const fresh = freshRow("staff", s.id);
+        // Never sync the password field — strip it from changed list too
+        const changedFields = diffFields("staff", before, fresh).filter(
+          (f) => f !== "password",
+        );
         enqueue(
           "staff",
           "update",
           s.id,
           fresh ? { ...fresh, password: undefined } : { id: s.id },
+          changedFields,
         );
         return { ok: true, id: s.id };
       } else {
@@ -938,6 +1094,7 @@ export function registerStoreHandlers(db, ipcMain) {
           fresh
             ? { ...fresh, password: undefined }
             : { id, ...s, password: undefined },
+          null,
         );
         return { ok: true, id };
       }
@@ -951,7 +1108,7 @@ export function registerStoreHandlers(db, ipcMain) {
       db.prepare(
         `UPDATE staff SET _deleted=1, version=version+1, updated_at=datetime('now') WHERE id=?`,
       ).run(id);
-      enqueue("staff", "delete", id);
+      enqueue("staff", "delete", id, null, null);
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -1210,73 +1367,81 @@ export function registerStoreHandlers(db, ipcMain) {
     }
   });
 
-  // ── applyRemoteRow — version-aware conflict resolution ────────────────────
+  // ── applyRemoteRow — field-level pull merge ───────────────────────────────
+  // On pull, we receive the already-merged row from the server.
+  // Locally we do a version-aware field-level update so any uncommitted
+  // local edits to OTHER fields are preserved until the next push cycle.
   ipcMain.handle("store:applyRemoteRow", (_, { table, row }) => {
     try {
       if (!ALLOWED_TABLES.has(table))
         return { ok: false, error: `Unknown table: ${table}` };
 
+      // Normalise booleans → integers for SQLite
       const normalized = {};
       for (const [k, v] of Object.entries(row)) {
         if (k === "synced_at") continue;
         if (typeof v === "boolean") normalized[k] = v ? 1 : 0;
-        else normalized[k] = v; // IDs are TEXT — no Number() coercion
+        else normalized[k] = v;
       }
       if (!("id" in normalized)) return { ok: false, error: "Missing row.id" };
 
-      // Version-aware conflict check
-      try {
-        const existing = db
-          .prepare(`SELECT updated_at, version FROM "${table}" WHERE id=?`)
-          .get(normalized.id);
-
-        if (existing) {
-          const remoteVersion = normalized.version ?? 0;
-          const localVersion = existing.version ?? 0;
-
-          if (remoteVersion > 0 || localVersion > 0) {
-            // Version column present — use it as primary signal
-            if (localVersion > remoteVersion)
-              return { ok: true, skipped: true };
-            if (localVersion === remoteVersion) {
-              // Same version: timestamp tiebreak
-              if (
-                existing.updated_at &&
-                normalized.updated_at &&
-                new Date(existing.updated_at) >= new Date(normalized.updated_at)
-              ) {
-                return { ok: true, skipped: true };
-              }
-            }
-            // remoteVersion > localVersion → fall through to upsert
-          } else {
-            // Migration period — no version yet, fall back to updated_at only
-            if (
-              existing.updated_at &&
-              normalized.updated_at &&
-              new Date(existing.updated_at) >= new Date(normalized.updated_at)
-            ) {
-              return { ok: true, skipped: true };
-            }
-          }
+      const existing = (() => {
+        try {
+          return db
+            .prepare(`SELECT * FROM "${table}" WHERE id=?`)
+            .get(normalized.id);
+        } catch {
+          return null;
         }
-      } catch {
-        /* table may not exist yet — proceed */
+      })();
+
+      if (!existing) {
+        // Row is brand-new on this device — plain insert
+        const cols = Object.keys(normalized);
+        const colList = cols.map((c) => `"${c}"`).join(", ");
+        const placeholders = cols.map(() => "?").join(", ");
+        db.prepare("PRAGMA foreign_keys = OFF").run();
+        try {
+          db.prepare(
+            `INSERT OR IGNORE INTO "${table}" (${colList}) VALUES (${placeholders})`,
+          ).run(...cols.map((c) => normalized[c]));
+        } finally {
+          db.prepare("PRAGMA foreign_keys = ON").run();
+        }
+        return { ok: true };
       }
 
-      const cols = Object.keys(normalized);
-      const colList = cols.map((c) => `"${c}"`).join(", ");
-      const placeholders = cols.map(() => "?").join(", ");
-      const vals = cols.map((c) => normalized[c]);
+      // ── Version-aware field-level merge ───────────────────────────────────
+      // Remote version strictly lower → local is newer → skip entirely.
+      const remoteVersion = normalized.version ?? 0;
+      const localVersion = existing.version ?? 0;
+
+      if (remoteVersion < localVersion) {
+        return { ok: true, skipped: true };
+      }
+
+      // Remote version >= local → remote wins on every field it carries.
+      // We UPDATE (not INSERT OR REPLACE) so that any local columns not
+      // present in the remote payload are left untouched.
+      const skipCols = new Set(["id", "synced_at", "created_at"]);
+      const updateCols = Object.keys(normalized).filter(
+        (k) => !skipCols.has(k),
+      );
+
+      if (updateCols.length === 0) return { ok: true };
+
+      const setClause = updateCols.map((c) => `"${c}" = ?`).join(", ");
+      const vals = [...updateCols.map((c) => normalized[c]), normalized.id];
 
       db.prepare("PRAGMA foreign_keys = OFF").run();
       try {
-        db.prepare(
-          `INSERT OR REPLACE INTO "${table}" (${colList}) VALUES (${placeholders})`,
-        ).run(...vals);
+        db.prepare(`UPDATE "${table}" SET ${setClause} WHERE id = ?`).run(
+          ...vals,
+        );
       } finally {
         db.prepare("PRAGMA foreign_keys = ON").run();
       }
+
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };

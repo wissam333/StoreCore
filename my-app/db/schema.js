@@ -199,6 +199,7 @@ export function initSchema(db) {
     `ALTER TABLE order_items ADD COLUMN version INTEGER NOT NULL DEFAULT 1`,
     `ALTER TABLE dues        ADD COLUMN version INTEGER NOT NULL DEFAULT 1`,
     `ALTER TABLE staff       ADD COLUMN version INTEGER NOT NULL DEFAULT 1`,
+    `ALTER TABLE sync_queue ADD COLUMN changed_fields TEXT`,
   ];
   for (const sql of migrations) {
     try {

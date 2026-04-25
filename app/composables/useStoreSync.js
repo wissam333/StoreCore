@@ -107,7 +107,6 @@ export const useStoreSyncManager = () => {
   // ── PHASE 1: Push ─────────────────────────────────────────────────────────
   const push = async (base, token) => {
     let hasMore = true;
-
     while (hasMore) {
       const r = await getSyncQueue();
       if (!r.ok || !r.data?.length) break;
@@ -122,29 +121,34 @@ export const useStoreSyncManager = () => {
       for (const item of batch) {
         try {
           const payload = item.payload ? JSON.parse(item.payload) : {};
+          // NEW: attach changed_fields so server can do field-level merge
+          const changedFields = item.changed_fields
+            ? JSON.parse(item.changed_fields)
+            : null;
+
           const headers = {
             "Content-Type": "application/json",
             Authorization: `Bearer ${token}`,
           };
 
-          let url, method;
+          let url, method, body;
           if (item.operation === "delete") {
             method = "DELETE";
             url = `${base}/${item.table_name}/${item.row_id}`;
           } else if (item.operation === "insert") {
             method = "POST";
             url = `${base}/${item.table_name}`;
+            body = JSON.stringify(payload);
           } else {
-            method = "PUT";
+            method = "PATCH"; // Changed from PUT — signals field-level merge
             url = `${base}/${item.table_name}/${item.row_id}`;
+            body = JSON.stringify({
+              ...payload,
+              _changed_fields: changedFields,
+            });
           }
 
-          const res = await fetch(url, {
-            method,
-            headers,
-            body: method !== "DELETE" ? JSON.stringify(payload) : undefined,
-          });
-
+          const res = await fetch(url, { method, headers, body });
           if (res.status === 401)
             throw new Error("Unauthorized — check license key in Settings");
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
