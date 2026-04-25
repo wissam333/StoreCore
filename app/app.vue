@@ -39,66 +39,61 @@ const phase = ref("loading");
 const error = ref("");
 const loadingMsg = ref("");
 
-// ── Electron detection ────────────────────────────────────────────────────────
-// Only trust the explicit flag injected by the preload script.
-const isElectronEnv = () =>
-  typeof window !== "undefined" && !!window.__ELECTRON__;
-
-// ── Bulletproof Capacitor / native-mobile detection ──────────────────────────
+// ── Environment detection ─────────────────────────────────────────────────────
 //
-// WHY THIS EXISTS:
-// Capacitor.isNativePlatform() can return false at onMounted time on
-// Android/iOS because the native bridge registers asynchronously.
-// A one-shot call is not reliable. We must poll until the bridge is ready
-// or give up after a short timeout and assume web.
+// ROOT CAUSE OF THE BUG:
+// The Electron preload script exposes window.__ELECTRON__ = true,
+// window.license, and window.store via contextBridge. On mobile these
+// globals were somehow present in the Capacitor WebView, causing the app
+// to think it was running in Electron and skip the license check entirely.
 //
-// Strategy:
-//  1. Check immediately — if true, we're done.
-//  2. If false, poll every 80ms for up to 2 seconds.
-//  3. If still false after 2s, we are genuinely on the web → skip license.
+// THE FIX:
+// Capacitor's window.Capacitor object is injected by the NATIVE LAYER —
+// it cannot be faked by any JS bundle. We check it FIRST as the ground
+// truth. Only after Capacitor confirms we are NOT on a native platform
+// do we trust window.__ELECTRON__.
 //
-const waitForNativePlatform = () =>
-  new Promise((resolve) => {
-    // Avoid importing Capacitor in non-Capacitor builds
-    let Capacitor;
-    try {
-      // Dynamic import is async, but the module is already bundled by
-      // Capacitor's build — require() is safe here as a sync check.
-      // We fall back to the async path if it isn't available.
-      Capacitor = window?.Capacitor;
-    } catch {}
+// Returns: 'electron' | 'native' | 'web'
+const detectEnvironment = async () => {
+  // Fast path — Capacitor bridge already registered synchronously
+  if (window?.Capacitor?.isNativePlatform?.()) {
+    return "native";
+  }
 
-    // Fast path: Capacitor global available synchronously
-    if (Capacitor?.isNativePlatform?.()) {
-      return resolve(true);
-    }
-
-    // Slow path: poll for up to 2 000ms in 80ms increments
-    const MAX_WAIT = 2000;
-    const INTERVAL = 80;
+  // Slow path — on some Android versions the bridge registers slightly
+  // after the first JS tick. Poll for up to 1500ms before giving up.
+  const nativeConfirmed = await new Promise((resolve) => {
+    const MAX_WAIT = 1500;
+    const INTERVAL = 60;
     let elapsed = 0;
 
     const timer = setInterval(async () => {
       elapsed += INTERVAL;
-
       try {
-        // Try the proper async import on every tick in case the module
-        // just became available
-        const { Capacitor: Cap } = await import("@capacitor/core");
-        if (Cap.isNativePlatform()) {
+        const { Capacitor } = await import("@capacitor/core");
+        if (Capacitor.isNativePlatform()) {
           clearInterval(timer);
-          return resolve(true);
+          resolve(true);
+          return;
         }
-      } catch {
-        // Module not available — keep waiting
-      }
-
+      } catch {}
       if (elapsed >= MAX_WAIT) {
         clearInterval(timer);
-        resolve(false); // Give up — treat as web
+        resolve(false);
       }
     }, INTERVAL);
   });
+
+  if (nativeConfirmed) return "native";
+
+  // Only check __ELECTRON__ AFTER Capacitor has confirmed we are not native.
+  // This prevents the Electron preload globals from fooling us on mobile.
+  if (typeof window !== "undefined" && !!window.__ELECTRON__) {
+    return "electron";
+  }
+
+  return "web";
+};
 
 // ── License check ─────────────────────────────────────────────────────────────
 const checkLicense = async () => {
@@ -107,8 +102,6 @@ const checkLicense = async () => {
     const result = await verify();
     return result.ok;
   } catch (err) {
-    // verify() threw — treat as unlicensed so the license screen appears.
-    // This is safer than granting access on an unknown error.
     console.warn("[app] checkLicense threw:", err?.message ?? err);
     return false;
   }
@@ -123,7 +116,7 @@ const initDb = async () => {
 // ── After activation ──────────────────────────────────────────────────────────
 const onLicenseActivated = async () => {
   phase.value = "loading";
-  loadingMsg.value = $t("loading"); // "Opening database…" etc.
+  loadingMsg.value = "Opening database…";
   error.value = "";
   try {
     await initDb();
@@ -143,44 +136,31 @@ const init = async () => {
   loadingMsg.value = "";
 
   try {
-    // ── Electron: skip all mobile logic ──────────────────────────────────────
-    if (isElectronEnv()) {
+    const env = await detectEnvironment();
+    console.log("[app] environment:", env);
+
+    if (env === "electron" || env === "web") {
       phase.value = "app";
       return;
     }
 
-    // ── Native mobile detection (waits for bridge to register) ───────────────
-    loadingMsg.value = $t("loading");
-    const isNative = await waitForNativePlatform();
-
-    if (!isNative) {
-      // Running in a browser — no license required
-      phase.value = "app";
-      return;
-    }
-
-    // ── We are on a real native device — reset any stale DB state ────────────
-    // (safe to do here because we haven't opened the DB yet)
+    // env === 'native' — enforce license
     try {
       const { resetMobileDb } = await import("~/composables/useMobileDb");
       resetMobileDb();
     } catch {}
 
-    // ── Step 1: verify license ────────────────────────────────────────────────
     loadingMsg.value = "Verifying license…";
     const licensed = await checkLicense();
 
     if (!licensed) {
-      // No key, invalid key, or grace period expired → show license screen
       phase.value = "license";
       loadingMsg.value = "";
       return;
     }
 
-    // ── Step 2: open / migrate DB ─────────────────────────────────────────────
     loadingMsg.value = "Opening database…";
     await initDb();
-
     phase.value = "app";
     loadingMsg.value = "";
   } catch (err) {
@@ -193,7 +173,6 @@ const init = async () => {
 onMounted(() => {
   init();
 
-  // Flush DB to Preferences when app goes to background
   document.addEventListener("pause", async () => {
     try {
       const { flushMobileDb } = await import("~/composables/useMobileDb");
