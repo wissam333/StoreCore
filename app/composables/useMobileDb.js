@@ -1,57 +1,64 @@
 // store-app/composables/useMobileDb.js
 //
-// FIX: "capacitorSQLitePlugin: null" means the import resolved but the native
-// bridge hasn't wired up the plugin object yet. This happens on Android when
-// the WebView fires JS before the Java plugin registration completes.
+// ROOT CAUSE OF "capacitorSQLitePlugin: null":
 //
-// Solution: import first (triggers registration), then poll the imported
-// object itself until it's non-null, with a clear timeout error.
+// @capacitor-community/sqlite's named export `CapacitorSQLite` is NOT the
+// plugin instance. It is a stub generated at build time. On native Android/iOS,
+// the REAL plugin lives at:
+//
+//   window.Capacitor.Plugins.CapacitorSQLite
+//
+// The SQLiteConnection constructor reads from that path internally. If the
+// native bridge hasn't registered the plugin yet when SQLiteConnection() is
+// called, it caches `null` and every subsequent call throws
+// "capacitorSQLitePlugin: null".
+//
+// SOLUTION:
+//   1. Do NOT rely on the named import. Read directly from Capacitor.Plugins.
+//   2. Poll Capacitor.Plugins.CapacitorSQLite until it's a real object.
+//   3. Only THEN construct SQLiteConnection — it will find the plugin already
+//      registered and cache the real object instead of null.
 
 import { Capacitor } from "@capacitor/core";
 
 let _db = null;
 let _initPromise = null;
 
-// ── Wait for the plugin object to become non-null ─────────────────────────────
-// @capacitor-community/sqlite exports CapacitorSQLite which is a reference to
-// the native bridge object. On Android it can be null for a few hundred ms
-// after the import resolves while the Java side finishes registering.
-const waitForPlugin = (CapacitorSQLite, timeoutMs = 10000) =>
+// ── Wait for the native plugin to appear in Capacitor.Plugins ─────────────────
+const waitForNativePlugin = (timeoutMs = 8000) =>
   new Promise((resolve, reject) => {
-    // Already ready
-    if (
-      CapacitorSQLite &&
-      typeof CapacitorSQLite.createConnection === "function"
-    ) {
-      return resolve(CapacitorSQLite);
-    }
-
     const start = Date.now();
-    const timer = setInterval(() => {
+
+    const check = () => {
+      const plugin = window?.Capacitor?.Plugins?.CapacitorSQLite;
+      // Must be an object with at least one method — not null, not a stub
       if (
-        CapacitorSQLite &&
-        typeof CapacitorSQLite.createConnection === "function"
+        plugin &&
+        typeof plugin === "object" &&
+        typeof plugin.createConnection === "function"
       ) {
-        clearInterval(timer);
-        return resolve(CapacitorSQLite);
+        return resolve(plugin);
       }
       if (Date.now() - start >= timeoutMs) {
-        clearInterval(timer);
         return reject(
           new Error(
-            "capacitorSQLitePlugin: null after " +
-              timeoutMs / 1000 +
-              "s.\n" +
-              "Fix checklist:\n" +
-              "1. Run: npx cap sync\n" +
-              "2. Rebuild the APK (not just hot-reload)\n" +
-              "3. Android: verify CapacitorSQLitePlugin is in MainActivity.java\n" +
-              "   add(CapacitorSQLitePlugin.class)\n" +
-              "4. iOS: run pod install in /ios",
+            "capacitorSQLitePlugin: null — native plugin never registered.\n\n" +
+              "Required fixes (ALL must be done):\n" +
+              "1. npx cap sync android\n" +
+              "2. Full rebuild — do NOT use live reload / hot reload\n" +
+              "3. Open android/app/src/main/java/.../MainActivity.java and verify:\n" +
+              "     import com.getcapacitor.community.database.sqlite.CapacitorSQLitePlugin;\n" +
+              "     registerPlugin(CapacitorSQLitePlugin.class);\n" +
+              "   is present inside onCreate() BEFORE super.onCreate()\n" +
+              "4. Check your @capacitor-community/sqlite version matches your\n" +
+              "   Capacitor core version (@capacitor/core)",
           ),
         );
       }
-    }, 100);
+      setTimeout(check, 150);
+    };
+
+    check();
   });
 
 export const getMobileDb = async () => {
@@ -67,24 +74,27 @@ export const getMobileDb = async () => {
         );
       }
 
-      // Step 1: import — this triggers the native registration
-      const { CapacitorSQLite, SQLiteConnection } = await import(
-        "@capacitor-community/sqlite"
+      // Step 1: trigger the module load (side-effect: starts native registration)
+      const { SQLiteConnection } = await import("@capacitor-community/sqlite");
+
+      // Step 2: wait for the REAL plugin object in Capacitor.Plugins
+      // This is what SQLiteConnection reads internally — we must ensure it's
+      // populated BEFORE calling new SQLiteConnection()
+      await waitForNativePlugin(8000);
+
+      // Step 3: NOW construct SQLiteConnection — plugin is guaranteed registered
+      const sqlite = new SQLiteConnection(
+        window.Capacitor.Plugins.CapacitorSQLite,
       );
 
-      // Step 2: wait until the imported object is actually wired up
-      // (the import can resolve before the Java bridge finishes on Android)
-      const plugin = await waitForPlugin(CapacitorSQLite, 10000);
-
-      // Step 3: open connection
-      const sqlite = new SQLiteConnection(plugin);
-
+      // Clean up any stale open connections from crashes or HMR
       try {
         await sqlite.checkConnectionsConsistency();
       } catch {
-        // Non-fatal — throws when no connections exist yet
+        // Non-fatal
       }
 
+      // Reuse existing connection on hot-reload
       const isConn = (await sqlite.isConnection("storeapp", false)).result;
 
       const db = isConn
@@ -98,14 +108,13 @@ export const getMobileDb = async () => {
           );
 
       await db.open();
-
       await db.execute("PRAGMA journal_mode = WAL;");
       await db.execute("PRAGMA foreign_keys = ON;");
 
       _db = db;
       return _db;
     } catch (err) {
-      _initPromise = null;
+      _initPromise = null; // allow retry
       throw err;
     }
   })();

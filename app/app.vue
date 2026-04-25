@@ -1,20 +1,20 @@
 <!-- store-app/app.vue -->
 <!--
-  FIX: Previous version could hang on infinite "loading" if any await in the
-  init chain threw but was caught at a higher level without transitioning phase.
-  Now every await has explicit try/catch that transitions to 'error' with a
-  visible message. The loading screen can no longer get stuck silently.
+  KEY CHANGE: Mobile license check now uses useLicenseGuard().check()
+  (Preferences-only, no network, instant) instead of useMobileLicense().verify()
+  (hits the server, can hang/timeout on slow connections).
 
-  Also removed nextTick() deferral from initDb() — it wasn't solving anything
-  and added confusion. The real fix (per useMobileDb.js) is the 300ms Android
-  delay inside getMobileDb() itself, which is closer to the actual problem.
+  Boot sequence on mobile:
+    1. useLicenseGuard().check() — reads Preferences, returns in <50ms
+    2a. No local key → phase='license' (DB never touched)
+    2b. Local key found → getMobileDb() → initMobileSchema() → phase='app'
+    3. Background: server verify runs silently after app is open (not blocking)
 
-  Sequence on mobile:
-    1. onMounted → init()
-    2. verify() — Preferences only, no DB, fast
-    3. If licensed → getMobileDb() → opens DB → initMobileSchema() → phase='app'
-    4. If not licensed → phase='license' (DB never touched until activation)
-    5. After activation → onLicenseActivated() → initDb() → phase='app'
+  This means:
+    - First install (no key): shows license screen instantly
+    - Licensed device: opens app without any network call
+    - Expired server / offline: still opens app within grace period
+    - DB error: shows error screen with retry button
 -->
 <template>
   <div>
@@ -69,10 +69,28 @@ const isNativeMobile = async () => {
   }
 };
 
-// ── DB init ────────────────────────────────────────────────────────────────────
 const initDb = async () => {
   const { initMobileSchema } = await import("~/composables/useMobileSchema");
   await initMobileSchema();
+};
+
+// ── Background server verify (non-blocking, called after app is open) ─────────
+const backgroundVerify = () => {
+  setTimeout(async () => {
+    try {
+      const { verify } = useMobileLicense();
+      const result = await verify();
+      if (!result.ok && result.reason !== "offline_grace_expired") {
+        // License genuinely invalid (not just offline) — force re-license screen
+        // Only do this if the reason is hard-invalid, not a network issue
+        if (result.reason === "invalid" || result.reason === "no_license") {
+          phase.value = "license";
+        }
+      }
+    } catch {
+      // Background verify failure is never fatal
+    }
+  }, 3000); // 3s after app opens — well after UI is rendered
 };
 
 // ── After license activation ───────────────────────────────────────────────────
@@ -83,6 +101,7 @@ const onLicenseActivated = async () => {
   try {
     await initDb();
     phase.value = "app";
+    backgroundVerify();
   } catch (err) {
     console.error("[app.vue] initDb after activation failed:", err);
     error.value = `Database error: ${err?.message ?? err}`;
@@ -98,42 +117,36 @@ const init = async () => {
   error.value = "";
   loadingMsg.value = "";
 
-  // Reset DB singleton on retry so getMobileDb() starts fresh
+  // Reset DB singleton on every retry
   try {
     const { resetMobileDb } = await import("~/composables/useMobileDb");
     resetMobileDb();
   } catch {
-    // Not available on Electron/web — ignore
+    // Not available on Electron/web
   }
 
   try {
-    // ── Electron ────────────────────────────────────────────────────────────
+    // ── Electron ─────────────────────────────────────────────────────────────
     if (isElectronEnv()) {
       phase.value = "app";
       return;
     }
 
-    // ── Capacitor (Android / iOS) ────────────────────────────────────────────
+    // ── Capacitor (Android / iOS) ─────────────────────────────────────────────
     if (await isNativeMobile()) {
-      // Step 1: License check (Preferences only — DB not needed)
+      // Step 1: License check — LOCAL ONLY, no network, instant
+      // useLicenseGuard just reads Capacitor Preferences — cannot hang
       loadingMsg.value = "Checking license…";
-      let licenseResult;
-      try {
-        const { verify } = useMobileLicense();
-        licenseResult = await verify();
-      } catch (licErr) {
-        console.error("[app.vue] verify threw:", licErr);
-        licenseResult = { ok: false, reason: "verify_error" };
-      }
+      const { useLicenseGuard } = await import("~/composables/useLicenseGuard");
+      const { licensed } = await useLicenseGuard().check();
 
-      if (!licenseResult.ok) {
-        // No valid license — show activation screen, do NOT open DB yet
+      if (!licensed) {
         phase.value = "license";
         loadingMsg.value = "";
         return;
       }
 
-      // Step 2: Open DB (now safe — license confirmed)
+      // Step 2: Open DB
       loadingMsg.value = "Opening database…";
       try {
         await initDb();
@@ -147,10 +160,13 @@ const init = async () => {
 
       phase.value = "app";
       loadingMsg.value = "";
+
+      // Step 3: Verify with server in background (non-blocking)
+      backgroundVerify();
       return;
     }
 
-    // ── Web / SSR fallback ───────────────────────────────────────────────────
+    // ── Web / SSR fallback ────────────────────────────────────────────────────
     phase.value = "app";
   } catch (err) {
     console.error("[app.vue] init failed:", err);
