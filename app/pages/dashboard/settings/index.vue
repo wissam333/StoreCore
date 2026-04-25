@@ -73,11 +73,12 @@
       <div class="settings-card">
         <div class="card-title">{{ $t("syncSettings") }}</div>
         <div class="form-col">
-          <div class="license-key-box" :class="{ active: !!s.license_key }">
+          <!-- License key is read from Preferences (source of truth), not SQLite -->
+          <div class="license-key-box" :class="{ active: !!licenseKey }">
             <div class="license-key-label">
               <Icon
                 :name="
-                  s.license_key
+                  licenseKey
                     ? 'mdi:shield-check-outline'
                     : 'mdi:shield-off-outline'
                 "
@@ -86,7 +87,7 @@
               {{ $t("licenseKey") }}
             </div>
             <div class="license-key-value">
-              {{ s.license_key || $t("noLicenseActivated") }}
+              {{ licenseKey || $t("noLicenseActivated") }}
             </div>
           </div>
 
@@ -127,7 +128,7 @@
               icon-left="mdi:sync"
               :loading="syncStore.isSyncing.value"
               :disabled="
-                !s.license_key || !s.sync_base || !syncStore.isOnline.value
+                !licenseKey || !s.sync_base || !syncStore.isOnline.value
               "
               @click="manualSync"
             >
@@ -152,19 +153,21 @@
 </template>
 
 <script setup>
-// Use standard JavaScript
 const { locale, t: $t } = useI18n();
 const { $toast } = useNuxtApp();
 const { getSettings, setSetting } = useStore();
 const currency = useCurrency();
 const syncStore = useStoreSyncManager();
-
-// Import JavaScript Composable
 const { getLiveRate, loading: fetchingRate } = useSypRate();
 
 const saving = ref(false);
 const rateNote = ref("");
 const rateNoteType = ref("info");
+
+// License key is kept separate — it comes from Preferences, not SQLite.
+// SQLite's settings.license_key is just a mirror that may lag or fail silently.
+// Preferences is written synchronously during activate() so it is always current.
+const licenseKey = ref("");
 
 const s = reactive({
   store_name: "",
@@ -173,7 +176,6 @@ const s = reactive({
   dollar_rate: "15000",
   report_currency: "SP",
   sync_base: "https://storecore-backend.onrender.com",
-  license_key: "",
 });
 
 const currencyOptions = [
@@ -181,16 +183,30 @@ const currencyOptions = [
   { label: "USD ($) — US Dollar", value: "USD" },
 ];
 
+// ── Load settings ─────────────────────────────────────────────────────────────
 const load = async () => {
+  // 1. Read DB settings (everything except license_key)
   const r = await getSettings();
-  if (r.ok) Object.assign(s, r.data);
+  if (r.ok) {
+    const { license_key, ...rest } = r.data;
+    Object.assign(s, rest);
+  }
   if (!s.sync_base?.trim())
     s.sync_base = "https://storecore-backend.onrender.com";
+
+  // 2. Read license key directly from Preferences — this is always accurate
+  //    regardless of whether persistToSettings() succeeded after activation.
+  try {
+    const { getKey } = useMobileLicense();
+    licenseKey.value = (await getKey()) ?? "";
+  } catch {
+    // Not on mobile or Preferences unavailable — leave empty
+    licenseKey.value = "";
+  }
 };
 
 const fetchRate = async () => {
   const result = await getLiveRate();
-
   if (result) {
     s.dollar_rate = result.rate;
     rateNote.value = `Black Market: ${result.rate.toLocaleString()} SYP`;
@@ -219,6 +235,7 @@ const formatTime = (date) => {
 
 const saveAll = async () => {
   saving.value = true;
+  // license_key is never saved from this page — it is managed by useMobileLicense
   const skip = new Set(["license_key"]);
   for (const key of Object.keys(s)) {
     if (skip.has(key)) continue;
@@ -294,8 +311,6 @@ onMounted(load);
     color: #ef4444;
   }
 }
-
-// ── License key display ──────────────────────────────────────────────────────
 .license-key-box {
   background: var(--bg-elevated);
   border: 1px solid var(--border-color);
@@ -327,8 +342,6 @@ onMounted(load);
   word-break: break-all;
   letter-spacing: 0.03em;
 }
-
-// ── Sync status row ──────────────────────────────────────────────────────────
 .sync-status-row {
   display: flex;
   align-items: center;
@@ -366,11 +379,6 @@ onMounted(load);
 .sync-time {
   font-size: 0.73rem;
   color: var(--text-muted);
-}
-.sync-pending {
-  font-size: 0.73rem;
-  color: #f59e0b;
-  font-weight: 600;
 }
 .save-row {
   display: flex;
