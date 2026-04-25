@@ -1,23 +1,27 @@
 <!-- store-app/app.vue -->
 <!--
-  FIXES:
-  1. initDb() is now called with a deliberate nextTick defer on first boot
-     so the Capacitor native bridge has time to register plugins before
-     getMobileDb() is invoked.
-  2. onLicenseActivated() also defers initDb() by one tick for the same reason.
-  3. The verify() call in the mobile branch is wrapped so that a DB-init error
-     during persistToSettings (inside useMobileLicense) can never crash the
-     license guard — it is caught and logged separately.
-  4. Removed the implicit DB access from the license phase: useMobileLicense's
-     persistToSettings is now only called AFTER initDb() succeeds (see the
-     companion fix in useMobileLicense.js).
+  FIX: Previous version could hang on infinite "loading" if any await in the
+  init chain threw but was caught at a higher level without transitioning phase.
+  Now every await has explicit try/catch that transitions to 'error' with a
+  visible message. The loading screen can no longer get stuck silently.
+
+  Also removed nextTick() deferral from initDb() — it wasn't solving anything
+  and added confusion. The real fix (per useMobileDb.js) is the 300ms Android
+  delay inside getMobileDb() itself, which is closer to the actual problem.
+
+  Sequence on mobile:
+    1. onMounted → init()
+    2. verify() — Preferences only, no DB, fast
+    3. If licensed → getMobileDb() → opens DB → initMobileSchema() → phase='app'
+    4. If not licensed → phase='license' (DB never touched until activation)
+    5. After activation → onLicenseActivated() → initDb() → phase='app'
 -->
 <template>
   <div>
     <template v-if="phase === 'loading'">
       <div class="app-loading">
         <Icon name="mdi:loading" size="32" class="spin" />
-        <p class="loading-text">{{ $t("loading") }}</p>
+        <p class="loading-text">{{ loadingMsg || $t("loading") }}</p>
       </div>
     </template>
 
@@ -50,6 +54,7 @@ const { t: $t } = useI18n();
 
 const phase = ref("loading");
 const error = ref("");
+const loadingMsg = ref("");
 
 const isElectronEnv = () =>
   typeof window !== "undefined" && !!window.license && !!window.store;
@@ -64,78 +69,84 @@ const isNativeMobile = async () => {
   }
 };
 
-// ── DB init ───────────────────────────────────────────────────────────────────
-// FIX: wrapped in nextTick so that by the time getMobileDb() is called, Vue
-// has finished its mount cycle and the Capacitor native bridge has had at
-// least one event-loop tick to settle. The plugin poll in useMobileDb.js
-// does the real waiting, but this eliminates the most common race on fast
-// devices where the call arrives before the poll even starts.
+// ── DB init ────────────────────────────────────────────────────────────────────
 const initDb = async () => {
-  await nextTick();
   const { initMobileSchema } = await import("~/composables/useMobileSchema");
   await initMobileSchema();
 };
 
-// ── License activation callback ───────────────────────────────────────────────
-// Called by MobileLicensePage after a successful server activation.
-// At this point the license key is in Preferences but the DB is NOT yet open.
-// We open the DB here (with the same nextTick guard) before switching phase.
+// ── After license activation ───────────────────────────────────────────────────
 const onLicenseActivated = async () => {
   phase.value = "loading";
+  loadingMsg.value = "Opening database…";
+  error.value = "";
   try {
     await initDb();
     phase.value = "app";
   } catch (err) {
     console.error("[app.vue] initDb after activation failed:", err);
-    error.value = err.message || "Failed to initialize database";
+    error.value = `Database error: ${err?.message ?? err}`;
     phase.value = "error";
+  } finally {
+    loadingMsg.value = "";
   }
 };
 
-// ── Bootstrap ─────────────────────────────────────────────────────────────────
+// ── Bootstrap ──────────────────────────────────────────────────────────────────
 const init = async () => {
   phase.value = "loading";
   error.value = "";
+  loadingMsg.value = "";
+
+  // Reset DB singleton on retry so getMobileDb() starts fresh
+  try {
+    const { resetMobileDb } = await import("~/composables/useMobileDb");
+    resetMobileDb();
+  } catch {
+    // Not available on Electron/web — ignore
+  }
 
   try {
     // ── Electron ────────────────────────────────────────────────────────────
-    // main.js only opens this window after verifyLicense() succeeds, so the
-    // key is always on disk here. Skip all license checks.
     if (isElectronEnv()) {
       phase.value = "app";
       return;
     }
 
-    // ── Capacitor (Android / iOS) ────────────────────────────────────────
+    // ── Capacitor (Android / iOS) ────────────────────────────────────────────
     if (await isNativeMobile()) {
-      // 1. Check license first (Preferences only — no DB needed)
-      let result;
+      // Step 1: License check (Preferences only — DB not needed)
+      loadingMsg.value = "Checking license…";
+      let licenseResult;
       try {
         const { verify } = useMobileLicense();
-        result = await verify();
+        licenseResult = await verify();
       } catch (licErr) {
         console.error("[app.vue] verify threw:", licErr);
-        result = { ok: false, reason: "verify_error" };
+        licenseResult = { ok: false, reason: "verify_error" };
       }
 
-      if (!result.ok) {
-        // Show license input screen — DB init is deferred until after activation
+      if (!licenseResult.ok) {
+        // No valid license — show activation screen, do NOT open DB yet
         phase.value = "license";
+        loadingMsg.value = "";
         return;
       }
 
-      // 2. License OK → now it is safe to open the DB
-      //    (The plugin poll in getMobileDb will wait if the bridge isn't ready yet)
+      // Step 2: Open DB (now safe — license confirmed)
+      loadingMsg.value = "Opening database…";
       try {
         await initDb();
       } catch (dbErr) {
         console.error("[app.vue] initDb failed:", dbErr);
-        error.value = dbErr.message || "Failed to initialize database";
+        error.value = `Database error: ${dbErr?.message ?? dbErr}`;
         phase.value = "error";
+        loadingMsg.value = "";
         return;
       }
 
       phase.value = "app";
+      loadingMsg.value = "";
       return;
     }
 
@@ -143,8 +154,9 @@ const init = async () => {
     phase.value = "app";
   } catch (err) {
     console.error("[app.vue] init failed:", err);
-    error.value = err.message || "Failed to initialize";
+    error.value = err?.message || "Failed to initialize. Tap to retry.";
     phase.value = "error";
+    loadingMsg.value = "";
   }
 };
 
@@ -178,7 +190,8 @@ onMounted(() => init());
   font-size: 0.875rem;
   text-align: center;
   padding: 0 2rem;
-  max-width: 300px;
+  max-width: 320px;
+  line-height: 1.5;
 }
 .retry-btn {
   padding: 0.5rem 1.5rem;

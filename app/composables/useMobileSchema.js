@@ -1,10 +1,26 @@
 // store-app/composables/useMobileSchema.js
+//
+// FIX: @capacitor-community/sqlite does NOT support multiple statements in a
+// single db.execute() call on all platforms. Passing a string with several
+// CREATE TABLE statements separated by semicolons works on some builds but
+// silently hangs or throws on others — causing the infinite loading screen.
+//
+// Each DDL statement is now executed individually. Migrations are unchanged.
+
 import { getMobileDb } from "./useMobileDb";
+
+// Run one SQL statement at a time — safe across all capacitor-sqlite versions
+const exec = async (db, sql) => {
+  await db.execute(sql.trim());
+};
 
 export const initMobileSchema = async () => {
   const db = await getMobileDb();
 
-  await db.execute(`
+  // ── Tables ─────────────────────────────────────────────────────────────────
+  await exec(
+    db,
+    `
     CREATE TABLE IF NOT EXISTS categories (
       id          TEXT    PRIMARY KEY,
       name        TEXT    NOT NULL,
@@ -14,8 +30,13 @@ export const initMobileSchema = async () => {
       updated_at  TEXT    DEFAULT (datetime('now')),
       _deleted    INTEGER DEFAULT 0,
       synced_at   TEXT
-    );
+    )
+  `,
+  );
 
+  await exec(
+    db,
+    `
     CREATE TABLE IF NOT EXISTS products (
       id           TEXT    PRIMARY KEY,
       name         TEXT    NOT NULL,
@@ -35,8 +56,13 @@ export const initMobileSchema = async () => {
       updated_at   TEXT    DEFAULT (datetime('now')),
       _deleted     INTEGER DEFAULT 0,
       synced_at    TEXT
-    );
+    )
+  `,
+  );
 
+  await exec(
+    db,
+    `
     CREATE TABLE IF NOT EXISTS customers (
       id           TEXT    PRIMARY KEY,
       name         TEXT    NOT NULL,
@@ -51,8 +77,13 @@ export const initMobileSchema = async () => {
       updated_at   TEXT    DEFAULT (datetime('now')),
       _deleted     INTEGER DEFAULT 0,
       synced_at    TEXT
-    );
+    )
+  `,
+  );
 
+  await exec(
+    db,
+    `
     CREATE TABLE IF NOT EXISTS orders (
       id               TEXT    PRIMARY KEY,
       customer_id      TEXT,
@@ -68,8 +99,13 @@ export const initMobileSchema = async () => {
       updated_at       TEXT    DEFAULT (datetime('now')),
       _deleted         INTEGER DEFAULT 0,
       synced_at        TEXT
-    );
+    )
+  `,
+  );
 
+  await exec(
+    db,
+    `
     CREATE TABLE IF NOT EXISTS order_items (
       id                 TEXT    PRIMARY KEY,
       order_id           TEXT    NOT NULL,
@@ -84,8 +120,13 @@ export const initMobileSchema = async () => {
       updated_at         TEXT    DEFAULT (datetime('now')),
       _deleted           INTEGER DEFAULT 0,
       synced_at          TEXT
-    );
+    )
+  `,
+  );
 
+  await exec(
+    db,
+    `
     CREATE TABLE IF NOT EXISTS dues (
       id          TEXT    PRIMARY KEY,
       customer_id TEXT,
@@ -102,8 +143,13 @@ export const initMobileSchema = async () => {
       updated_at  TEXT    DEFAULT (datetime('now')),
       _deleted    INTEGER DEFAULT 0,
       synced_at   TEXT
-    );
+    )
+  `,
+  );
 
+  await exec(
+    db,
+    `
     CREATE TABLE IF NOT EXISTS staff (
       id          TEXT    PRIMARY KEY,
       full_name   TEXT    NOT NULL,
@@ -118,14 +164,24 @@ export const initMobileSchema = async () => {
       updated_at  TEXT    DEFAULT (datetime('now')),
       _deleted    INTEGER DEFAULT 0,
       synced_at   TEXT
-    );
+    )
+  `,
+  );
 
+  await exec(
+    db,
+    `
     CREATE TABLE IF NOT EXISTS settings (
       key        TEXT PRIMARY KEY,
       value      TEXT,
       updated_at TEXT DEFAULT (datetime('now'))
-    );
+    )
+  `,
+  );
 
+  await exec(
+    db,
+    `
     CREATE TABLE IF NOT EXISTS sync_queue (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
       table_name  TEXT    NOT NULL,
@@ -135,17 +191,21 @@ export const initMobileSchema = async () => {
       queued_at   TEXT    DEFAULT (datetime('now')),
       synced_at   TEXT,
       retry_count INTEGER DEFAULT 0
-    );
+    )
+  `,
+  );
 
+  await exec(
+    db,
+    `
     CREATE TABLE IF NOT EXISTS sync_meta (
       key   TEXT PRIMARY KEY,
       value TEXT
-    );
-  `);
+    )
+  `,
+  );
 
-  // ── Migration: add version + convert id to TEXT for existing installs ──────
-  // Safe to run multiple times — ALTER TABLE IF NOT EXISTS column is not
-  // supported in older SQLite so we catch errors silently.
+  // ── Migrations (safe to re-run — errors are swallowed) ────────────────────
   const migrations = [
     `ALTER TABLE categories  ADD COLUMN version INTEGER NOT NULL DEFAULT 1`,
     `ALTER TABLE products    ADD COLUMN version INTEGER NOT NULL DEFAULT 1`,
@@ -155,28 +215,38 @@ export const initMobileSchema = async () => {
     `ALTER TABLE dues        ADD COLUMN version INTEGER NOT NULL DEFAULT 1`,
     `ALTER TABLE staff       ADD COLUMN version INTEGER NOT NULL DEFAULT 1`,
   ];
+
   for (const sql of migrations) {
     try {
       await db.run(sql);
     } catch {
-      /* column already exists — ignore */
+      // Column already exists — expected on all subsequent launches
     }
   }
 
-  await db.execute(`
-    INSERT OR IGNORE INTO settings (key, value) VALUES
-      ('store_name',      'My Store'),
-      ('store_address',   ''),
-      ('store_phone',     ''),
-      ('dollar_rate',     '15000'),
-      ('report_currency', 'SP'),
-      ('sync_base',       ''),
-      ('sync_token',      '');
+  // ── Default settings (INSERT OR IGNORE — idempotent) ─────────────────────
+  const defaultSettings = [
+    ["store_name", "My Store"],
+    ["store_address", ""],
+    ["store_phone", ""],
+    ["dollar_rate", "15000"],
+    ["report_currency", "SP"],
+    ["sync_base", ""],
+    ["sync_token", ""],
+  ];
 
-    INSERT OR IGNORE INTO sync_meta (key, value) VALUES ('last_synced_at', NULL);
-  `);
+  for (const [key, value] of defaultSettings) {
+    await db.run(`INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`, [
+      key,
+      value,
+    ]);
+  }
 
-  // Seed admin if empty
+  await db.run(
+    `INSERT OR IGNORE INTO sync_meta (key, value) VALUES ('last_synced_at', NULL)`,
+  );
+
+  // ── Seed admin if no staff exist ──────────────────────────────────────────
   const staffResult = await db.query(`SELECT COUNT(*) as n FROM staff`);
   if ((staffResult.values?.[0]?.n ?? 0) === 0) {
     const { generateUuid } = await import("./useUuid");
@@ -186,6 +256,7 @@ export const initMobileSchema = async () => {
     );
   }
 
+  // ── Seed default category if empty ────────────────────────────────────────
   const catResult = await db.query(`SELECT COUNT(*) as n FROM categories`);
   if ((catResult.values?.[0]?.n ?? 0) === 0) {
     const { generateUuid } = await import("./useUuid");
