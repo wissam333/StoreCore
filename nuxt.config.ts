@@ -62,12 +62,6 @@ export default defineNuxtConfig({
   vite: {
     build: {
       target: "esnext",
-      rollupOptions: {
-        external: ["sql.js"],
-      },
-    },
-    optimizeDeps: {
-      exclude: ["sql.js"],
     },
   },
   app: {
