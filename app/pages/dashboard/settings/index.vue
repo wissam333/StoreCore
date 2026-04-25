@@ -1,3 +1,4 @@
+<!-- store-app/pages/settings.vue (or wherever your settings page lives) -->
 <template>
   <div>
     <SharedUiHeaderPage
@@ -159,16 +160,14 @@ const currency = useCurrency();
 const syncStore = useStoreSyncManager();
 const { getLiveRate, loading: fetchingRate } = useSypRate();
 
+const DEFAULT_SYNC_BASE = "https://storecore-backend.onrender.com";
+
 const saving = ref(false);
 const rateNote = ref("");
 const rateNoteType = ref("info");
 
-// License key is displayed separately from the main settings object.
-// Source depends on platform:
-//   Electron  → window.license.getKey() (IPC → licenseManager.js file store)
-//   Mobile    → useMobileLicense().getKey() (Capacitor Preferences)
-// We never read it from SQLite because persistToSettings() is deferred
-// and may not have run yet, or may have failed silently.
+// License key displayed separately — never read from SQLite because
+// persistToSettings() is deferred and may not have run yet.
 const licenseKey = ref("");
 
 const s = reactive({
@@ -177,7 +176,7 @@ const s = reactive({
   store_phone: "",
   dollar_rate: "15000",
   report_currency: "SP",
-  sync_base: "https://storecore-backend.onrender.com",
+  sync_base: DEFAULT_SYNC_BASE,
 });
 
 const currencyOptions = [
@@ -198,7 +197,7 @@ const loadLicenseKey = async () => {
       return;
     }
 
-    // Native mobile: read from Capacitor Preferences
+    // Native mobile: read from Capacitor Preferences (authoritative source)
     if (
       typeof window !== "undefined" &&
       window?.Capacitor?.isNativePlatform?.()
@@ -208,7 +207,6 @@ const loadLicenseKey = async () => {
       return;
     }
 
-    // Web / unknown — no license key concept
     licenseKey.value = "";
   } catch (err) {
     console.warn("[settings] loadLicenseKey failed:", err?.message ?? err);
@@ -216,18 +214,64 @@ const loadLicenseKey = async () => {
   }
 };
 
+// ── Persist defaults that must exist for sync to work ────────────────────────
+//
+// ROOT CAUSE OF ISSUE 2:
+// After a fresh license activation on mobile, persistToSettings() in
+// useMobileLicense.js is called with setTimeout(0) — it's deferred and
+// fire-and-forget. By the time the user navigates to Settings, it may
+// not have run yet (or may have failed silently), so sync_base and
+// license_key are empty in SQLite.
+//
+// THE FIX:
+// When load() sees sync_base is empty, we write the defaults directly
+// from the authoritative sources right now — no user action required.
+// This means sync works immediately when the user opens Settings, and
+// the "Sync Now" button is enabled without a manual save.
+const ensureDefaultsWritten = async (key) => {
+  const writes = [];
+
+  // Always ensure sync_base has a value
+  if (!s.sync_base?.trim()) {
+    s.sync_base = DEFAULT_SYNC_BASE;
+    writes.push(setSetting({ key: "sync_base", value: DEFAULT_SYNC_BASE }));
+  }
+
+  // Write the license key into SQLite settings if it's missing
+  // (mirrors what persistToSettings was supposed to do)
+  if (key) {
+    writes.push(setSetting({ key: "license_key", value: key }));
+  }
+
+  if (writes.length > 0) {
+    await Promise.all(writes).catch((err) =>
+      console.warn("[settings] ensureDefaultsWritten failed:", err?.message),
+    );
+  }
+};
+
 // ── Load all settings ─────────────────────────────────────────────────────────
 const load = async () => {
+  // 1. Read from SQLite
   const r = await getSettings();
   if (r.ok) {
     // Pull everything except license_key — that comes from loadLicenseKey()
     const { license_key, ...rest } = r.data ?? {};
     Object.assign(s, rest);
   }
-  if (!s.sync_base?.trim())
-    s.sync_base = "https://storecore-backend.onrender.com";
 
+  // 2. Ensure sync_base always has a fallback
+  if (!s.sync_base?.trim()) {
+    s.sync_base = DEFAULT_SYNC_BASE;
+  }
+
+  // 3. Load the license key from the authoritative platform source
   await loadLicenseKey();
+
+  // 4. If sync_base was missing from SQLite (fresh install / deferred write
+  //    never ran), write the defaults now so sync works immediately.
+  //    This is safe to call every time — setSetting uses INSERT OR REPLACE.
+  await ensureDefaultsWritten(licenseKey.value);
 };
 
 const fetchRate = async () => {
