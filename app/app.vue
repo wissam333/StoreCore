@@ -42,27 +42,43 @@ const { t: $t } = useI18n();
 const phase = ref("loading"); // 'loading' | 'error' | 'license' | 'app'
 const error = ref("");
 
-const isElectron = typeof window !== "undefined" && !!window.license;
+// Both checks must match the isElectron() helper in useMobileLicense so the
+// two files agree on which environment they're in.
+const isElectron =
+  typeof window !== "undefined" && !!window.license && !!window.store;
+
 const isCapacitor =
   typeof window !== "undefined" &&
   typeof Capacitor !== "undefined" &&
   Capacitor.isNativePlatform?.();
 
-// Called by MobileLicensePage after a successful activation
+// ── DB init ───────────────────────────────────────────────────────────────
+// Only ever called on Capacitor. Electron uses window.store (IPC to
+// better-sqlite3 in main process) — calling initMobileSchema() there throws
+// "SQLite only available on native platforms".
+const initDb = async () => {
+  if (!isCapacitor) {
+    console.warn("[app.vue] initDb called outside Capacitor — skipped.");
+    return;
+  }
+  const { initMobileSchema } = await import("~/composables/useMobileSchema");
+  await initMobileSchema();
+};
+
+// Called by MobileLicensePage after a successful mobile activation.
+// At this point the DB doesn't exist yet (license gate runs before DB init),
+// so we init it now that the license is confirmed valid.
+// This is only ever reached on Capacitor — Electron uses window.license.onActivated()
+// which sends IPC to main, which closes the license window and opens the main window.
 const onLicenseActivated = async () => {
   phase.value = "loading";
   try {
-    await initDb();
+    await initDb(); // safe: guarded inside initDb for non-Capacitor
     phase.value = "app";
   } catch (err) {
     error.value = err.message || "Failed to initialize database";
     phase.value = "error";
   }
-};
-
-const initDb = async () => {
-  const { initMobileSchema } = await import("~/composables/useMobileSchema");
-  await initMobileSchema();
 };
 
 const init = async () => {
@@ -71,6 +87,11 @@ const init = async () => {
 
   try {
     // ── Electron ───────────────────────────────────────────────────────────
+    // window.store = IPC bridge to better-sqlite3 in main process.
+    // window.license = IPC bridge to licenseManager.js in main process.
+    // The main process already verified the license before creating this
+    // window (or created the license window instead). So here we just check
+    // whether a key is saved — if yes, go straight to app. Never call initDb.
     if (isElectron) {
       const key = await window.license.getKey();
       phase.value = key ? "app" : "license";
@@ -79,19 +100,26 @@ const init = async () => {
 
     // ── Capacitor (mobile) ─────────────────────────────────────────────────
     if (isCapacitor) {
-      // Step 1: License check — pure HTTP + Capacitor Preferences, no SQLite.
-      //         This MUST happen before DB init so a crash in SQLite doesn't
-      //         hide the license screen.
-      const { verify } = useMobileLicense();
-      const result = await verify();
+      // Step 1: License check using Capacitor Preferences only — no SQLite.
+      // Wrapped in its own try/catch so any composable-level crash (e.g.
+      // Preferences plugin not ready) shows the license screen rather than
+      // falling through to phase='app' and bypassing the gate entirely.
+      let result;
+      try {
+        const { verify } = useMobileLicense();
+        result = await verify();
+      } catch (licErr) {
+        console.error("[app.vue] License verify threw:", licErr);
+        // Treat verify errors as "no license" — safer than granting access
+        result = { ok: false, reason: "verify_error" };
+      }
 
       if (!result.ok) {
-        // Show inline license page — no router.push, no navigateTo race.
         phase.value = "license";
         return;
       }
 
-      // Step 2: Only init the DB when we know the license is valid.
+      // Step 2: License confirmed — now safe to init SQLite.
       await initDb();
       phase.value = "app";
       return;

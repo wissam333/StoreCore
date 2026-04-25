@@ -93,7 +93,7 @@
             class="order-row"
             @click="navigateTo('/dashboard/orders/' + o.id)"
           >
-            <div class="or-id">#{{ i }}</div>
+            <div class="or-id">#{{ i + 1 }}</div>
             <div class="or-info">
               <span class="or-customer">{{
                 o.customer_name || $t("unknown")

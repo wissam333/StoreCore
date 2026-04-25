@@ -5,6 +5,12 @@ import { Device } from "@capacitor/device";
 const LICENSE_SERVER = "https://storecore-backend.onrender.com";
 const GRACE_DAYS = 7;
 
+// True when running inside Electron (preload exposes window.license + window.store).
+// In this case the main process already handles SQLite persistence via
+// licenseManager.js — the renderer must NOT touch Capacitor SQLite at all.
+const isElectron = () =>
+  typeof window !== "undefined" && !!window.license && !!window.store;
+
 export const useMobileLicense = () => {
   // ── Stable device ID ───────────────────────────────────────────────────────
   const getDeviceId = async () => {
@@ -42,10 +48,14 @@ export const useMobileLicense = () => {
     }
   };
 
-  // ── Persist to SQLite settings (lazy import to avoid composable issues) ────
+  // ── Persist license key to SQLite settings ────────────────────────────────
+  // Only runs on Capacitor (mobile). On Electron the main process already
+  // writes to SQLite via licenseManager.js → persistToSettings(db, key).
+  // Calling getMobileDb() here in Electron throws "SQLite only available on
+  // native platforms" because Capacitor.isNativePlatform() is false there.
   const persistToSettings = async (key) => {
+    if (isElectron()) return; // main process handles this — skip safely
     try {
-      // Lazy import to avoid composable context issues
       const { useMobileStore } = await import("./useMobileStore");
       const { setSetting, getSettings } = useMobileStore();
       await setSetting({ key: "license_key", value: key });
@@ -59,11 +69,20 @@ export const useMobileLicense = () => {
     }
   };
 
+  // ── Remove license key from SQLite settings ───────────────────────────────
+  // FIX 1: was calling useMobileStore() without lazy import, crashing before
+  // DB was ready → app.vue catch block silently set phase='app', skipping
+  // the license screen entirely on mobile.
+  // FIX 2: Electron guard prevents hitting Capacitor SQLite from the renderer.
   const removeFromSettings = async () => {
+    if (isElectron()) return; // main process handles this — skip safely
     try {
+      const { useMobileStore } = await import("./useMobileStore");
       const { setSetting } = useMobileStore();
       await setSetting({ key: "license_key", value: "" });
-    } catch {}
+    } catch (err) {
+      console.warn("[mobile-license] Could not remove from SQLite:", err);
+    }
   };
 
   // ── Activate ─────────────────────────────────────────────────────────────
@@ -83,10 +102,9 @@ export const useMobileLicense = () => {
           key: "last_verified_at",
           value: new Date().toISOString(),
         });
-        await persistToSettings(key);
+        await persistToSettings(key); // no-op on Electron
         return { ok: true };
       }
-
       return { ok: false, error: json.error ?? "Activation failed" };
     } catch {
       return { ok: false, error: "Cannot reach license server" };
@@ -152,7 +170,7 @@ export const useMobileLicense = () => {
       if (json.ok) {
         await Preferences.remove({ key: "license_key" });
         await Preferences.remove({ key: "last_verified_at" });
-        await removeFromSettings();
+        await removeFromSettings(); // no-op on Electron
         return { ok: true };
       }
       return { ok: false, error: json.error };
