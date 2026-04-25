@@ -1,207 +1,131 @@
 // store-app/composables/useMobileDb.js
 //
-// COMPLETE REWRITE — dropped @capacitor-community/sqlite entirely.
+// sql.js (SQLite WASM) + @capacitor/preferences for persistence.
+// Zero native plugins. No MainActivity changes. No cap sync needed.
 //
-// WHY: The plugin requires native registration (MainActivity.java),
-// exact version matching with @capacitor/core, a full npx cap sync,
-// and a clean APK rebuild every time. Any mismatch = null plugin = crash.
-// It is the #1 source of "capacitorSQLitePlugin: null" forever.
-//
-// NEW APPROACH: sql.js (SQLite compiled to WebAssembly) + Capacitor Filesystem
-// for persistence. Runs 100% in JS — zero native plugins required.
-// Same SQL API your existing useMobileStore/useMobileSchema code already uses.
-//
-// HOW IT WORKS:
-//   1. Load sql.js WASM (SQLite in the browser/WebView)
-//   2. On first launch: create empty DB
-//   3. On subsequent launches: load saved DB bytes from Capacitor Filesystem
-//   4. After every write: save DB bytes back to Filesystem (debounced 500ms)
-//
-// RESULT: Works on any Capacitor app with zero native changes.
-// Performance: sql.js handles thousands of rows easily for a POS app.
-
-import { Capacitor } from "@capacitor/core";
-
-const DB_FILENAME = "storeapp.db";
-const SAVE_DEBOUNCE_MS = 500;
+// Preferences stores the DB as a base64 string under key "sqlitedb".
+// sql.js runs SQLite entirely in JS — same execute/run/query API as before.
 
 let _db = null;
 let _initPromise = null;
 let _saveTimer = null;
-let _sqlJs = null;
+let _SQL = null;
 
-// ── Load sql.js from CDN ───────────────────────────────────────────────────────
-const loadSqlJs = async () => {
-  if (_sqlJs) return _sqlJs;
+const PREF_KEY = "sqlitedb";
 
+// ── Preferences helpers (already working in your app) ─────────────────────────
+const prefGet = async (key) => {
+  const { Preferences } = await import("@capacitor/preferences");
+  const r = await Preferences.get({ key });
+  return r?.value ?? null;
+};
+
+const prefSet = async (key, value) => {
+  const { Preferences } = await import("@capacitor/preferences");
+  await Preferences.set({ key, value });
+};
+
+// ── Load sql.js WASM from CDN ─────────────────────────────────────────────────
+const loadSQL = () => {
+  if (_SQL) return Promise.resolve(_SQL);
   return new Promise((resolve, reject) => {
-    // Check if already loaded
     if (window.initSqlJs) {
       window
         .initSqlJs({
           locateFile: (f) =>
             `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/${f}`,
         })
-        .then((SQL) => {
-          _sqlJs = SQL;
-          resolve(SQL);
+        .then((S) => {
+          _SQL = S;
+          resolve(S);
         })
         .catch(reject);
       return;
     }
-
-    const script = document.createElement("script");
-    script.src =
-      "https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-wasm.js";
-    script.onload = () => {
+    const s = document.createElement("script");
+    s.src = "https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-wasm.js";
+    s.onload = () =>
       window
         .initSqlJs({
           locateFile: (f) =>
             `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/${f}`,
         })
-        .then((SQL) => {
-          _sqlJs = SQL;
-          resolve(SQL);
+        .then((S) => {
+          _SQL = S;
+          resolve(S);
         })
         .catch(reject);
-    };
-    script.onerror = () => reject(new Error("Failed to load sql.js from CDN"));
-    document.head.appendChild(script);
+    s.onerror = () =>
+      reject(new Error("sql.js failed to load — check internet connection"));
+    document.head.appendChild(s);
   });
 };
 
-// ── Capacitor Filesystem helpers ───────────────────────────────────────────────
-const fsRead = async (filename) => {
-  try {
-    const { Filesystem, Directory } = await import("@capacitor/filesystem");
-    const result = await Filesystem.readFile({
-      path: filename,
-      directory: Directory.Data,
-    });
-    // result.data is base64
-    const binary = atob(result.data);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return bytes;
-  } catch {
-    return null; // file doesn't exist yet
-  }
-};
-
-const fsWrite = async (filename, uint8array) => {
-  try {
-    const { Filesystem, Directory } = await import("@capacitor/filesystem");
-    // Convert to base64
-    let binary = "";
-    for (let i = 0; i < uint8array.length; i++) {
-      binary += String.fromCharCode(uint8array[i]);
-    }
-    const base64 = btoa(binary);
-    await Filesystem.writeFile({
-      path: filename,
-      data: base64,
-      directory: Directory.Data,
-    });
-  } catch (err) {
-    console.warn("[mobileDb] fsWrite failed:", err?.message);
-  }
-};
-
-// ── Save DB to disk (debounced) ────────────────────────────────────────────────
-const scheduleSave = () => {
+// ── Save DB bytes → base64 → Preferences (debounced) ─────────────────────────
+const scheduleSave = (rawDb) => {
   if (_saveTimer) clearTimeout(_saveTimer);
   _saveTimer = setTimeout(async () => {
-    if (!_db) return;
     try {
-      const data = _db.export();
-      if (Capacitor.isNativePlatform()) {
-        await fsWrite(DB_FILENAME, data);
-      } else {
-        // Web fallback: localStorage (dev only)
-        const binary = Array.from(data)
-          .map((b) => String.fromCharCode(b))
-          .join("");
-        localStorage.setItem("storeapp_db", btoa(binary));
-      }
-    } catch (err) {
-      console.warn("[mobileDb] save failed:", err?.message);
+      const bytes = rawDb.export();
+      const b64 = btoa(String.fromCharCode(...bytes));
+      await prefSet(PREF_KEY, b64);
+    } catch (e) {
+      console.warn("[mobileDb] save error:", e?.message);
     }
-  }, SAVE_DEBOUNCE_MS);
+  }, 600);
 };
 
-// ── DB wrapper — same API as @capacitor-community/sqlite ──────────────────────
-// execute(sql)          — DDL / multi-statement
-// run(sql, params)      — INSERT/UPDATE/DELETE
-// query(sql, params)    — SELECT → { values: [...] }
-const makeDbWrapper = (sqlDb) => ({
+// ── Wrapper — identical API to @capacitor-community/sqlite ────────────────────
+const wrap = (rawDb) => ({
   execute: async (sql) => {
-    sqlDb.run(sql);
-    scheduleSave();
+    rawDb.run(sql);
+    scheduleSave(rawDb);
     return { changes: {} };
   },
-
   run: async (sql, params = []) => {
-    sqlDb.run(sql, params);
-    scheduleSave();
-    return { changes: { changes: sqlDb.getRowsModified() } };
+    rawDb.run(sql, params);
+    scheduleSave(rawDb);
+    return { changes: { changes: rawDb.getRowsModified() } };
   },
-
   query: async (sql, params = []) => {
-    const stmt = sqlDb.prepare(sql);
+    const stmt = rawDb.prepare(sql);
     stmt.bind(params);
     const values = [];
-    while (stmt.step()) {
-      values.push(stmt.getAsObject());
-    }
+    while (stmt.step()) values.push(stmt.getAsObject());
     stmt.free();
     return { values };
   },
-
-  export: () => sqlDb.export(),
-  close: () => sqlDb.close(),
+  _raw: rawDb,
 });
 
-// ── Main export ────────────────────────────────────────────────────────────────
+// ── Main export ───────────────────────────────────────────────────────────────
 export const getMobileDb = async () => {
   if (_db) return _db;
   if (_initPromise) return _initPromise;
 
   _initPromise = (async () => {
     try {
-      // Load sql.js WASM
-      const SQL = await loadSqlJs();
+      const SQL = await loadSQL();
 
-      // Try to load existing database from disk
-      let existingData = null;
-      if (Capacitor.isNativePlatform()) {
-        existingData = await fsRead(DB_FILENAME);
+      // Load saved DB if it exists
+      const saved = await prefGet(PREF_KEY);
+      let rawDb;
+      if (saved) {
+        const binary = atob(saved);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        rawDb = new SQL.Database(bytes);
       } else {
-        // Web fallback
-        const saved = localStorage.getItem("storeapp_db");
-        if (saved) {
-          const binary = atob(saved);
-          existingData = new Uint8Array(binary.length);
-          for (let i = 0; i < binary.length; i++) {
-            existingData[i] = binary.charCodeAt(i);
-          }
-        }
+        rawDb = new SQL.Database();
       }
 
-      // Create DB from existing data or fresh
-      const sqlDb = existingData
-        ? new SQL.Database(existingData)
-        : new SQL.Database();
+      rawDb.run("PRAGMA foreign_keys = ON;");
 
-      // Performance pragmas
-      sqlDb.run("PRAGMA journal_mode = MEMORY;");
-      sqlDb.run("PRAGMA foreign_keys = ON;");
-      sqlDb.run("PRAGMA synchronous = OFF;");
-
-      _db = makeDbWrapper(sqlDb);
+      _db = wrap(rawDb);
       return _db;
-    } catch (err) {
+    } catch (e) {
       _initPromise = null;
-      throw err;
+      throw e;
     }
   })();
 
@@ -210,30 +134,21 @@ export const getMobileDb = async () => {
 
 export const resetMobileDb = () => {
   if (_saveTimer) clearTimeout(_saveTimer);
-  if (_db) {
-    try {
-      _db.close();
-    } catch {}
-  }
+  try {
+    _db?._raw?.close();
+  } catch {}
   _db = null;
   _initPromise = null;
-  _saveTimer = null;
 };
 
-// Force-save immediately (call before app goes to background)
+// Call before app goes to background to force an immediate save
 export const flushMobileDb = async () => {
+  if (!_db) return;
   if (_saveTimer) {
     clearTimeout(_saveTimer);
     _saveTimer = null;
   }
-  if (!_db) return;
-  const data = _db.export();
-  if (Capacitor.isNativePlatform()) {
-    await fsWrite(DB_FILENAME, data);
-  } else {
-    const binary = Array.from(data)
-      .map((b) => String.fromCharCode(b))
-      .join("");
-    localStorage.setItem("storeapp_db", btoa(binary));
-  }
+  const bytes = _db._raw.export();
+  const b64 = btoa(String.fromCharCode(...bytes));
+  await prefSet(PREF_KEY, b64);
 };
