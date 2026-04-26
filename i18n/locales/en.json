@@ -271,5 +271,48 @@
   "removeImage": "Remove Image",
   "invalidImageType": "Please select a valid image file (JPG, PNG, WEBP)",
   "imageTooLarge": "Image must be smaller than 2MB",
-  "price": "Price"
+  "price": "Price",
+  "p2p": {
+    "title": "Local Sync",
+    "subtitle": "Sync between devices on the same network",
+    "pick": {
+      "question": "Which device is this?",
+      "host": {
+        "name": "This is the Host",
+        "desc": "Show QR code for other device to scan"
+      },
+      "guest": {
+        "name": "Scan QR Code",
+        "desc": "Scan the QR from the host device"
+      }
+    },
+    "host": {
+      "qrLabel": "Scan this QR code on the other device",
+      "idLabel": "ID",
+      "hint": "Keep this screen open and wait for the other device to scan"
+    },
+    "guest": {
+      "enterLabel": "Enter the Peer ID shown on the host device, or use your camera to scan the QR code.",
+      "inputPlaceholder": "Paste peer ID here…",
+      "connect": "Connect",
+      "or": "or",
+      "openCamera": "Open Camera Scanner",
+      "scanLabel": "Point camera at the QR code on the host device",
+      "cancelScan": "Cancel",
+      "tryAgain": "Try Again"
+    },
+    "status": {
+      "preparing": "Preparing…",
+      "connecting": "Connecting…",
+      "rows": "rows",
+      "done": "Sync complete!",
+      "doneSub": "Both devices are now up to date",
+      "error": "Something went wrong",
+      "connectionFailed": "Connection failed"
+    },
+    "nav": {
+      "back": "Back",
+      "close": "Close"
+    }
+  }
 }

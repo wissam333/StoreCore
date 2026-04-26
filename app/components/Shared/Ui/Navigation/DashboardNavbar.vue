@@ -17,13 +17,19 @@
     </div>
 
     <!-- ── Mobile hamburger ──────────────────────────────────────────────────── -->
-    <button
-      class="hamburger"
-      @click="$emit('open-mobile-sidebar')"
-      aria-label="Open menu"
-    >
-      <Icon name="mdi:menu" size="22" />
-    </button>
+    <div class="mob-btn-cont">
+      <button class="action-btn" title="share P2P" @click="showP2P = true">
+        <Icon name="mdi:share-variant-outline" size="19" />
+      </button>
+
+      <button
+        class="hamburger"
+        @click="$emit('open-mobile-sidebar')"
+        aria-label="Open menu"
+      >
+        <Icon name="mdi:menu" size="22" />
+      </button>
+    </div>
 
     <!-- ── Spacer ─────────────────────────────────────────────────────────────── -->
     <div class="navbar-spacer" />
@@ -274,12 +280,13 @@
       </template>
     </SharedUiDialogAppModal> -->
   </header>
+  <P2PSyncModal v-model="showP2P" @synced="refreshData" />
 </template>
 
 <script setup>
 const NuxtLink = resolveComponent("NuxtLink");
 const { locale, setLocale } = useI18n();
-
+const showP2P = ref(false);
 const props = defineProps({
   sidebarCollapsed: { type: Boolean, default: false },
   sidebarWidth: { type: Number, default: 260 },
@@ -559,9 +566,7 @@ $transition: cubic-bezier(0.4, 0, 0.2, 1);
   padding: 0 10px 0 12px;
   height: 38px;
   width: 220px;
-  transition:
-    width 0.25s $transition,
-    border-color 0.2s;
+  transition: width 0.25s $transition, border-color 0.2s;
   flex-shrink: 0;
 
   &.focused {
@@ -776,9 +781,7 @@ $transition: cubic-bezier(0.4, 0, 0.2, 1);
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
   border-radius: 12px;
-  box-shadow:
-    0 10px 30px rgba(0, 0, 0, 0.12),
-    0 0 0 1px rgba(0, 0, 0, 0.04);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12), 0 0 0 1px rgba(0, 0, 0, 0.04);
   padding: 8px;
   z-index: 1000;
   animation: dropdownFade 0.2s ease;
@@ -999,9 +1002,7 @@ $transition: cubic-bezier(0.4, 0, 0.2, 1);
   background: var(--sc);
   border: 2px solid transparent;
   cursor: pointer;
-  transition:
-    transform 0.15s,
-    box-shadow 0.15s;
+  transition: transform 0.15s, box-shadow 0.15s;
   position: relative;
 
   &:hover {
@@ -1010,9 +1011,7 @@ $transition: cubic-bezier(0.4, 0, 0.2, 1);
 
   &.active {
     border-color: var(--bg-surface); // ← was hardcoded #fff
-    box-shadow:
-      0 0 0 2px var(--sc),
-      0 2px 6px rgba(0, 0, 0, 0.2);
+    box-shadow: 0 0 0 2px var(--sc), 0 2px 6px rgba(0, 0, 0, 0.2);
     transform: scale(1.12);
 
     &::after {
@@ -1028,9 +1027,7 @@ $transition: cubic-bezier(0.4, 0, 0.2, 1);
 // ── Transitions ───────────────────────────────────────────────────────────────
 .dropdown-enter-active,
 .dropdown-leave-active {
-  transition:
-    opacity 0.2s ease,
-    transform 0.2s ease;
+  transition: opacity 0.2s ease, transform 0.2s ease;
 }
 .dropdown-enter-from,
 .dropdown-leave-to {
@@ -1040,9 +1037,7 @@ $transition: cubic-bezier(0.4, 0, 0.2, 1);
 
 .brand-text-enter-active,
 .brand-text-leave-active {
-  transition:
-    opacity 0.2s ease,
-    transform 0.2s ease;
+  transition: opacity 0.2s ease, transform 0.2s ease;
 }
 .brand-text-enter-from,
 .brand-text-leave-to {
@@ -1061,13 +1056,16 @@ $transition: cubic-bezier(0.4, 0, 0.2, 1);
 
 .panel-slide-enter-active,
 .panel-slide-leave-active {
-  transition:
-    opacity 0.18s ease,
-    transform 0.18s ease;
+  transition: opacity 0.18s ease, transform 0.18s ease;
 }
 .panel-slide-enter-from,
 .panel-slide-leave-to {
   opacity: 0;
   transform: translateY(-6px) scale(0.97);
+}
+
+.mob-btn-cont {
+  display: flex;
+  gap: 16px;
 }
 </style>
