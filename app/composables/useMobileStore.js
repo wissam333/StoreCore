@@ -1394,7 +1394,9 @@ export const useMobileStore = () => {
           await db.run(
             `INSERT OR IGNORE INTO "${table}" (${cols
               .map((c) => `"${c}"`)
-              .join(", ")}) VALUES (${placeholders})`,
+              .join(
+                ", ",
+              )}, synced_at) VALUES (${placeholders}, datetime('now'))`,
             vals,
           );
         } finally {
@@ -1412,8 +1414,17 @@ export const useMobileStore = () => {
         return { ok: true, skipped: true };
       }
 
+      // When versions are equal, only apply if remote updated_at is newer
+      // (remote is the merge authority — it combined fields from multiple devices)
+      if (remoteVersion === localVersion) {
+        const remoteTs = normalized.updated_at ?? "";
+        const localTs = existing.updated_at ?? "";
+        if (remoteTs <= localTs) {
+          return { ok: true, skipped: true };
+        }
+      }
+
       // Remote wins — UPDATE only the columns present in the remote row.
-      // This preserves any local columns not included in the remote payload.
       const skipCols = new Set(["id", "synced_at", "created_at"]);
       const updateCols = Object.keys(normalized).filter(
         (k) => !skipCols.has(k),
@@ -1421,11 +1432,15 @@ export const useMobileStore = () => {
       if (updateCols.length === 0) return { ok: true };
 
       const setClause = updateCols.map((c) => `"${c}" = ?`).join(", ");
+      // include synced_at in the update so this row isn't re-queued
       const vals = [...updateCols.map((c) => normalized[c]), normalized.id];
 
       await db.run("PRAGMA foreign_keys = OFF");
       try {
-        await db.run(`UPDATE "${table}" SET ${setClause} WHERE id = ?`, vals);
+        await db.run(
+          `UPDATE "${table}" SET ${setClause}, synced_at=datetime('now') WHERE id = ?`,
+          vals,
+        );
       } finally {
         await db.run("PRAGMA foreign_keys = ON");
       }

@@ -1403,7 +1403,7 @@ export function registerStoreHandlers(db, ipcMain) {
         db.prepare("PRAGMA foreign_keys = OFF").run();
         try {
           db.prepare(
-            `INSERT OR IGNORE INTO "${table}" (${colList}) VALUES (${placeholders})`,
+            `INSERT OR IGNORE INTO "${table}" (${colList}, synced_at) VALUES (${placeholders}, datetime('now'))`,
           ).run(...cols.map((c) => normalized[c]));
         } finally {
           db.prepare("PRAGMA foreign_keys = ON").run();
@@ -1411,8 +1411,6 @@ export function registerStoreHandlers(db, ipcMain) {
         return { ok: true };
       }
 
-      // ── Version-aware field-level merge ───────────────────────────────────
-      // Remote version strictly lower → local is newer → skip entirely.
       const remoteVersion = normalized.version ?? 0;
       const localVersion = existing.version ?? 0;
 
@@ -1420,9 +1418,15 @@ export function registerStoreHandlers(db, ipcMain) {
         return { ok: true, skipped: true };
       }
 
-      // Remote version >= local → remote wins on every field it carries.
-      // We UPDATE (not INSERT OR REPLACE) so that any local columns not
-      // present in the remote payload are left untouched.
+      // When versions are equal, only apply if remote updated_at is newer
+      if (remoteVersion === localVersion) {
+        const remoteTs = normalized.updated_at ?? "";
+        const localTs = existing.updated_at ?? "";
+        if (remoteTs <= localTs) {
+          return { ok: true, skipped: true };
+        }
+      }
+
       const skipCols = new Set(["id", "synced_at", "created_at"]);
       const updateCols = Object.keys(normalized).filter(
         (k) => !skipCols.has(k),
@@ -1435,9 +1439,9 @@ export function registerStoreHandlers(db, ipcMain) {
 
       db.prepare("PRAGMA foreign_keys = OFF").run();
       try {
-        db.prepare(`UPDATE "${table}" SET ${setClause} WHERE id = ?`).run(
-          ...vals,
-        );
+        db.prepare(
+          `UPDATE "${table}" SET ${setClause}, synced_at = datetime('now') WHERE id = ?`,
+        ).run(...vals);
       } finally {
         db.prepare("PRAGMA foreign_keys = ON").run();
       }

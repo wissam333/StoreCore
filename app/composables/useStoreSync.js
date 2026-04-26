@@ -177,7 +177,7 @@ export const useStoreSyncManager = () => {
     let offset = 0;
     const limit = 200;
     let hasMore = true;
-    let latestRowTs = null;
+    let serverTime = null; // use server's clock, not row timestamps
 
     while (hasMore) {
       const res = await fetch(
@@ -191,20 +191,23 @@ export const useStoreSyncManager = () => {
       if (!res.ok) throw new Error(`Pull failed: HTTP ${res.status}`);
 
       const json = await res.json();
-      const rows = json.rows ?? [];
 
+      // Capture server time from first page only
+      if (!serverTime && json.server_time) {
+        serverTime = json.server_time;
+      }
+
+      const rows = json.rows ?? [];
       for (const { table, row } of rows) {
         await applyRemoteRow({ table, row });
-        if (row.updated_at && (!latestRowTs || row.updated_at > latestRowTs)) {
-          latestRowTs = row.updated_at;
-        }
       }
 
       hasMore = json.hasMore ?? false;
       offset += limit;
     }
 
-    const newWatermark = latestRowTs ?? new Date().toISOString();
+    // Use server_time so we never miss rows due to clock skew between devices
+    const newWatermark = serverTime ?? new Date().toISOString();
     await setLastSyncedAt(newWatermark);
     lastSyncedAt.value = new Date(newWatermark);
   };
