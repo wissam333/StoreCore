@@ -53,6 +53,7 @@ const dumpTable = async (db, table) => {
 };
 
 // ── Apply a single remote row (same logic as useMobileStore.applyRemoteRow) ──
+// useP2PSync.js — replace applyRow entirely:
 const applyRow = async (db, table, row) => {
   const ALLOWED = new Set(ALL_TABLES);
   if (!ALLOWED.has(table)) return;
@@ -66,18 +67,15 @@ const applyRow = async (db, table, row) => {
   if (!normalized.id) return;
 
   const existing = (
-    await db.query(`SELECT version, updated_at FROM "${table}" WHERE id=?`, [
-      normalized.id,
-    ])
+    await db.query(`SELECT * FROM "${table}" WHERE id=?`, [normalized.id])
   ).values?.[0];
 
   if (!existing) {
     normalized.synced_at = new Date().toISOString();
-    const cols2 = Object.keys(normalized); // rebuild after adding synced_at
-    const colList = cols2.map((c) => `"${c}"`).join(", ");
-    const valPlaceholders = cols2.map(() => "?").join(", ");
-    const vals = cols2.map((c) => normalized[c]);
-
+    const cols = Object.keys(normalized);
+    const colList = cols.map((c) => `"${c}"`).join(", ");
+    const valPlaceholders = cols.map(() => "?").join(", ");
+    const vals = cols.map((c) => normalized[c]);
     await db.run("PRAGMA foreign_keys = OFF");
     try {
       await db.run(
@@ -93,29 +91,73 @@ const applyRow = async (db, table, row) => {
   const remoteVersion = normalized.version ?? 0;
   const localVersion = existing.version ?? 0;
 
-  if (remoteVersion < localVersion) return; // local wins
-
-  if (remoteVersion === localVersion) {
-    const remoteTs = normalized.updated_at ?? "";
-    const localTs = existing.updated_at ?? "";
-    if (remoteTs <= localTs) return; // local wins on tiebreak
-  }
-
-  // Remote wins — field-level update
+  // P2P: no server authority — do field-level merge on ALL fields
+  // Each field independently takes the value from whichever side
+  // has the higher version. On tie, newer updated_at wins per field.
   const skipCols = new Set(["id", "synced_at", "created_at"]);
   const updateCols = Object.keys(normalized).filter((k) => !skipCols.has(k));
   if (!updateCols.length) return;
 
-  const setClause = updateCols.map((c) => `"${c}" = ?`).join(", ");
-  const vals = [...updateCols.map((c) => normalized[c]), normalized.id];
+  const remoteTs = normalized.updated_at ?? "";
+  const localTs = existing.updated_at ?? "";
+
+  // If local is strictly newer in both version AND timestamp — skip entirely
+  if (remoteVersion < localVersion && remoteTs < localTs) return;
+
+  // Check for pending unsynced local changes
+  const pending = (
+    await db.query(
+      `SELECT id FROM sync_queue WHERE row_id=? AND synced_at IS NULL LIMIT 1`,
+      [normalized.id],
+    )
+  ).values?.[0];
+
+  let setFields;
+  if (pending && remoteVersion <= localVersion) {
+    // Local has unsent edits and is same/newer version — skip to protect local work
+    return;
+  } else if (remoteVersion > localVersion) {
+    // Remote is clearly newer — take all remote fields
+    setFields = updateCols;
+  } else {
+    // Same version or ambiguous — take remote fields but preserve local
+    // fields that are newer (best-effort field merge without changedFields metadata)
+    setFields = updateCols.filter((f) => {
+      // For timestamps and version, prefer remote if it's newer
+      if (f === "updated_at" || f === "version") return remoteTs > localTs;
+      // For data fields, prefer remote if remote timestamp is newer
+      return remoteTs > localTs;
+    });
+  }
+
+  if (!setFields.length) return;
+
+  // Bump version to max+1 so the merged result propagates correctly
+  // when this device later syncs with the cloud server
+  const mergedVersion = Math.max(remoteVersion, localVersion) + 1;
+  const now = new Date().toISOString();
+
+  const finalCols = setFields.filter(
+    (f) => f !== "version" && f !== "updated_at",
+  );
+  const setClause = [
+    ...finalCols.map((c) => `"${c}" = ?`),
+    `"version" = ?`,
+    `"updated_at" = ?`,
+    `"synced_at" = ?`,
+  ].join(", ");
+
+  const vals = [
+    ...finalCols.map((c) => normalized[c]),
+    mergedVersion,
+    now,
+    now,
+    normalized.id,
+  ];
 
   await db.run("PRAGMA foreign_keys = OFF");
   try {
-    await db.run(`UPDATE "${table}" SET ${setClause}, synced_at=? WHERE id=?`, [
-      ...vals.slice(0, -1),
-      new Date().toISOString(),
-      normalized.id,
-    ]);
+    await db.run(`UPDATE "${table}" SET ${setClause} WHERE id = ?`, vals);
   } finally {
     await db.run("PRAGMA foreign_keys = ON");
   }

@@ -1423,7 +1423,12 @@ export function registerStoreHandlers(db, ipcMain) {
         const remoteTs = normalized.updated_at ?? "";
         const localTs = existing.updated_at ?? "";
         if (remoteTs <= localTs) {
-          return { ok: true, skipped: true };
+          const pending = db
+            .prepare(
+              `SELECT id FROM sync_queue WHERE row_id=? AND synced_at IS NULL LIMIT 1`,
+            )
+            .get(normalized.id);
+          if (pending) return { ok: true, skipped: true };
         }
       }
 

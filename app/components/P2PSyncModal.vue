@@ -465,6 +465,7 @@ const onFileInputChange = async (event) => {
 };
 
 // ── Decode QR from a base64 dataUrl using jsQR ───────────────────────────────
+// Replace decodeQrFromDataUrl():
 const decodeQrFromDataUrl = (dataUrl) =>
   new Promise(async (resolve) => {
     try {
@@ -473,18 +474,31 @@ const decodeQrFromDataUrl = (dataUrl) =>
       );
       const img = new Image();
       img.onload = () => {
-        const canvas = document.createElement("canvas");
-        canvas.width = img.width;
-        canvas.height = img.height;
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(img, 0, 0);
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const code = window.jsQR(
-          imageData.data,
-          imageData.width,
-          imageData.height,
-        );
-        resolve(code?.data ?? null);
+        // Try multiple scales — small photos miss the QR at 1:1
+        const attempts = [1, 1.5, 2, 0.75];
+        for (const scale of attempts) {
+          const canvas = document.createElement("canvas");
+          canvas.width = img.width * scale;
+          canvas.height = img.height * scale;
+          const ctx = canvas.getContext("2d");
+          ctx.filter = "contrast(1.4) brightness(1.1)";
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          ctx.filter = "none";
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const code = window.jsQR(
+            imageData.data,
+            canvas.width,
+            canvas.height,
+            {
+              inversionAttempts: "attemptBoth",
+            },
+          );
+          if (code?.data) {
+            resolve(code.data);
+            return;
+          }
+        }
+        resolve(null);
       };
       img.onerror = () => resolve(null);
       img.src = dataUrl;
@@ -499,7 +513,12 @@ const startWebScan = async () => {
   await nextTick();
   try {
     _videoStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "environment" },
+      video: {
+        facingMode: "environment",
+        width: { ideal: 1280 }, // ← higher res catches distant QRs
+        height: { ideal: 720 },
+        focusMode: "continuous", // ← keeps far QRs sharp
+      },
     });
     if (videoEl.value) videoEl.value.srcObject = _videoStream;
     scheduleScanFrame();
@@ -519,15 +538,21 @@ const stopScan = () => {
 };
 
 const scheduleScanFrame = () => {
-  _scanTimer = setTimeout(scanFrame, 200);
+  _scanTimer = setTimeout(scanFrame, 80); // ← 80ms instead of 200ms
 };
 
 const scanFrame = async () => {
   if (!videoEl.value || !_videoStream) return;
+  const video = videoEl.value;
+  if (video.readyState < 2) {
+    // not enough data yet
+    scheduleScanFrame();
+    return;
+  }
   try {
     if ("BarcodeDetector" in window) {
       const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
-      const codes = await detector.detect(videoEl.value);
+      const codes = await detector.detect(video);
       if (codes.length > 0) {
         handleScannedId(codes[0].rawValue);
         return;
@@ -537,17 +562,26 @@ const scanFrame = async () => {
         "https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js",
       );
       const canvas = document.createElement("canvas");
-      const video = videoEl.value;
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
+      const W = video.videoWidth;
+      const H = video.videoHeight;
+      if (!W || !H) {
+        scheduleScanFrame();
+        return;
+      }
+
+      canvas.width = W;
+      canvas.height = H;
       const ctx = canvas.getContext("2d");
-      ctx.drawImage(video, 0, 0);
-      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      const code = window.jsQR(
-        imageData.data,
-        imageData.width,
-        imageData.height,
-      );
+
+      // ── Sharpen the frame to help jsQR read distant/blurry codes ──
+      ctx.filter = "contrast(1.4) brightness(1.1)";
+      ctx.drawImage(video, 0, 0, W, H);
+      ctx.filter = "none";
+
+      const imageData = ctx.getImageData(0, 0, W, H);
+      const code = window.jsQR(imageData.data, W, H, {
+        inversionAttempts: "attemptBoth", // ← also tries inverted colors
+      });
       if (code) {
         handleScannedId(code.data);
         return;

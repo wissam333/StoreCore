@@ -170,7 +170,7 @@ export const useStoreSyncManager = () => {
   // ── PHASE 2: Pull ─────────────────────────────────────────────────────────
   const pull = async (base, token) => {
     const since = lastSyncedAt.value
-      ? lastSyncedAt.value.toISOString()
+      ? new Date(lastSyncedAt.value.getTime() - 5000).toISOString() // 5s buffer
       : "1970-01-01T00:00:00.000Z";
 
     const headers = { Authorization: `Bearer ${token}` };

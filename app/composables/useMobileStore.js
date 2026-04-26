@@ -1415,11 +1415,20 @@ export const useMobileStore = () => {
 
       // When versions are equal, only apply if remote updated_at is newer
       // (remote is the merge authority — it combined fields from multiple devices)
+      // In applyRemoteRow, replace the equal-version block in both files:
       if (remoteVersion === localVersion) {
         const remoteTs = normalized.updated_at ?? "";
         const localTs = existing.updated_at ?? "";
         if (remoteTs <= localTs) {
-          return { ok: true, skipped: true };
+          // Check if this row has pending unsynced local changes
+          const pending = await db.query(
+            `SELECT id FROM sync_queue WHERE row_id=? AND synced_at IS NULL LIMIT 1`,
+            [normalized.id],
+          );
+          if (pending.values?.length > 0) {
+            return { ok: true, skipped: true }; // local edit not pushed yet — don't overwrite
+          }
+          // No pending local changes — safe to apply server version
         }
       }
 
