@@ -40,8 +40,16 @@ const loadScript = (src) =>
 
 // ── Dump all local rows for a table ──────────────────────────────────────────
 const dumpTable = async (db, table) => {
-  const r = await db.query(`SELECT * FROM "${table}" WHERE 1=1`);
-  return r.values ?? [];
+  try {
+    const r = await db.query(`SELECT * FROM "${table}" WHERE 1=1`);
+    return r.values ?? [];
+  } catch (e) {
+    console.warn(
+      `[P2P] dumpTable skipping missing table "${table}":`,
+      e?.message,
+    );
+    return [];
+  }
 };
 
 // ── Apply a single remote row (same logic as useMobileStore.applyRemoteRow) ──
@@ -139,6 +147,9 @@ export const useP2PSync = () => {
 
   // ── Collect all local data ─────────────────────────────────────────────────
   const collectLocalData = async () => {
+    const { initMobileSchema } = await import("./useMobileSchema");
+    await initMobileSchema();
+
     const { getMobileDb } = await import("./useMobileDb");
     const db = await getMobileDb();
     const dump = {};

@@ -400,7 +400,7 @@ watch(useSyncTick(), () => load());
   font-weight: 600;
   color: var(--text-muted);
   margin-bottom: 4px;
-  text-transform: uppercase;
+  text-transform: lowercase;
   letter-spacing: 0.04em;
   .active & {
     color: #22c55e;

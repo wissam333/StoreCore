@@ -168,7 +168,10 @@ const init = async () => {
     console.log("[app] environment:", env);
 
     if (env === "electron" || env === "web") {
+      loadingMsg.value = "Opening database…";
+      await initDb();
       phase.value = "app";
+      loadingMsg.value = "";
       return;
     }
 
