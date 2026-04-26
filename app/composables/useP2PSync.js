@@ -281,51 +281,33 @@ export const useP2PSync = () => {
   // { type: 'DONE' }                  → all rows sent
   // { type: 'ACK' }                   → receiver finished applying
 
+  // Replace handleIncomingData entirely:
   const handleIncomingData = async (conn, msg) => {
     if (!msg?.type) return;
 
     if (msg.type === "HELLO") {
-      // Guest connected — send our data
       setState("syncing", "Sending local data…");
-      await sendDump(conn);
+      await sendDump(conn); // host sends first, guest waits
     }
 
     if (msg.type === "DATA") {
-      // Receiving rows — buffer them, apply on DONE
       if (!conn._buffer) conn._buffer = {};
       if (!conn._buffer[msg.table]) conn._buffer[msg.table] = [];
       conn._buffer[msg.table].push(...msg.rows);
     }
 
+    // Host receives guest's data
     if (msg.type === "DONE") {
-      setState("syncing", "Merging data…");
+      setState("syncing", "Merging guest data…");
       if (conn._buffer) {
         await applyRemoteDump(conn._buffer);
+        conn._buffer = {};
       }
-      conn.send({ type: "ACK" });
-
+      conn.send({ type: "ACK" }); // tell guest we're done
       try {
         const { flushMobileDb } = await import("./useMobileDb");
         await flushMobileDb();
-      } catch (e) {
-        console.warn("[P2P] flush error:", e);
-      }
-
-      // Small delay so sql.js finishes writing before UI reloads
-      await new Promise((r) => setTimeout(r, 300));
-      useSyncTick().value++;
-      setState("done", "Sync complete ✓");
-      cleanup();
-    }
-
-    if (msg.type === "ACK") {
-      try {
-        const { flushMobileDb } = await import("./useMobileDb");
-        await flushMobileDb();
-      } catch (e) {
-        console.warn("[P2P] flush error:", e);
-      }
-
+      } catch {}
       await new Promise((r) => setTimeout(r, 300));
       useSyncTick().value++;
       setState("done", "Sync complete ✓");
@@ -403,7 +385,7 @@ export const useP2PSync = () => {
     error.value = null;
 
     try {
-      _localDump = await collectLocalData();
+      _localDump = await collectLocalData(); // collect BEFORE connecting
 
       const Peer = await loadPeer();
       _peer = new Peer(undefined, {
@@ -416,11 +398,47 @@ export const useP2PSync = () => {
         _conn = _peer.connect(hostPeerId, { reliable: true });
 
         _conn.on("open", () => {
-          setState("syncing", "Sending local data…");
-          _conn.on("data", (msg) => handleIncomingData(_conn, msg));
-          // Guest initiates by saying hello, then immediately sends its data
+          setState("syncing", "Connected — waiting for host data…");
+          _conn.on("data", async (msg) => {
+            if (!msg?.type) return;
+
+            // Buffer host's rows
+            if (msg.type === "DATA") {
+              if (!_conn._buffer) _conn._buffer = {};
+              if (!_conn._buffer[msg.table]) _conn._buffer[msg.table] = [];
+              _conn._buffer[msg.table].push(...msg.rows);
+            }
+
+            // Host finished sending → merge host data, then send our data
+            if (msg.type === "DONE") {
+              setState("syncing", "Merging host data…");
+              if (_conn._buffer) {
+                await applyRemoteDump(_conn._buffer);
+                _conn._buffer = {};
+              }
+
+              // Now send guest data to host
+              setState("syncing", "Sending local data to host…");
+              await sendDump(_conn); // ends with DONE
+
+              // Flush guest side
+              try {
+                const { flushMobileDb } = await import("./useMobileDb");
+                await flushMobileDb();
+              } catch {}
+              await new Promise((r) => setTimeout(r, 300));
+              useSyncTick().value++;
+            }
+
+            // Host merged our data and confirmed
+            if (msg.type === "ACK") {
+              setState("done", "Sync complete ✓");
+              cleanup();
+            }
+          });
+
+          // Announce to host — host will send its data first
           _conn.send({ type: "HELLO" });
-          sendDump(_conn);
         });
 
         _conn.on("error", (e) => {
