@@ -55,5 +55,6 @@ export const useStore = () => {
     setLastSyncedAt: (iso) => s().setLastSyncedAt(iso),
     applyRemoteRow: (p) => s().applyRemoteRow(p),
     getAllOrderItems: () => s().getAllOrderItems(),
+    getRawTable: (table) => s().getRawTable(table),
   };
 };

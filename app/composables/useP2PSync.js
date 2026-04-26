@@ -189,39 +189,13 @@ export const useP2PSync = () => {
 
   // ── Collect all local data ─────────────────────────────────────────────────
   const collectLocalData = async () => {
-    // ── Electron: read via IPC ─────────────────────────────────────────────
+    // ── Electron: dump via IPC ─────────────────────────────────────────────
     if (typeof window !== "undefined" && window.__ELECTRON__ && window.store) {
-      const TABLES = [
-        "categories",
-        "customers",
-        "staff",
-        "products",
-        "orders",
-        "order_items",
-        "dues",
-      ];
       const dump = {};
-      for (const table of TABLES) {
+      for (const table of ALL_TABLES) {
         try {
-          // Use the existing store getters which go through IPC
-          const getterMap = {
-            categories: () => window.store.getCategories(),
-            customers: () => window.store.getCustomers({ limit: 99999 }),
-            staff: () => window.store.getStaff(),
-            products: () => window.store.getProducts({ limit: 99999 }),
-            orders: () => window.store.getOrders({ limit: 99999 }),
-            order_items: () => window.store.getAllOrderItems(),
-            dues: () => window.store.getDues({ limit: 99999 }),
-          };
-
-          if (getterMap[table]) {
-            const r = await getterMap[table]();
-            dump[table] = r.ok ? r.data : [];
-          } else {
-            // order_items has no top-level getter — skip for now
-            // or add a getRawTable IPC handler if needed
-            dump[table] = [];
-          }
+          const r = await window.store.getRawTable(table);
+          dump[table] = r.ok ? r.data : [];
         } catch (e) {
           console.warn(`[P2P] Electron dump failed for ${table}:`, e);
           dump[table] = [];
@@ -230,7 +204,7 @@ export const useP2PSync = () => {
       return dump;
     }
 
-    // ── Mobile: read via sql.js ────────────────────────────────────────────
+    // ── Mobile: dump via sql.js ────────────────────────────────────────────
     const { initMobileSchema } = await import("./useMobileSchema");
     await initMobileSchema();
 
@@ -245,7 +219,37 @@ export const useP2PSync = () => {
 
   // ── Apply a full dump from the other device ────────────────────────────────
   const applyRemoteDump = async (dump) => {
-    // ← Ensure schema exists before writing anything
+    // ── Electron: write via IPC store ─────────────────────────────────────
+    if (typeof window !== "undefined" && window.__ELECTRON__ && window.store) {
+      const ORDER = [
+        "categories",
+        "customers",
+        "staff",
+        "products",
+        "orders",
+        "order_items",
+        "dues",
+      ];
+
+      const totalRows = ORDER.reduce((s, t) => s + (dump[t]?.length ?? 0), 0);
+      let done = 0;
+      progress.value = { current: 0, total: totalRows };
+
+      for (const table of ORDER) {
+        const rows = dump[table] ?? [];
+        for (const row of rows) {
+          try {
+            await window.store.applyRemoteRow({ table, row });
+          } catch (e) {
+            console.warn(`[P2P] Electron applyRemoteRow failed [${table}]:`, e);
+          }
+          progress.value = { current: ++done, total: totalRows };
+        }
+      }
+      return;
+    }
+
+    // ── Mobile: write via sql.js ───────────────────────────────────────────
     const { initMobileSchema } = await import("./useMobileSchema");
     await initMobileSchema();
 
@@ -303,11 +307,16 @@ export const useP2PSync = () => {
         await applyRemoteDump(conn._buffer);
         conn._buffer = {};
       }
-      conn.send({ type: "ACK" }); // tell guest we're done
-      try {
-        const { flushMobileDb } = await import("./useMobileDb");
-        await flushMobileDb();
-      } catch {}
+      conn.send({ type: "ACK" });
+
+      // flush only matters on mobile
+      if (!(typeof window !== "undefined" && window.__ELECTRON__)) {
+        try {
+          const { flushMobileDb } = await import("./useMobileDb");
+          await flushMobileDb();
+        } catch {}
+      }
+
       await new Promise((r) => setTimeout(r, 300));
       useSyncTick().value++;
       setState("done", "Sync complete ✓");

@@ -1367,6 +1367,17 @@ export function registerStoreHandlers(db, ipcMain) {
     }
   });
 
+  ipcMain.handle("store:getRawTable", (_, table) => {
+    try {
+      if (!ALLOWED_TABLES.has(table))
+        return { ok: false, error: `Unknown table: ${table}` };
+      const data = db.prepare(`SELECT * FROM "${table}"`).all();
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
   ipcMain.handle("store:getAllOrderItems", () => {
     try {
       const data = db
