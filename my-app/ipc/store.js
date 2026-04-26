@@ -1367,6 +1367,17 @@ export function registerStoreHandlers(db, ipcMain) {
     }
   });
 
+  ipcMain.handle("store:getAllOrderItems", () => {
+    try {
+      const data = db
+        .prepare(`SELECT * FROM order_items WHERE _deleted=0`)
+        .all();
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
   // ── applyRemoteRow — field-level pull merge ───────────────────────────────
   // On pull, we receive the already-merged row from the server.
   // Locally we do a version-aware field-level update so any uncommitted

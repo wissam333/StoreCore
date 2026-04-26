@@ -54,5 +54,6 @@ export const useStore = () => {
     getLastSyncedAt: () => s().getLastSyncedAt(),
     setLastSyncedAt: (iso) => s().setLastSyncedAt(iso),
     applyRemoteRow: (p) => s().applyRemoteRow(p),
+    getAllOrderItems: () => s().getAllOrderItems(),
   };
 };
