@@ -1391,12 +1391,15 @@ export const useMobileStore = () => {
         const vals = cols.map((c) => normalized[c]);
         await db.run("PRAGMA foreign_keys = OFF");
         try {
+          const colList = [...cols.map((c) => `"${c}"`), "synced_at"].join(
+            ", ",
+          );
+          const valPlaceholders = [
+            ...cols.map(() => "?"),
+            "datetime('now')",
+          ].join(", ");
           await db.run(
-            `INSERT OR IGNORE INTO "${table}" (${cols
-              .map((c) => `"${c}"`)
-              .join(
-                ", ",
-              )}, synced_at) VALUES (${placeholders}, datetime('now'))`,
+            `INSERT OR IGNORE INTO "${table}" (${colList}) VALUES (${valPlaceholders})`,
             vals,
           );
         } finally {
