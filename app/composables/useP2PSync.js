@@ -216,11 +216,24 @@ export const useP2PSync = () => {
         await applyRemoteDump(conn._buffer);
       }
       conn.send({ type: "ACK" });
+      // Persist merged data immediately so it survives backgrounding
+      try {
+        const { flushMobileDb } = await import("./useMobileDb");
+        await flushMobileDb();
+      } catch {}
+      // Signal all pages to reload their data
+      useSyncTick().value++;
       setState("done", "Sync complete ✓");
       cleanup();
     }
 
     if (msg.type === "ACK") {
+      // We sent data and got confirmation — also flush and tick
+      try {
+        const { flushMobileDb } = await import("./useMobileDb");
+        await flushMobileDb();
+      } catch {}
+      useSyncTick().value++;
       setState("done", "Sync complete ✓");
       cleanup();
     }
