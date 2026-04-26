@@ -1385,21 +1385,17 @@ export const useMobileStore = () => {
       ).values?.[0];
 
       if (!existing) {
-        // Brand-new row — simple insert
+        // Add synced_at as a plain value — sql.js cannot mix datetime('now')
+        // expressions with ? placeholders in the same VALUES list
+        normalized.synced_at = new Date().toISOString();
         const cols = Object.keys(normalized);
+        const colList = cols.map((c) => `"${c}"`).join(", ");
         const placeholders = cols.map(() => "?").join(", ");
         const vals = cols.map((c) => normalized[c]);
         await db.run("PRAGMA foreign_keys = OFF");
         try {
-          const colList = [...cols.map((c) => `"${c}"`), "synced_at"].join(
-            ", ",
-          );
-          const valPlaceholders = [
-            ...cols.map(() => "?"),
-            "datetime('now')",
-          ].join(", ");
           await db.run(
-            `INSERT OR IGNORE INTO "${table}" (${colList}) VALUES (${valPlaceholders})`,
+            `INSERT OR IGNORE INTO "${table}" (${colList}) VALUES (${placeholders})`,
             vals,
           );
         } finally {
@@ -1435,13 +1431,17 @@ export const useMobileStore = () => {
       if (updateCols.length === 0) return { ok: true };
 
       const setClause = updateCols.map((c) => `"${c}" = ?`).join(", ");
-      // include synced_at in the update so this row isn't re-queued
-      const vals = [...updateCols.map((c) => normalized[c]), normalized.id];
+      // synced_at bound as value, not SQL expression — sql.js limitation
+      const vals = [
+        ...updateCols.map((c) => normalized[c]),
+        new Date().toISOString(),
+        normalized.id,
+      ];
 
       await db.run("PRAGMA foreign_keys = OFF");
       try {
         await db.run(
-          `UPDATE "${table}" SET ${setClause}, synced_at=datetime('now') WHERE id = ?`,
+          `UPDATE "${table}" SET ${setClause}, synced_at=? WHERE id = ?`,
           vals,
         );
       } finally {
