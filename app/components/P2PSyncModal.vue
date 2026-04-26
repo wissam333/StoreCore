@@ -159,6 +159,7 @@
               <!-- Enter peer ID -->
               <div v-if="guestStep === 'enter'" class="p2p-enter">
                 <p class="p2p-enter-label">{{ $t("p2p.guest.enterLabel") }}</p>
+
                 <div class="p2p-input-wrap">
                   <input
                     v-model="manualId"
@@ -174,9 +175,12 @@
                     {{ $t("p2p.guest.connect") }}
                   </button>
                 </div>
+
                 <div class="p2p-divider">
                   <span>{{ $t("p2p.guest.or") }}</span>
                 </div>
+
+                <!-- Camera scan button — works on web/electron/mobile without Capacitor -->
                 <button
                   class="p2p-scan-btn"
                   @click="startScan"
@@ -198,6 +202,21 @@
                   }}</span>
                   <span v-else>{{ $t("p2p.guest.openCamera") }}</span>
                 </button>
+
+                <!--
+                  Hidden file input — on mobile/native this opens the rear camera directly.
+                  On web/Electron we use getUserMedia live scan instead, so this is only
+                  rendered when isNativeDevice is true (no @capacitor/camera required).
+                -->
+                <input
+                  v-if="isNativeDevice"
+                  ref="fileInputEl"
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  class="p2p-file-input-hidden"
+                  @change="onFileInputChange"
+                />
               </div>
 
               <!-- Web/Electron live camera scan -->
@@ -231,6 +250,7 @@
                   <div class="p2p-spinner"></div>
                   <p>{{ statusMsg || $t("p2p.status.connecting") }}</p>
                 </div>
+
                 <div v-else-if="status === 'syncing'" class="p2p-syncing">
                   <div class="p2p-sync-anim">
                     <div class="p2p-sync-ring"></div>
@@ -258,11 +278,13 @@
                     {{ $t("p2p.status.rows") }}
                   </p>
                 </div>
+
                 <div v-else-if="status === 'done'" class="p2p-done">
                   <div class="p2p-done-icon">✓</div>
                   <p class="p2p-done-msg">{{ $t("p2p.status.done") }}</p>
                   <p class="p2p-done-sub">{{ $t("p2p.status.doneSub") }}</p>
                 </div>
+
                 <div v-else-if="status === 'error'" class="p2p-error">
                   <div class="p2p-error-icon">!</div>
                   <p class="p2p-error-msg">
@@ -315,17 +337,30 @@ const {
   loadQrLib,
 } = useP2PSync();
 
-// ── State ────────────────────────────────────────────────────────────────────
+// ── State ─────────────────────────────────────────────────────────────────────
 const mode = ref("pick"); // 'pick' | 'host' | 'guest'
 const guestStep = ref("enter"); // 'enter' | 'scan' | 'sync'
 const manualId = ref("");
-const scanLoading = ref(false); // shows spinner on scan button while camera opens
+const scanLoading = ref(false);
+
 const qrEl = ref(null);
 const videoEl = ref(null);
+const fileInputEl = ref(null); // hidden <input type="file"> for mobile camera
 
 let _qrInstance = null;
 let _videoStream = null;
 let _scanTimer = null;
+
+// ── Platform detection ────────────────────────────────────────────────────────
+/**
+ * Returns true on a native mobile platform (Capacitor).
+ * Avoids any import of @capacitor/camera — detection only uses the global flag.
+ */
+const isNativeDevice = computed(
+  () =>
+    typeof window !== "undefined" &&
+    window?.Capacitor?.isNativePlatform?.() === true,
+);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const progressPct = computed(() =>
@@ -333,10 +368,6 @@ const progressPct = computed(() =>
     ? Math.round((progress.value.current / progress.value.total) * 100)
     : 0,
 );
-
-const isNative = () =>
-  typeof window !== "undefined" &&
-  window?.Capacitor?.isNativePlatform?.() === true;
 
 const loadScript = (src) =>
   new Promise((resolve, reject) => {
@@ -388,57 +419,48 @@ const connectManual = () => {
 
 // ── Guest: scan entry point — routes native vs web ────────────────────────────
 const startScan = async () => {
-  if (isNative()) {
-    await scanWithCapacitorCamera();
+  if (isNativeDevice.value) {
+    // Mobile: trigger the hidden file input — browser opens native camera picker
+    await nextTick();
+    fileInputEl.value?.click();
   } else {
+    // Web / Electron: getUserMedia live preview
     await startWebScan();
   }
 };
 
-// ── Native: Capacitor Camera ──────────────────────────────────────────────────
-const scanWithCapacitorCamera = async () => {
+// ── Mobile: file input → jsQR decode (no @capacitor/camera needed) ────────────
+const onFileInputChange = async (event) => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+
   scanLoading.value = true;
   try {
-    const { Camera, CameraResultType, CameraSource } = await import(
-      "@capacitor/camera"
-    );
-
-    // Request permission explicitly first
-    const perms = await Camera.requestPermissions({ permissions: ["camera"] });
-    if (perms.camera === "denied") {
-      alert(
-        "Camera permission denied. Please enable it in your device Settings.",
-      );
-      return;
-    }
-
-    // Open native camera — user takes a photo of the QR code
-    const photo = await Camera.getPhoto({
-      resultType: CameraResultType.DataUrl,
-      source: CameraSource.Camera,
-      quality: 90,
-      allowEditing: false,
-      presentationStyle: "fullscreen",
+    // Read the captured photo as a data URL
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error("File read failed"));
+      reader.readAsDataURL(file);
     });
 
-    if (!photo?.dataUrl) return;
-
-    // Decode QR from the captured image using jsQR
-    const qrId = await decodeQrFromDataUrl(photo.dataUrl);
+    // Decode QR from the image
+    const qrId = await decodeQrFromDataUrl(dataUrl);
     if (qrId) {
       handleScannedId(qrId);
     } else {
-      alert("No QR code detected. Please try again.");
+      alert(
+        $t("p2p.guest.noQrDetected") ||
+          "No QR code detected. Please try again.",
+      );
     }
   } catch (e) {
-    // User cancelled camera — don't show error
-    if (e?.message?.includes("cancelled") || e?.message?.includes("canceled")) {
-      return;
-    }
-    console.warn("[P2P] Capacitor camera error:", e);
-    alert("Could not open camera. Try entering the Peer ID manually.");
+    console.warn("[P2P] File read error:", e);
+    alert("Could not read the image. Please try again.");
   } finally {
     scanLoading.value = false;
+    // Reset so the same file can be re-selected if needed
+    if (fileInputEl.value) fileInputEl.value.value = "";
   }
 };
 
@@ -1067,6 +1089,16 @@ onUnmounted(() => {
   width: 18px;
   height: 18px;
   color: var(--p2p-accent);
+}
+
+/* Hidden file input — visually removed but still functional */
+.p2p-file-input-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  overflow: hidden;
 }
 
 /* ── Guest: camera scan (web/electron) ── */
