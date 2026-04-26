@@ -17,7 +17,7 @@
                 />
               </svg>
             </div>
-            <div>
+            <div class="p2p-header-text">
               <h2 class="p2p-title">{{ $t("p2p.title") }}</h2>
               <p class="p2p-subtitle">{{ $t("p2p.subtitle") }}</p>
             </div>
@@ -33,185 +33,83 @@
             </button>
           </div>
 
-          <!-- Mode picker -->
-          <div v-if="mode === 'pick'" class="p2p-pick">
-            <p class="p2p-pick-label">{{ $t("p2p.pick.question") }}</p>
-            <div class="p2p-pick-grid">
-              <button class="p2p-pick-btn" @click="chooseMode('host')">
-                <div class="p2p-pick-icon">
-                  <svg
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.5"
-                  >
-                    <rect x="3" y="3" width="18" height="18" rx="2" />
-                    <path d="M8 12h8M12 8v8" />
-                  </svg>
-                </div>
-                <span class="p2p-pick-name">{{
-                  $t("p2p.pick.host.name")
-                }}</span>
-                <span class="p2p-pick-desc">{{
-                  $t("p2p.pick.host.desc")
-                }}</span>
-              </button>
-              <button class="p2p-pick-btn" @click="chooseMode('guest')">
-                <div class="p2p-pick-icon">
-                  <svg
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.5"
-                  >
-                    <path
-                      d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"
-                    />
-                    <circle cx="12" cy="13" r="3" />
-                  </svg>
-                </div>
-                <span class="p2p-pick-name">{{
-                  $t("p2p.pick.guest.name")
-                }}</span>
-                <span class="p2p-pick-desc">{{
-                  $t("p2p.pick.guest.desc")
-                }}</span>
-              </button>
-            </div>
-          </div>
-
-          <!-- HOST VIEW -->
-          <div v-else-if="mode === 'host'" class="p2p-host">
-            <div
-              v-if="status === 'loading' || status === 'connecting'"
-              class="p2p-waiting"
-            >
-              <div class="p2p-spinner"></div>
-              <p>{{ statusMsg || $t("p2p.status.preparing") }}</p>
-            </div>
-
-            <div v-else-if="status === 'ready'" class="p2p-qr-wrap">
-              <p class="p2p-qr-label">{{ $t("p2p.host.qrLabel") }}</p>
-              <div class="p2p-qr-box">
-                <div ref="qrEl" class="p2p-qr-inner"></div>
-                <div class="p2p-qr-corner p2p-qr-corner--tl"></div>
-                <div class="p2p-qr-corner p2p-qr-corner--tr"></div>
-                <div class="p2p-qr-corner p2p-qr-corner--bl"></div>
-                <div class="p2p-qr-corner p2p-qr-corner--br"></div>
-              </div>
-              <p class="p2p-peer-id">
-                {{ $t("p2p.host.idLabel") }}: <code>{{ peerId }}</code>
-              </p>
-              <p class="p2p-hint">{{ $t("p2p.host.hint") }}</p>
-            </div>
-
-            <div v-else-if="status === 'syncing'" class="p2p-syncing">
-              <div class="p2p-sync-anim">
-                <div class="p2p-sync-ring"></div>
-                <svg
-                  class="p2p-sync-icon"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.5"
-                >
-                  <path
-                    d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"
-                  />
-                </svg>
-              </div>
-              <p class="p2p-sync-msg">{{ statusMsg }}</p>
-              <div v-if="progress.total > 0" class="p2p-progress">
-                <div
-                  class="p2p-progress-bar"
-                  :style="{ width: progressPct + '%' }"
-                ></div>
-              </div>
-              <p v-if="progress.total > 0" class="p2p-progress-label">
-                {{ progress.current }} / {{ progress.total }}
-                {{ $t("p2p.status.rows") }}
-              </p>
-            </div>
-
-            <div v-else-if="status === 'done'" class="p2p-done">
-              <div class="p2p-done-icon">✓</div>
-              <p class="p2p-done-msg">{{ $t("p2p.status.done") }}</p>
-              <p class="p2p-done-sub">{{ $t("p2p.status.doneSub") }}</p>
-            </div>
-
-            <div v-else-if="status === 'error'" class="p2p-error">
-              <div class="p2p-error-icon">!</div>
-              <p class="p2p-error-msg">{{ error || $t("p2p.status.error") }}</p>
-            </div>
-          </div>
-
-          <!-- GUEST VIEW -->
-          <div v-else-if="mode === 'guest'" class="p2p-guest">
-            <div v-if="guestStep === 'enter'" class="p2p-enter">
-              <p class="p2p-enter-label">{{ $t("p2p.guest.enterLabel") }}</p>
-              <div class="p2p-input-wrap">
-                <input
-                  v-model="manualId"
-                  class="p2p-input"
-                  :placeholder="$t('p2p.guest.inputPlaceholder')"
-                  @keydown.enter="connectManual"
-                />
-                <button
-                  class="p2p-input-btn"
-                  @click="connectManual"
-                  :disabled="!manualId.trim()"
-                >
-                  {{ $t("p2p.guest.connect") }}
+          <!-- Body -->
+          <div class="p2p-body">
+            <!-- ── Mode picker ── -->
+            <div v-if="mode === 'pick'" class="p2p-pick">
+              <p class="p2p-pick-label">{{ $t("p2p.pick.question") }}</p>
+              <div class="p2p-pick-grid">
+                <button class="p2p-pick-btn" @click="chooseMode('host')">
+                  <div class="p2p-pick-icon">
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                    >
+                      <rect x="3" y="3" width="18" height="18" rx="2" />
+                      <path d="M8 12h8M12 8v8" />
+                    </svg>
+                  </div>
+                  <span class="p2p-pick-name">{{
+                    $t("p2p.pick.host.name")
+                  }}</span>
+                  <span class="p2p-pick-desc">{{
+                    $t("p2p.pick.host.desc")
+                  }}</span>
+                </button>
+                <button class="p2p-pick-btn" @click="chooseMode('guest')">
+                  <div class="p2p-pick-icon">
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                    >
+                      <path
+                        d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"
+                      />
+                      <circle cx="12" cy="13" r="3" />
+                    </svg>
+                  </div>
+                  <span class="p2p-pick-name">{{
+                    $t("p2p.pick.guest.name")
+                  }}</span>
+                  <span class="p2p-pick-desc">{{
+                    $t("p2p.pick.guest.desc")
+                  }}</span>
                 </button>
               </div>
-              <div class="p2p-divider">
-                <span>{{ $t("p2p.guest.or") }}</span>
-              </div>
-              <button class="p2p-scan-btn" @click="startScan">
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.5"
-                >
-                  <path
-                    d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"
-                  />
-                  <circle cx="12" cy="13" r="3" />
-                </svg>
-                {{ $t("p2p.guest.openCamera") }}
-              </button>
             </div>
 
-            <div v-else-if="guestStep === 'scan'" class="p2p-scan">
-              <p class="p2p-scan-label">{{ $t("p2p.guest.scanLabel") }}</p>
-              <div class="p2p-video-wrap">
-                <video
-                  ref="videoEl"
-                  class="p2p-video"
-                  autoplay
-                  playsinline
-                  muted
-                ></video>
-                <div class="p2p-scan-overlay">
-                  <div class="p2p-scan-frame">
-                    <div class="p2p-scan-line"></div>
-                  </div>
-                </div>
-              </div>
-              <button class="p2p-cancel-scan" @click="stopScan">
-                {{ $t("p2p.guest.cancelScan") }}
-              </button>
-            </div>
-
-            <div v-else-if="guestStep === 'sync'">
+            <!-- ── HOST VIEW ── -->
+            <div v-else-if="mode === 'host'" class="p2p-host">
+              <!-- Loading / Connecting -->
               <div
                 v-if="status === 'loading' || status === 'connecting'"
                 class="p2p-waiting"
               >
                 <div class="p2p-spinner"></div>
-                <p>{{ statusMsg || $t("p2p.status.connecting") }}</p>
+                <p>{{ statusMsg || $t("p2p.status.preparing") }}</p>
               </div>
+
+              <!-- QR Ready -->
+              <div v-else-if="status === 'ready'" class="p2p-qr-wrap">
+                <p class="p2p-qr-label">{{ $t("p2p.host.qrLabel") }}</p>
+                <div class="p2p-qr-box">
+                  <div ref="qrEl" class="p2p-qr-inner"></div>
+                  <div class="p2p-qr-corner p2p-qr-corner--tl"></div>
+                  <div class="p2p-qr-corner p2p-qr-corner--tr"></div>
+                  <div class="p2p-qr-corner p2p-qr-corner--bl"></div>
+                  <div class="p2p-qr-corner p2p-qr-corner--br"></div>
+                </div>
+                <p class="p2p-peer-id">
+                  {{ $t("p2p.host.idLabel") }}: <code>{{ peerId }}</code>
+                </p>
+                <p class="p2p-hint">{{ $t("p2p.host.hint") }}</p>
+              </div>
+
+              <!-- Syncing -->
               <div v-else-if="status === 'syncing'" class="p2p-syncing">
                 <div class="p2p-sync-anim">
                   <div class="p2p-sync-ring"></div>
@@ -239,22 +137,145 @@
                   {{ $t("p2p.status.rows") }}
                 </p>
               </div>
+
+              <!-- Done -->
               <div v-else-if="status === 'done'" class="p2p-done">
                 <div class="p2p-done-icon">✓</div>
                 <p class="p2p-done-msg">{{ $t("p2p.status.done") }}</p>
                 <p class="p2p-done-sub">{{ $t("p2p.status.doneSub") }}</p>
               </div>
+
+              <!-- Error -->
               <div v-else-if="status === 'error'" class="p2p-error">
                 <div class="p2p-error-icon">!</div>
                 <p class="p2p-error-msg">
-                  {{ error || $t("p2p.status.connectionFailed") }}
+                  {{ error || $t("p2p.status.error") }}
                 </p>
-                <button class="p2p-retry" @click="guestStep = 'enter'">
-                  {{ $t("p2p.guest.tryAgain") }}
+              </div>
+            </div>
+
+            <!-- ── GUEST VIEW ── -->
+            <div v-else-if="mode === 'guest'" class="p2p-guest">
+              <!-- Enter peer ID -->
+              <div v-if="guestStep === 'enter'" class="p2p-enter">
+                <p class="p2p-enter-label">{{ $t("p2p.guest.enterLabel") }}</p>
+                <div class="p2p-input-wrap">
+                  <input
+                    v-model="manualId"
+                    class="p2p-input"
+                    :placeholder="$t('p2p.guest.inputPlaceholder')"
+                    @keydown.enter="connectManual"
+                  />
+                  <button
+                    class="p2p-input-btn"
+                    @click="connectManual"
+                    :disabled="!manualId.trim()"
+                  >
+                    {{ $t("p2p.guest.connect") }}
+                  </button>
+                </div>
+                <div class="p2p-divider">
+                  <span>{{ $t("p2p.guest.or") }}</span>
+                </div>
+                <button
+                  class="p2p-scan-btn"
+                  @click="startScan"
+                  :disabled="scanLoading"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                  >
+                    <path
+                      d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"
+                    />
+                    <circle cx="12" cy="13" r="3" />
+                  </svg>
+                  <span v-if="scanLoading">{{
+                    $t("p2p.guest.scanLoading") || "Opening camera…"
+                  }}</span>
+                  <span v-else>{{ $t("p2p.guest.openCamera") }}</span>
                 </button>
+              </div>
+
+              <!-- Web/Electron live camera scan -->
+              <div v-else-if="guestStep === 'scan'" class="p2p-scan">
+                <p class="p2p-scan-label">{{ $t("p2p.guest.scanLabel") }}</p>
+                <div class="p2p-video-wrap">
+                  <video
+                    ref="videoEl"
+                    class="p2p-video"
+                    autoplay
+                    playsinline
+                    muted
+                  ></video>
+                  <div class="p2p-scan-overlay">
+                    <div class="p2p-scan-frame">
+                      <div class="p2p-scan-line"></div>
+                    </div>
+                  </div>
+                </div>
+                <button class="p2p-cancel-scan" @click="stopScan">
+                  {{ $t("p2p.guest.cancelScan") }}
+                </button>
+              </div>
+
+              <!-- Syncing / Done / Error after connect -->
+              <div v-else-if="guestStep === 'sync'">
+                <div
+                  v-if="status === 'loading' || status === 'connecting'"
+                  class="p2p-waiting"
+                >
+                  <div class="p2p-spinner"></div>
+                  <p>{{ statusMsg || $t("p2p.status.connecting") }}</p>
+                </div>
+                <div v-else-if="status === 'syncing'" class="p2p-syncing">
+                  <div class="p2p-sync-anim">
+                    <div class="p2p-sync-ring"></div>
+                    <svg
+                      class="p2p-sync-icon"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                    >
+                      <path
+                        d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"
+                      />
+                    </svg>
+                  </div>
+                  <p class="p2p-sync-msg">{{ statusMsg }}</p>
+                  <div v-if="progress.total > 0" class="p2p-progress">
+                    <div
+                      class="p2p-progress-bar"
+                      :style="{ width: progressPct + '%' }"
+                    ></div>
+                  </div>
+                  <p v-if="progress.total > 0" class="p2p-progress-label">
+                    {{ progress.current }} / {{ progress.total }}
+                    {{ $t("p2p.status.rows") }}
+                  </p>
+                </div>
+                <div v-else-if="status === 'done'" class="p2p-done">
+                  <div class="p2p-done-icon">✓</div>
+                  <p class="p2p-done-msg">{{ $t("p2p.status.done") }}</p>
+                  <p class="p2p-done-sub">{{ $t("p2p.status.doneSub") }}</p>
+                </div>
+                <div v-else-if="status === 'error'" class="p2p-error">
+                  <div class="p2p-error-icon">!</div>
+                  <p class="p2p-error-msg">
+                    {{ error || $t("p2p.status.connectionFailed") }}
+                  </p>
+                  <button class="p2p-retry" @click="guestStep = 'enter'">
+                    {{ $t("p2p.guest.tryAgain") }}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
+          <!-- /p2p-body -->
 
           <!-- Footer -->
           <div class="p2p-footer">
@@ -294,9 +315,11 @@ const {
   loadQrLib,
 } = useP2PSync();
 
-const mode = ref("pick");
-const guestStep = ref("enter");
+// ── State ────────────────────────────────────────────────────────────────────
+const mode = ref("pick"); // 'pick' | 'host' | 'guest'
+const guestStep = ref("enter"); // 'enter' | 'scan' | 'sync'
 const manualId = ref("");
+const scanLoading = ref(false); // shows spinner on scan button while camera opens
 const qrEl = ref(null);
 const videoEl = ref(null);
 
@@ -304,12 +327,28 @@ let _qrInstance = null;
 let _videoStream = null;
 let _scanTimer = null;
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
 const progressPct = computed(() =>
   progress.value.total > 0
     ? Math.round((progress.value.current / progress.value.total) * 100)
     : 0,
 );
 
+const isNative = () =>
+  typeof window !== "undefined" &&
+  window?.Capacitor?.isNativePlatform?.() === true;
+
+const loadScript = (src) =>
+  new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) return resolve();
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = reject;
+    document.head.appendChild(s);
+  });
+
+// ── QR rendering (host side) ──────────────────────────────────────────────────
 const chooseMode = async (m) => {
   mode.value = m;
   if (m === "host") await startHost();
@@ -339,6 +378,7 @@ watch([() => status.value, qrEl], async ([s, el]) => {
   }
 });
 
+// ── Guest: manual connect ─────────────────────────────────────────────────────
 const connectManual = () => {
   const id = manualId.value.trim();
   if (!id) return;
@@ -346,7 +386,93 @@ const connectManual = () => {
   connectToHost(id);
 };
 
+// ── Guest: scan entry point — routes native vs web ────────────────────────────
 const startScan = async () => {
+  if (isNative()) {
+    await scanWithCapacitorCamera();
+  } else {
+    await startWebScan();
+  }
+};
+
+// ── Native: Capacitor Camera ──────────────────────────────────────────────────
+const scanWithCapacitorCamera = async () => {
+  scanLoading.value = true;
+  try {
+    const { Camera, CameraResultType, CameraSource } = await import(
+      "@capacitor/camera"
+    );
+
+    // Request permission explicitly first
+    const perms = await Camera.requestPermissions({ permissions: ["camera"] });
+    if (perms.camera === "denied") {
+      alert(
+        "Camera permission denied. Please enable it in your device Settings.",
+      );
+      return;
+    }
+
+    // Open native camera — user takes a photo of the QR code
+    const photo = await Camera.getPhoto({
+      resultType: CameraResultType.DataUrl,
+      source: CameraSource.Camera,
+      quality: 90,
+      allowEditing: false,
+      presentationStyle: "fullscreen",
+    });
+
+    if (!photo?.dataUrl) return;
+
+    // Decode QR from the captured image using jsQR
+    const qrId = await decodeQrFromDataUrl(photo.dataUrl);
+    if (qrId) {
+      handleScannedId(qrId);
+    } else {
+      alert("No QR code detected. Please try again.");
+    }
+  } catch (e) {
+    // User cancelled camera — don't show error
+    if (e?.message?.includes("cancelled") || e?.message?.includes("canceled")) {
+      return;
+    }
+    console.warn("[P2P] Capacitor camera error:", e);
+    alert("Could not open camera. Try entering the Peer ID manually.");
+  } finally {
+    scanLoading.value = false;
+  }
+};
+
+// ── Decode QR from a base64 dataUrl using jsQR ───────────────────────────────
+const decodeQrFromDataUrl = (dataUrl) =>
+  new Promise(async (resolve) => {
+    try {
+      await loadScript(
+        "https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js",
+      );
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = window.jsQR(
+          imageData.data,
+          imageData.width,
+          imageData.height,
+        );
+        resolve(code?.data ?? null);
+      };
+      img.onerror = () => resolve(null);
+      img.src = dataUrl;
+    } catch {
+      resolve(null);
+    }
+  });
+
+// ── Web/Electron: getUserMedia live preview ───────────────────────────────────
+const startWebScan = async () => {
   guestStep.value = "scan";
   await nextTick();
   try {
@@ -409,6 +535,7 @@ const scanFrame = async () => {
   scheduleScanFrame();
 };
 
+// ── Shared: handle a scanned peer ID ─────────────────────────────────────────
 const handleScannedId = (id) => {
   stopScan();
   manualId.value = id;
@@ -416,16 +543,7 @@ const handleScannedId = (id) => {
   connectToHost(id);
 };
 
-const loadScript = (src) =>
-  new Promise((resolve, reject) => {
-    if (document.querySelector(`script[src="${src}"]`)) return resolve();
-    const s = document.createElement("script");
-    s.src = src;
-    s.onload = resolve;
-    s.onerror = reject;
-    document.head.appendChild(s);
-  });
-
+// ── Navigation ────────────────────────────────────────────────────────────────
 const goBack = () => {
   stopScan();
   reset();
@@ -447,6 +565,7 @@ const handleClose = () => {
   mode.value = "pick";
   guestStep.value = "enter";
   manualId.value = "";
+  scanLoading.value = false;
   _qrInstance = null;
   emit("update:modelValue", false);
 };
@@ -508,6 +627,7 @@ onUnmounted(() => {
   gap: 12px;
   padding: 20px 20px 16px;
   border-bottom: 1px solid var(--p2p-border);
+  flex-shrink: 0;
 }
 .p2p-header-icon {
   width: 40px;
@@ -524,6 +644,10 @@ onUnmounted(() => {
   width: 20px;
   height: 20px;
 }
+.p2p-header-text {
+  flex: 1;
+  min-width: 0;
+}
 .p2p-title {
   font-size: 16px;
   font-weight: 700;
@@ -535,7 +659,6 @@ onUnmounted(() => {
   color: var(--p2p-muted);
   margin: 2px 0 0;
 }
-
 .p2p-close {
   margin-inline-start: auto;
   background: none;
@@ -555,6 +678,11 @@ onUnmounted(() => {
   width: 18px;
   height: 18px;
   display: block;
+}
+
+/* ── Body ── */
+.p2p-body {
+  flex: 1;
 }
 
 /* ── Mode picker ── */
@@ -662,7 +790,6 @@ onUnmounted(() => {
 .p2p-qr-inner {
   display: block;
 }
-
 .p2p-qr-corner {
   position: absolute;
   width: 20px;
@@ -694,7 +821,6 @@ onUnmounted(() => {
   border-width: 0 3px 3px 0;
   border-radius: 0 0 4px 0;
 }
-
 .p2p-peer-id {
   font-size: 11px;
   color: var(--p2p-muted);
@@ -927,11 +1053,15 @@ onUnmounted(() => {
   font-size: 14px;
   font-weight: 500;
   cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
+  transition: border-color 0.15s, background 0.15s, opacity 0.15s;
 }
 .p2p-scan-btn:hover {
   border-color: var(--p2p-accent);
   background: var(--p2p-accent-dim);
+}
+.p2p-scan-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 .p2p-scan-btn svg {
   width: 18px;
@@ -939,7 +1069,7 @@ onUnmounted(() => {
   color: var(--p2p-accent);
 }
 
-/* ── Guest: camera scan ── */
+/* ── Guest: camera scan (web/electron) ── */
 .p2p-scan {
   padding: 20px;
   display: flex;
@@ -1027,6 +1157,7 @@ onUnmounted(() => {
   justify-content: space-between;
   align-items: center;
   min-height: 56px;
+  flex-shrink: 0;
 }
 .p2p-back {
   background: none;
