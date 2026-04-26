@@ -191,7 +191,7 @@ export const initMobileSchema = async () => {
       queued_at   TEXT    DEFAULT (datetime('now')),
       synced_at   TEXT,
       retry_count INTEGER DEFAULT 0,
-      changed_fields TEXT,
+      changed_fields TEXT
       
     )
   `,
