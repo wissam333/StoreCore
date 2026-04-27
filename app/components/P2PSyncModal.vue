@@ -35,7 +35,7 @@
 
           <!-- Body -->
           <div class="p2p-body">
-            <!-- ── Mode picker ── -->
+            <!-- Mode picker -->
             <div v-if="mode === 'pick'" class="p2p-pick">
               <p class="p2p-pick-label">{{ $t("p2p.pick.question") }}</p>
               <div class="p2p-pick-grid">
@@ -82,9 +82,8 @@
               </div>
             </div>
 
-            <!-- ── HOST VIEW ── -->
+            <!-- HOST VIEW -->
             <div v-else-if="mode === 'host'" class="p2p-host">
-              <!-- Loading / Connecting -->
               <div
                 v-if="status === 'loading' || status === 'connecting'"
                 class="p2p-waiting"
@@ -92,8 +91,6 @@
                 <div class="p2p-spinner"></div>
                 <p>{{ statusMsg || $t("p2p.status.preparing") }}</p>
               </div>
-
-              <!-- QR Ready -->
               <div v-else-if="status === 'ready'" class="p2p-qr-wrap">
                 <p class="p2p-qr-label">{{ $t("p2p.host.qrLabel") }}</p>
                 <div class="p2p-qr-box">
@@ -108,8 +105,6 @@
                 </p>
                 <p class="p2p-hint">{{ $t("p2p.host.hint") }}</p>
               </div>
-
-              <!-- Syncing -->
               <div v-else-if="status === 'syncing'" class="p2p-syncing">
                 <div class="p2p-sync-anim">
                   <div class="p2p-sync-ring"></div>
@@ -137,15 +132,11 @@
                   {{ $t("p2p.status.rows") }}
                 </p>
               </div>
-
-              <!-- Done -->
               <div v-else-if="status === 'done'" class="p2p-done">
                 <div class="p2p-done-icon">✓</div>
                 <p class="p2p-done-msg">{{ $t("p2p.status.done") }}</p>
                 <p class="p2p-done-sub">{{ $t("p2p.status.doneSub") }}</p>
               </div>
-
-              <!-- Error -->
               <div v-else-if="status === 'error'" class="p2p-error">
                 <div class="p2p-error-icon">!</div>
                 <p class="p2p-error-msg">
@@ -154,12 +145,11 @@
               </div>
             </div>
 
-            <!-- ── GUEST VIEW ── -->
+            <!-- GUEST VIEW -->
             <div v-else-if="mode === 'guest'" class="p2p-guest">
-              <!-- Enter peer ID -->
+              <!-- Enter peer ID / scan -->
               <div v-if="guestStep === 'enter'" class="p2p-enter">
                 <p class="p2p-enter-label">{{ $t("p2p.guest.enterLabel") }}</p>
-
                 <div class="p2p-input-wrap">
                   <input
                     v-model="manualId"
@@ -175,12 +165,9 @@
                     {{ $t("p2p.guest.connect") }}
                   </button>
                 </div>
-
                 <div class="p2p-divider">
                   <span>{{ $t("p2p.guest.or") }}</span>
                 </div>
-
-                <!-- Camera scan button — works on web/electron/mobile without Capacitor -->
                 <button
                   class="p2p-scan-btn"
                   @click="startScan"
@@ -202,14 +189,8 @@
                   }}</span>
                   <span v-else>{{ $t("p2p.guest.openCamera") }}</span>
                 </button>
-
-                <!--
-                  Hidden file input — on mobile/native this opens the rear camera directly.
-                  On web/Electron we use getUserMedia live scan instead, so this is only
-                  rendered when isNativeDevice is true (no @capacitor/camera required).
-                -->
+                <!-- Hidden file input for native camera on mobile -->
                 <input
-                  v-if="isNativeDevice"
                   ref="fileInputEl"
                   type="file"
                   accept="image/*"
@@ -219,7 +200,7 @@
                 />
               </div>
 
-              <!-- Web/Electron live camera scan -->
+              <!-- Live camera scan -->
               <div v-else-if="guestStep === 'scan'" class="p2p-scan">
                 <p class="p2p-scan-label">{{ $t("p2p.guest.scanLabel") }}</p>
                 <div class="p2p-video-wrap">
@@ -235,13 +216,15 @@
                       <div class="p2p-scan-line"></div>
                     </div>
                   </div>
+                  <!-- Hidden canvas used for frame capture -->
+                  <canvas ref="canvasEl" class="p2p-canvas-hidden"></canvas>
                 </div>
                 <button class="p2p-cancel-scan" @click="stopScan">
                   {{ $t("p2p.guest.cancelScan") }}
                 </button>
               </div>
 
-              <!-- Syncing / Done / Error after connect -->
+              <!-- Syncing / Done / Error -->
               <div v-else-if="guestStep === 'sync'">
                 <div
                   v-if="status === 'loading' || status === 'connecting'"
@@ -250,7 +233,6 @@
                   <div class="p2p-spinner"></div>
                   <p>{{ statusMsg || $t("p2p.status.connecting") }}</p>
                 </div>
-
                 <div v-else-if="status === 'syncing'" class="p2p-syncing">
                   <div class="p2p-sync-anim">
                     <div class="p2p-sync-ring"></div>
@@ -278,13 +260,11 @@
                     {{ $t("p2p.status.rows") }}
                   </p>
                 </div>
-
                 <div v-else-if="status === 'done'" class="p2p-done">
                   <div class="p2p-done-icon">✓</div>
                   <p class="p2p-done-msg">{{ $t("p2p.status.done") }}</p>
                   <p class="p2p-done-sub">{{ $t("p2p.status.doneSub") }}</p>
                 </div>
-
                 <div v-else-if="status === 'error'" class="p2p-error">
                   <div class="p2p-error-icon">!</div>
                   <p class="p2p-error-msg">
@@ -297,7 +277,6 @@
               </div>
             </div>
           </div>
-          <!-- /p2p-body -->
 
           <!-- Footer -->
           <div class="p2p-footer">
@@ -337,32 +316,21 @@ const {
   loadQrLib,
 } = useP2PSync();
 
-// ── State ─────────────────────────────────────────────────────────────────────
-const mode = ref("pick"); // 'pick' | 'host' | 'guest'
-const guestStep = ref("enter"); // 'enter' | 'scan' | 'sync'
+const mode = ref("pick");
+const guestStep = ref("enter");
 const manualId = ref("");
 const scanLoading = ref(false);
 
 const qrEl = ref(null);
 const videoEl = ref(null);
-const fileInputEl = ref(null); // hidden <input type="file"> for mobile camera
+const canvasEl = ref(null);
+const fileInputEl = ref(null);
 
 let _qrInstance = null;
 let _videoStream = null;
-let _scanTimer = null;
+let _scanRaf = null;
+let _scanActive = false;
 
-// ── Platform detection ────────────────────────────────────────────────────────
-/**
- * Returns true on a native mobile platform (Capacitor).
- * Avoids any import of @capacitor/camera — detection only uses the global flag.
- */
-const isNativeDevice = computed(
-  () =>
-    typeof window !== "undefined" &&
-    window?.Capacitor?.isNativePlatform?.() === true,
-);
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 const progressPct = computed(() =>
   progress.value.total > 0
     ? Math.round((progress.value.current / progress.value.total) * 100)
@@ -379,7 +347,7 @@ const loadScript = (src) =>
     document.head.appendChild(s);
   });
 
-// ── QR rendering (host side) ──────────────────────────────────────────────────
+// ── QR rendering ─────────────────────────────────────────────────────────────
 const chooseMode = async (m) => {
   mode.value = m;
   if (m === "host") await startHost();
@@ -398,11 +366,11 @@ watch([() => status.value, qrEl], async ([s, el]) => {
     if (!qrEl.value) return;
     _qrInstance = new window.QRCode(qrEl.value, {
       text: peerId.value,
-      width: 200,
-      height: 200,
+      width: 220,
+      height: 220,
       colorDark: "#0f172a",
       colorLight: "#f8fafc",
-      correctLevel: window.QRCode.CorrectLevel.M,
+      correctLevel: window.QRCode.CorrectLevel.H, // H = highest error correction = easier to scan
     });
   } catch (e) {
     console.warn("[P2P] QR generation failed:", e);
@@ -417,119 +385,125 @@ const connectManual = () => {
   connectToHost(id);
 };
 
-// ── Guest: scan entry point — routes native vs web ────────────────────────────
+// ── QR scan entry point ───────────────────────────────────────────────────────
+// Strategy:
+//   Native mobile (Capacitor) → file input with capture=environment
+//   Web/Electron with getUserMedia → live video scan
+//   Fallback → file input (no capture attr, opens gallery)
 const startScan = async () => {
-  if (isNativeDevice.value) {
-    // Mobile: trigger the hidden file input — browser opens native camera picker
-    await nextTick();
-    fileInputEl.value?.click();
-  } else {
-    // Web / Electron: getUserMedia live preview
-    await startWebScan();
+  scanLoading.value = true;
+
+  // Try live camera first (works on web + Electron + modern mobile browsers)
+  if (navigator.mediaDevices?.getUserMedia) {
+    try {
+      await startWebScan();
+      scanLoading.value = false;
+      return;
+    } catch {
+      // Denied or not supported — fall through to file input
+    }
   }
+
+  // Fallback: file input (native camera on mobile, gallery on desktop)
+  scanLoading.value = false;
+  await nextTick();
+  fileInputEl.value?.click();
 };
 
-// ── Mobile: file input → jsQR decode (no @capacitor/camera needed) ────────────
+// ── File input → jsQR decode ──────────────────────────────────────────────────
 const onFileInputChange = async (event) => {
   const file = event.target.files?.[0];
   if (!file) return;
-
   scanLoading.value = true;
   try {
-    // Read the captured photo as a data URL
     const dataUrl = await new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(reader.result);
       reader.onerror = () => reject(new Error("File read failed"));
       reader.readAsDataURL(file);
     });
-
-    // Decode QR from the image
     const qrId = await decodeQrFromDataUrl(dataUrl);
     if (qrId) {
       handleScannedId(qrId);
     } else {
       alert(
-        $t("p2p.guest.noQrDetected") ||
-          "No QR code detected. Please try again.",
+        "No QR code detected. Try holding your camera closer and steadier.",
       );
     }
   } catch (e) {
     console.warn("[P2P] File read error:", e);
-    alert("Could not read the image. Please try again.");
   } finally {
     scanLoading.value = false;
-    // Reset so the same file can be re-selected if needed
     if (fileInputEl.value) fileInputEl.value.value = "";
   }
 };
 
-// ── Decode QR from a base64 dataUrl using jsQR ───────────────────────────────
-// Replace decodeQrFromDataUrl():
-const decodeQrFromDataUrl = (dataUrl) =>
-  new Promise(async (resolve) => {
-    try {
-      await loadScript(
-        "https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js",
-      );
-      const img = new Image();
-      img.onload = () => {
-        // Try multiple scales — small photos miss the QR at 1:1
-        const attempts = [1, 1.5, 2, 0.75];
-        for (const scale of attempts) {
-          const canvas = document.createElement("canvas");
-          canvas.width = img.width * scale;
-          canvas.height = img.height * scale;
-          const ctx = canvas.getContext("2d");
-          ctx.filter = "contrast(1.4) brightness(1.1)";
-          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-          ctx.filter = "none";
-          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-          const code = window.jsQR(
-            imageData.data,
-            canvas.width,
-            canvas.height,
-            {
-              inversionAttempts: "attemptBoth",
-            },
-          );
-          if (code?.data) {
-            resolve(code.data);
-            return;
-          }
+// ── Decode QR from dataUrl — tries multiple scales + filters ─────────────────
+const decodeQrFromDataUrl = async (dataUrl) => {
+  await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js");
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      // Try multiple scale factors — far/small QR codes often need scaling up
+      const scales = [1, 2, 1.5, 0.75, 3];
+      for (const scale of scales) {
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        const ctx = canvas.getContext("2d");
+        // Enhance contrast to help with difficult captures
+        ctx.filter = "contrast(1.5) brightness(1.1) saturate(0)";
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        ctx.filter = "none";
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = window.jsQR(imageData.data, canvas.width, canvas.height, {
+          inversionAttempts: "attemptBoth",
+        });
+        if (code?.data) {
+          console.log(`[P2P] QR decoded at scale ${scale}`);
+          resolve(code.data);
+          return;
         }
-        resolve(null);
-      };
-      img.onerror = () => resolve(null);
-      img.src = dataUrl;
-    } catch {
+      }
       resolve(null);
-    }
+    };
+    img.onerror = () => resolve(null);
+    img.src = dataUrl;
+  });
+};
+
+// ── Live camera scan ──────────────────────────────────────────────────────────
+const startWebScan = async () => {
+  // Request high-resolution rear camera
+  _videoStream = await navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: { ideal: "environment" },
+      width: { ideal: 1920 },
+      height: { ideal: 1080 },
+    },
   });
 
-// ── Web/Electron: getUserMedia live preview ───────────────────────────────────
-const startWebScan = async () => {
   guestStep.value = "scan";
   await nextTick();
-  try {
-    _videoStream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: "environment",
-        width: { ideal: 1280 }, // ← higher res catches distant QRs
-        height: { ideal: 720 },
-        focusMode: "continuous", // ← keeps far QRs sharp
-      },
-    });
-    if (videoEl.value) videoEl.value.srcObject = _videoStream;
-    scheduleScanFrame();
-  } catch (e) {
-    guestStep.value = "enter";
-    alert("Camera access denied. Please paste the Peer ID manually.");
+
+  if (videoEl.value) {
+    videoEl.value.srcObject = _videoStream;
+    await videoEl.value.play().catch(() => {});
   }
+
+  // Load jsQR in parallel while camera warms up
+  await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js");
+
+  _scanActive = true;
+  scheduleScan();
 };
 
 const stopScan = () => {
-  clearTimeout(_scanTimer);
+  _scanActive = false;
+  if (_scanRaf) {
+    cancelAnimationFrame(_scanRaf);
+    _scanRaf = null;
+  }
   if (_videoStream) {
     _videoStream.getTracks().forEach((t) => t.stop());
     _videoStream = null;
@@ -537,19 +511,44 @@ const stopScan = () => {
   guestStep.value = "enter";
 };
 
-const scheduleScanFrame = () => {
-  _scanTimer = setTimeout(scanFrame, 80); // ← 80ms instead of 200ms
+// Use requestAnimationFrame for smooth scanning — much faster than setTimeout
+const scheduleScan = () => {
+  if (!_scanActive) return;
+  _scanRaf = requestAnimationFrame(scanFrame);
 };
 
-const scanFrame = async () => {
-  if (!videoEl.value || !_videoStream) return;
-  const video = videoEl.value;
-  if (video.readyState < 2) {
-    // not enough data yet
-    scheduleScanFrame();
+let _lastScanTime = 0;
+const SCAN_INTERVAL_MS = 100; // scan at most 10 times/sec to avoid CPU overload
+
+const scanFrame = async (timestamp) => {
+  if (!_scanActive) return;
+
+  // Throttle to SCAN_INTERVAL_MS
+  if (timestamp - _lastScanTime < SCAN_INTERVAL_MS) {
+    scheduleScan();
     return;
   }
+  _lastScanTime = timestamp;
+
+  const video = videoEl.value;
+  const canvas = canvasEl.value;
+  if (!video || !canvas || !_videoStream) {
+    scheduleScan();
+    return;
+  }
+  if (video.readyState < 2 || video.videoWidth === 0) {
+    scheduleScan();
+    return;
+  }
+
+  const W = video.videoWidth;
+  const H = video.videoHeight;
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
   try {
+    // Try BarcodeDetector first — native, very fast, works at any distance
     if ("BarcodeDetector" in window) {
       const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
       const codes = await detector.detect(video);
@@ -558,45 +557,33 @@ const scanFrame = async () => {
         return;
       }
     } else {
-      await loadScript(
-        "https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js",
-      );
-      const canvas = document.createElement("canvas");
-      const W = video.videoWidth;
-      const H = video.videoHeight;
-      if (!W || !H) {
-        scheduleScanFrame();
-        return;
-      }
-
-      canvas.width = W;
-      canvas.height = H;
-      const ctx = canvas.getContext("2d");
-
-      // ── Sharpen the frame to help jsQR read distant/blurry codes ──
-      ctx.filter = "contrast(1.4) brightness(1.1)";
+      // jsQR fallback — draw frame with contrast boost
+      ctx.filter = "contrast(1.4) brightness(1.05) saturate(0)";
       ctx.drawImage(video, 0, 0, W, H);
       ctx.filter = "none";
-
       const imageData = ctx.getImageData(0, 0, W, H);
       const code = window.jsQR(imageData.data, W, H, {
-        inversionAttempts: "attemptBoth", // ← also tries inverted colors
+        inversionAttempts: "attemptBoth",
       });
-      if (code) {
+      if (code?.data) {
         handleScannedId(code.data);
         return;
       }
     }
-  } catch {}
-  scheduleScanFrame();
+  } catch (e) {
+    // ignore scan errors, keep trying
+  }
+
+  scheduleScan();
 };
 
-// ── Shared: handle a scanned peer ID ─────────────────────────────────────────
+// ── Handle scanned ID ─────────────────────────────────────────────────────────
 const handleScannedId = (id) => {
+  if (!id?.trim()) return;
   stopScan();
-  manualId.value = id;
+  manualId.value = id.trim();
   guestStep.value = "sync";
-  connectToHost(id);
+  connectToHost(id.trim());
 };
 
 // ── Navigation ────────────────────────────────────────────────────────────────
@@ -633,7 +620,6 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-/* ── Theme-aware variables ── */
 .p2p-overlay {
   --p2p-bg: var(--bg-page);
   --p2p-surface: var(--bg-surface);
@@ -644,7 +630,6 @@ onUnmounted(() => {
   --p2p-accent-mid: var(--primary-mid);
   --p2p-text: var(--text-primary);
   --p2p-muted: var(--text-muted);
-  --p2p-sub: var(--text-sub);
   --p2p-success: #34d399;
   --p2p-error: #f87171;
   --p2p-radius: 16px;
@@ -661,7 +646,6 @@ onUnmounted(() => {
   font-family: "Tajawal", system-ui, sans-serif;
 }
 
-/* ── Modal shell ── */
 .p2p-modal {
   background: var(--p2p-surface);
   border: 1px solid var(--p2p-border);
@@ -676,7 +660,6 @@ onUnmounted(() => {
   box-shadow: 0 25px 50px rgba(0, 0, 0, 0.3);
 }
 
-/* ── Header ── */
 .p2p-header {
   display: flex;
   align-items: center;
@@ -708,7 +691,6 @@ onUnmounted(() => {
   font-size: 16px;
   font-weight: 700;
   margin: 0;
-  color: var(--p2p-text);
 }
 .p2p-subtitle {
   font-size: 12px;
@@ -736,12 +718,10 @@ onUnmounted(() => {
   display: block;
 }
 
-/* ── Body ── */
 .p2p-body {
   flex: 1;
 }
 
-/* ── Mode picker ── */
 .p2p-pick {
   padding: 24px 20px;
 }
@@ -799,7 +779,6 @@ onUnmounted(() => {
   line-height: 1.4;
 }
 
-/* ── Waiting / spinner ── */
 .p2p-waiting {
   padding: 40px 20px;
   display: flex;
@@ -823,7 +802,6 @@ onUnmounted(() => {
   }
 }
 
-/* ── QR box ── */
 .p2p-qr-wrap {
   padding: 24px 20px;
   display: flex;
@@ -894,7 +872,6 @@ onUnmounted(() => {
   margin: 0;
 }
 
-/* ── Syncing ── */
 .p2p-syncing {
   padding: 32px 20px;
   display: flex;
@@ -948,7 +925,6 @@ onUnmounted(() => {
   margin: 0;
 }
 
-/* ── Done ── */
 .p2p-done {
   padding: 40px 20px;
   display: flex;
@@ -991,7 +967,6 @@ onUnmounted(() => {
   margin: 0;
 }
 
-/* ── Error ── */
 .p2p-error {
   padding: 40px 20px;
   display: flex;
@@ -1031,7 +1006,6 @@ onUnmounted(() => {
   background: var(--p2p-accent-mid);
 }
 
-/* ── Guest: enter ── */
 .p2p-enter {
   padding: 24px 20px;
   display: flex;
@@ -1125,7 +1099,6 @@ onUnmounted(() => {
   color: var(--p2p-accent);
 }
 
-/* Hidden file input — visually removed but still functional */
 .p2p-file-input-hidden {
   position: absolute;
   width: 1px;
@@ -1135,7 +1108,6 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-/* ── Guest: camera scan (web/electron) ── */
 .p2p-scan {
   padding: 20px;
   display: flex;
@@ -1160,6 +1132,9 @@ onUnmounted(() => {
   height: 100%;
   object-fit: cover;
   display: block;
+}
+.p2p-canvas-hidden {
+  display: none;
 }
 .p2p-scan-overlay {
   position: absolute;
@@ -1215,7 +1190,6 @@ onUnmounted(() => {
   color: var(--p2p-text);
 }
 
-/* ── Footer ── */
 .p2p-footer {
   padding: 14px 20px;
   border-top: 1px solid var(--p2p-border);
@@ -1255,13 +1229,11 @@ onUnmounted(() => {
   opacity: 0.85;
 }
 
-/* ── Host/Guest wrappers ── */
 .p2p-host,
 .p2p-guest {
   flex: 1;
 }
 
-/* ── Transitions ── */
 .modal-fade-enter-active,
 .modal-fade-leave-active {
   transition: opacity 0.2s, transform 0.2s;
