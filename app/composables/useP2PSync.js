@@ -10,12 +10,13 @@
 //   4. Host receives DONE → merges → flushes → ticks UI → sends ACK
 //   5. Guest receives ACK → done
 //
-// KEY DESIGN DECISIONS:
-//   - No dump caching — always collect fresh at send time
-//   - Buffer is local to each connection handler (no shared state)
-//   - applyRemoteDump on mobile routes through useMobileStore().applyRemoteRow()
-//     so every write goes through the wrapped db that schedules persistence
-//   - initMobileSchema called only once before dump/apply, not repeatedly
+// KEY FIX (v2):
+//   PeerJS fires conn.on('data', async handler) without awaiting the previous
+//   invocation. This means DONE can be processed while DATA messages are still
+//   being buffered — resulting in "Applying 0 remote rows" on the guest side.
+//
+//   Solution: route every incoming message through a serial async queue
+//   (makeQueue). Each message is processed strictly in order, one at a time.
 
 const PEERJS_CDN =
   "https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js";
@@ -42,6 +43,21 @@ const APPLY_ORDER = [
   "order_items",
   "dues",
 ];
+
+// ── Serial async queue ────────────────────────────────────────────────────────
+// Returns an `enqueue(fn)` function. Every fn() is awaited before the next
+// one starts. This is the core fix: it prevents DONE from racing ahead of DATA.
+const makeQueue = () => {
+  let _tail = Promise.resolve();
+  return (fn) => {
+    _tail = _tail
+      .then(() => fn())
+      .catch((e) => {
+        console.error("[P2P] queue error:", e?.message ?? e);
+      });
+    return _tail;
+  };
+};
 
 // ── Load script from CDN (idempotent) ─────────────────────────────────────────
 const loadScript = (src) =>
@@ -137,14 +153,6 @@ export const useP2PSync = () => {
   };
 
   // ── Apply a full incoming dump ─────────────────────────────────────────────
-  //
-  // IMPORTANT: On mobile, we route every row through useMobileStore().applyRemoteRow()
-  // instead of a local applyRow() helper. This guarantees:
-  //   1. Writes go through the wrapped db → scheduleSave() is always called
-  //   2. The same battle-tested version/timestamp merge logic is used everywhere
-  //   3. flushMobileDb() at the end persists everything before we return
-  //
-  // On Electron, we continue using window.store.applyRemoteRow() via IPC as before.
   const applyRemoteDump = async (dump) => {
     const totalRows = APPLY_ORDER.reduce(
       (s, t) => s + (dump[t]?.length ?? 0),
@@ -172,12 +180,9 @@ export const useP2PSync = () => {
     }
 
     // ── Mobile path ────────────────────────────────────────────────────────
-    // Init schema once up front — not inside the per-row loop
     const { initMobileSchema } = await import("./useMobileSchema");
     await initMobileSchema();
 
-    // Get the store — applyRemoteRow() uses getMobileDb() internally and
-    // goes through the wrapped db that calls scheduleSave() on every write
     const { useMobileStore } = await import("./useMobileStore");
     const store = useMobileStore();
 
@@ -195,9 +200,6 @@ export const useP2PSync = () => {
       }
     }
 
-    // Force immediate persistence — don't rely on the 600ms debounce
-    // This is the critical step that was missing: without it the in-memory
-    // SQLite changes are lost if the app is backgrounded or restarted
     await flushIfMobile();
     console.log(`[P2P] Applied and persisted ${totalRows} rows`);
   };
@@ -221,6 +223,7 @@ export const useP2PSync = () => {
         conn.send({ type: "DATA", table, rows: ch });
         sent += ch.length;
         progress.value = { current: sent, total: totalRows };
+        // Small yield — lets PeerJS flush the send buffer
         await new Promise((r) => setTimeout(r, 15));
       }
     }
@@ -253,36 +256,40 @@ export const useP2PSync = () => {
         _conn = conn;
         setState("connecting", "Device connected…");
 
-        let buffer = {}; // local buffer, not shared
+        // ── Serial queue for host — prevents DONE racing ahead of DATA ────
+        const enqueue = makeQueue();
+        let buffer = {};
 
         conn.on("open", () => {
-          conn.on("data", async (msg) => {
-            if (!msg?.type) return;
+          conn.on("data", (msg) => {
+            // Enqueue synchronously — the handler itself is async but
+            // execution is serialised: next message waits for this one.
+            enqueue(async () => {
+              if (!msg?.type) return;
 
-            if (msg.type === "HELLO") {
-              // Send host data first — dump is fresh here
-              await sendDump(conn);
-            }
+              if (msg.type === "HELLO") {
+                // Send host data first — dump is always fresh
+                await sendDump(conn);
+              }
 
-            if (msg.type === "DATA") {
-              if (!buffer[msg.table]) buffer[msg.table] = [];
-              buffer[msg.table].push(...msg.rows);
-            }
+              if (msg.type === "DATA") {
+                if (!buffer[msg.table]) buffer[msg.table] = [];
+                buffer[msg.table].push(...msg.rows);
+              }
 
-            if (msg.type === "DONE") {
-              setState("syncing", "Merging guest data…");
-              const toApply = buffer;
-              buffer = {};
-              // applyRemoteDump handles flush internally on mobile
-              await applyRemoteDump(toApply);
-              // Extra flush for Electron (no-op on mobile — already done inside)
-              if (isElectron()) await flushIfMobile();
-              conn.send({ type: "ACK" });
-              await new Promise((r) => setTimeout(r, 300));
-              useSyncTick().value++;
-              setState("done", "Sync complete ✓");
-              cleanup();
-            }
+              if (msg.type === "DONE") {
+                setState("syncing", "Merging guest data…");
+                const toApply = buffer;
+                buffer = {};
+                await applyRemoteDump(toApply);
+                if (isElectron()) await flushIfMobile();
+                conn.send({ type: "ACK" });
+                await new Promise((r) => setTimeout(r, 300));
+                useSyncTick().value++;
+                setState("done", "Sync complete ✓");
+                cleanup();
+              }
+            });
           });
         });
 
@@ -316,45 +323,68 @@ export const useP2PSync = () => {
       _peer.on("open", () => {
         _conn = _peer.connect(hostPeerId, { reliable: true });
 
-        let buffer = {}; // local buffer, not shared
+        // ── Serial queue for guest — this is the critical fix ─────────────
+        // Without this, the async DATA handlers haven't finished populating
+        // `buffer` before the DONE handler fires and snapshots it as empty.
+        const enqueue = makeQueue();
+        let buffer = {};
 
         _conn.on("open", () => {
           setState("syncing", "Connected — waiting for host…");
 
-          _conn.on("data", async (msg) => {
-            if (!msg?.type) return;
+          _conn.on("data", (msg) => {
+            // Enqueue synchronously — do NOT await here.
+            // PeerJS calls this callback for every message; by passing an
+            // async fn to enqueue() we guarantee strict serial execution.
+            enqueue(async () => {
+              if (!msg?.type) return;
 
-            if (msg.type === "DATA") {
-              if (!buffer[msg.table]) buffer[msg.table] = [];
-              buffer[msg.table].push(...msg.rows);
-            }
+              if (msg.type === "DATA") {
+                if (!buffer[msg.table]) buffer[msg.table] = [];
+                buffer[msg.table].push(...msg.rows);
+                console.log(
+                  `[P2P] Guest buffered ${msg.rows.length} rows for ${
+                    msg.table
+                  } (total: ${buffer[msg.table].length})`,
+                );
+              }
 
-            if (msg.type === "DONE") {
-              // Got all host data — merge it
-              setState("syncing", "Merging host data…");
-              const toApply = buffer;
-              buffer = {};
-              // applyRemoteDump handles flush internally on mobile
-              await applyRemoteDump(toApply);
+              if (msg.type === "DONE") {
+                // At this point ALL DATA messages have been fully processed
+                // because the queue serialises them — buffer is complete.
+                const totalBuffered = Object.values(buffer).reduce(
+                  (s, rows) => s + rows.length,
+                  0,
+                );
+                console.log(
+                  `[P2P] Guest received DONE — buffer has ${totalBuffered} rows across ${
+                    Object.keys(buffer).length
+                  } tables`,
+                );
 
-              // Extra flush for Electron (no-op on mobile — already done inside)
-              if (isElectron()) await flushIfMobile();
+                setState("syncing", "Merging host data…");
+                const toApply = buffer;
+                buffer = {};
+                await applyRemoteDump(toApply);
 
-              // Tick UI — pages reload with merged data
-              await new Promise((r) => setTimeout(r, 300));
-              useSyncTick().value++;
+                if (isElectron()) await flushIfMobile();
 
-              // Now send our data to host
-              await sendDump(_conn);
-            }
+                // Tick UI — pages reload with merged data
+                await new Promise((r) => setTimeout(r, 300));
+                useSyncTick().value++;
 
-            if (msg.type === "ACK") {
-              setState("done", "Sync complete ✓");
-              cleanup();
-            }
+                // Now send our data back to the host
+                await sendDump(_conn);
+              }
+
+              if (msg.type === "ACK") {
+                setState("done", "Sync complete ✓");
+                cleanup();
+              }
+            });
           });
 
-          // Announce to host
+          // Announce presence to host
           _conn.send({ type: "HELLO" });
         });
 
