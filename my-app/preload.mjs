@@ -58,6 +58,10 @@ contextBridge.exposeInMainWorld("store", {
   getLastSyncedAt: () => invoke("store:getLastSyncedAt"),
   setLastSyncedAt: (iso) => invoke("store:setLastSyncedAt", iso),
   applyRemoteRow: (payload) => invoke("store:applyRemoteRow", payload),
+
+  // P2P sync — was missing, caused "Sent 0 rows" on PC side
+  getRawTable: (table) => invoke("store:getRawTable", table),
+  getAllOrderItems: () => invoke("store:getAllOrderItems"),
 });
 
 contextBridge.exposeInMainWorld("license", {
@@ -72,7 +76,4 @@ contextBridge.exposeInMainWorld("electronAPI", {
   nativeFetch: (url) => ipcRenderer.invoke("native-fetch", url),
 });
 
-// ── Safe Electron marker ─────────────────────────────────────────────────────
-// app.vue uses this instead of generic globals (window.store) which can
-// collide with Capacitor polyfills / browser extensions.
 contextBridge.exposeInMainWorld("__ELECTRON__", true);
