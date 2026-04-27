@@ -5,12 +5,12 @@
 //
 // FLOW:
 //   Host  → generates PeerID → shows QR code
-//   Guest → scans QR → connects → handshake → exchange rows → merge
-//
-// CONFLICT RESOLUTION:
-//   Same logic as applyRemoteRow — version wins, timestamp tiebreaks.
-//   Both sides send ALL their rows; both sides apply what they receive.
-//   Result: full bidirectional merge.
+//   Guest → scans QR → connects → sends HELLO
+//   Host  → receives HELLO → sends ALL host data → sends DONE
+//   Guest → receives DONE → merges host data → flushes → ticks UI
+//         → sends ALL guest data → sends DONE
+//   Host  → receives DONE → merges guest data → sends ACK → ticks UI
+//   Guest → receives ACK → done
 
 const PEERJS_CDN =
   "https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js";
@@ -27,6 +27,17 @@ const ALL_TABLES = [
   "staff",
 ];
 
+// FK-safe apply order
+const APPLY_ORDER = [
+  "categories",
+  "customers",
+  "staff",
+  "products",
+  "orders",
+  "order_items",
+  "dues",
+];
+
 // ── Load script from CDN (idempotent) ─────────────────────────────────────────
 const loadScript = (src) =>
   new Promise((resolve, reject) => {
@@ -38,26 +49,27 @@ const loadScript = (src) =>
     document.head.appendChild(s);
   });
 
-// ── Dump all local rows for a table ──────────────────────────────────────────
+// ── Platform detection ────────────────────────────────────────────────────────
+const isElectron = () =>
+  typeof window !== "undefined" && !!window.__ELECTRON__ && !!window.store;
+
+// ── Dump all local rows for a table (mobile sql.js) ──────────────────────────
 const dumpTable = async (db, table) => {
   try {
-    const r = await db.query(`SELECT * FROM "${table}" WHERE 1=1`);
+    const r = await db.query(`SELECT * FROM "${table}"`);
     return r.values ?? [];
   } catch (e) {
-    console.warn(
-      `[P2P] dumpTable skipping missing table "${table}":`,
-      e?.message,
-    );
+    console.warn(`[P2P] dumpTable skipping "${table}":`, e?.message);
     return [];
   }
 };
 
-// ── Apply a single remote row (same logic as useMobileStore.applyRemoteRow) ──
-// useP2PSync.js — replace applyRow entirely:
+// ── Apply a single remote row into mobile sql.js db ──────────────────────────
 const applyRow = async (db, table, row) => {
   const ALLOWED = new Set(ALL_TABLES);
   if (!ALLOWED.has(table)) return;
 
+  // Normalize booleans → integers for SQLite
   const normalized = {};
   for (const [k, v] of Object.entries(row)) {
     if (k === "synced_at") continue;
@@ -66,21 +78,31 @@ const applyRow = async (db, table, row) => {
   }
   if (!normalized.id) return;
 
+  // Check if row exists locally
   const existing = (
     await db.query(`SELECT * FROM "${table}" WHERE id=?`, [normalized.id])
   ).values?.[0];
 
   if (!existing) {
+    // Brand new row — insert it
     normalized.synced_at = new Date().toISOString();
     const cols = Object.keys(normalized);
     const colList = cols.map((c) => `"${c}"`).join(", ");
     const valPlaceholders = cols.map(() => "?").join(", ");
     const vals = cols.map((c) => normalized[c]);
+
     await db.run("PRAGMA foreign_keys = OFF");
     try {
+      // INSERT OR REPLACE so constraint conflicts don't silently swallow the row
       await db.run(
-        `INSERT OR IGNORE INTO "${table}" (${colList}) VALUES (${valPlaceholders})`,
+        `INSERT OR REPLACE INTO "${table}" (${colList}) VALUES (${valPlaceholders})`,
         vals,
+      );
+      console.log(`[P2P] Inserted ${table} ${normalized.id}`);
+    } catch (e) {
+      console.error(
+        `[P2P] INSERT failed [${table}] ${normalized.id}:`,
+        e?.message,
       );
     } finally {
       await db.run("PRAGMA foreign_keys = ON");
@@ -88,23 +110,16 @@ const applyRow = async (db, table, row) => {
     return;
   }
 
+  // Row exists — version-aware merge
   const remoteVersion = normalized.version ?? 0;
   const localVersion = existing.version ?? 0;
-
-  // P2P: no server authority — do field-level merge on ALL fields
-  // Each field independently takes the value from whichever side
-  // has the higher version. On tie, newer updated_at wins per field.
-  const skipCols = new Set(["id", "synced_at", "created_at"]);
-  const updateCols = Object.keys(normalized).filter((k) => !skipCols.has(k));
-  if (!updateCols.length) return;
-
   const remoteTs = normalized.updated_at ?? "";
   const localTs = existing.updated_at ?? "";
 
-  // If local is strictly newer in both version AND timestamp — skip entirely
+  // Local is strictly newer on both axes — skip
   if (remoteVersion < localVersion && remoteTs < localTs) return;
 
-  // Check for pending unsynced local changes
+  // Local has pending unsynced edits at same/higher version — skip
   const pending = (
     await db.query(
       `SELECT id FROM sync_queue WHERE row_id=? AND synced_at IS NULL LIMIT 1`,
@@ -112,34 +127,28 @@ const applyRow = async (db, table, row) => {
     )
   ).values?.[0];
 
+  if (pending && remoteVersion <= localVersion) return;
+
+  // Decide which fields to apply
+  const skipCols = new Set(["id", "synced_at", "created_at"]);
+  const updateCols = Object.keys(normalized).filter((k) => !skipCols.has(k));
+  if (!updateCols.length) return;
+
   let setFields;
-  if (pending && remoteVersion <= localVersion) {
-    // Local has unsent edits and is same/newer version — skip to protect local work
-    return;
-  } else if (remoteVersion > localVersion) {
-    // Remote is clearly newer — take all remote fields
-    setFields = updateCols;
+  if (remoteVersion > localVersion) {
+    setFields = updateCols; // remote clearly newer — take everything
   } else {
-    // Same version or ambiguous — take remote fields but preserve local
-    // fields that are newer (best-effort field merge without changedFields metadata)
-    setFields = updateCols.filter((f) => {
-      // For timestamps and version, prefer remote if it's newer
-      if (f === "updated_at" || f === "version") return remoteTs > localTs;
-      // For data fields, prefer remote if remote timestamp is newer
-      return remoteTs > localTs;
-    });
+    setFields = updateCols.filter(() => remoteTs > localTs); // tiebreak by timestamp
   }
 
   if (!setFields.length) return;
 
-  // Bump version to max+1 so the merged result propagates correctly
-  // when this device later syncs with the cloud server
   const mergedVersion = Math.max(remoteVersion, localVersion) + 1;
   const now = new Date().toISOString();
-
   const finalCols = setFields.filter(
     (f) => f !== "version" && f !== "updated_at",
   );
+
   const setClause = [
     ...finalCols.map((c) => `"${c}" = ?`),
     `"version" = ?`,
@@ -158,6 +167,11 @@ const applyRow = async (db, table, row) => {
   await db.run("PRAGMA foreign_keys = OFF");
   try {
     await db.run(`UPDATE "${table}" SET ${setClause} WHERE id = ?`, vals);
+  } catch (e) {
+    console.error(
+      `[P2P] UPDATE failed [${table}] ${normalized.id}:`,
+      e?.message,
+    );
   } finally {
     await db.run("PRAGMA foreign_keys = ON");
   }
@@ -172,7 +186,7 @@ const chunk = (arr, size) => {
 
 // ── Main composable ───────────────────────────────────────────────────────────
 export const useP2PSync = () => {
-  const status = ref("idle"); // idle | loading | ready | connecting | syncing | done | error
+  const status = ref("idle");
   const statusMsg = ref("");
   const peerId = ref(null);
   const progress = ref({ current: 0, total: 0 });
@@ -180,68 +194,80 @@ export const useP2PSync = () => {
 
   let _peer = null;
   let _conn = null;
-  let _localDump = null; // cached dump to send to guest
+  let _localDump = null;
 
   const setState = (s, msg = "") => {
     status.value = s;
     statusMsg.value = msg;
   };
 
-  // ── Collect all local data ─────────────────────────────────────────────────
+  // ── Flush mobile db (no-op on Electron) ───────────────────────────────────
+  const flushIfMobile = async () => {
+    if (isElectron()) return;
+    try {
+      const { flushMobileDb } = await import("./useMobileDb");
+      await flushMobileDb();
+    } catch (e) {
+      console.warn("[P2P] flush error:", e?.message);
+    }
+  };
+
+  // ── Collect all local rows — platform aware ────────────────────────────────
   const collectLocalData = async () => {
-    // ── Electron: dump via IPC ─────────────────────────────────────────────
-    if (typeof window !== "undefined" && window.__ELECTRON__ && window.store) {
+    if (isElectron()) {
+      // Electron: dump via IPC getRawTable
       const dump = {};
       for (const table of ALL_TABLES) {
         try {
           const r = await window.store.getRawTable(table);
           dump[table] = r.ok ? r.data : [];
+          console.log(
+            `[P2P] Electron dump ${table}: ${dump[table].length} rows`,
+          );
         } catch (e) {
-          console.warn(`[P2P] Electron dump failed for ${table}:`, e);
+          console.warn(`[P2P] Electron dump failed [${table}]:`, e?.message);
           dump[table] = [];
         }
       }
       return dump;
     }
 
-    // ── Mobile: dump via sql.js ────────────────────────────────────────────
+    // Mobile: dump via sql.js
     const { initMobileSchema } = await import("./useMobileSchema");
     await initMobileSchema();
-
     const { getMobileDb } = await import("./useMobileDb");
     const db = await getMobileDb();
     const dump = {};
     for (const table of ALL_TABLES) {
       dump[table] = await dumpTable(db, table);
+      console.log(`[P2P] Mobile dump ${table}: ${dump[table].length} rows`);
     }
     return dump;
   };
 
-  // ── Apply a full dump from the other device ────────────────────────────────
+  // ── Apply a full dump — platform aware ────────────────────────────────────
   const applyRemoteDump = async (dump) => {
-    // ── Electron: write via IPC store ─────────────────────────────────────
-    if (typeof window !== "undefined" && window.__ELECTRON__ && window.store) {
-      const ORDER = [
-        "categories",
-        "customers",
-        "staff",
-        "products",
-        "orders",
-        "order_items",
-        "dues",
-      ];
+    const totalRows = APPLY_ORDER.reduce(
+      (s, t) => s + (dump[t]?.length ?? 0),
+      0,
+    );
+    let done = 0;
+    progress.value = { current: 0, total: totalRows };
 
-      const totalRows = ORDER.reduce((s, t) => s + (dump[t]?.length ?? 0), 0);
-      let done = 0;
-      progress.value = { current: 0, total: totalRows };
+    console.log(`[P2P] applyRemoteDump: ${totalRows} total rows`);
 
-      for (const table of ORDER) {
+    if (isElectron()) {
+      // Electron: write via IPC applyRemoteRow
+      for (const table of APPLY_ORDER) {
         const rows = dump[table] ?? [];
         for (const row of rows) {
           try {
             await window.store.applyRemoteRow({ table, row });
           } catch (e) {
-            console.warn(`[P2P] Electron applyRemoteRow failed [${table}]:`, e);
+            console.error(
+              `[P2P] Electron applyRemoteRow failed [${table}]:`,
+              e?.message,
+            );
           }
           progress.value = { current: ++done, total: totalRows };
         }
@@ -249,81 +275,30 @@ export const useP2PSync = () => {
       return;
     }
 
-    // ── Mobile: write via sql.js ───────────────────────────────────────────
+    // Mobile: write via sql.js
     const { initMobileSchema } = await import("./useMobileSchema");
     await initMobileSchema();
-
     const { getMobileDb } = await import("./useMobileDb");
     const db = await getMobileDb();
 
-    const ORDER = [
-      "categories",
-      "customers",
-      "staff",
-      "products",
-      "orders",
-      "order_items",
-      "dues",
-    ];
-
-    const totalRows = ORDER.reduce((s, t) => s + (dump[t]?.length ?? 0), 0);
-    let done = 0;
-    progress.value = { current: 0, total: totalRows };
-
-    for (const table of ORDER) {
+    for (const table of APPLY_ORDER) {
       const rows = dump[table] ?? [];
       for (const row of rows) {
-        await applyRow(db, table, row);
+        try {
+          await applyRow(db, table, row);
+        } catch (e) {
+          console.error(
+            `[P2P] applyRow failed [${table}]:`,
+            e?.message,
+            row?.id,
+          );
+        }
         progress.value = { current: ++done, total: totalRows };
       }
     }
   };
 
-  // ── Protocol messages ──────────────────────────────────────────────────────
-  // { type: 'HELLO' }                 → guest announces connection
-  // { type: 'DATA', table, rows }     → chunk of rows
-  // { type: 'DONE' }                  → all rows sent
-  // { type: 'ACK' }                   → receiver finished applying
-
-  // Replace handleIncomingData entirely:
-  const handleIncomingData = async (conn, msg) => {
-    if (!msg?.type) return;
-
-    if (msg.type === "HELLO") {
-      setState("syncing", "Sending local data…");
-      await sendDump(conn); // host sends first, guest waits
-    }
-
-    if (msg.type === "DATA") {
-      if (!conn._buffer) conn._buffer = {};
-      if (!conn._buffer[msg.table]) conn._buffer[msg.table] = [];
-      conn._buffer[msg.table].push(...msg.rows);
-    }
-
-    // Host receives guest's data
-    if (msg.type === "DONE") {
-      setState("syncing", "Merging guest data…");
-      if (conn._buffer) {
-        await applyRemoteDump(conn._buffer);
-        conn._buffer = {};
-      }
-      conn.send({ type: "ACK" });
-
-      // flush only matters on mobile
-      if (!(typeof window !== "undefined" && window.__ELECTRON__)) {
-        try {
-          const { flushMobileDb } = await import("./useMobileDb");
-          await flushMobileDb();
-        } catch {}
-      }
-
-      await new Promise((r) => setTimeout(r, 300));
-      useSyncTick().value++;
-      setState("done", "Sync complete ✓");
-      cleanup();
-    }
-  };
-
+  // ── Send local dump over connection ───────────────────────────────────────
   const sendDump = async (conn) => {
     const dump = _localDump ?? (await collectLocalData());
     const CHUNK_SIZE = 50;
@@ -332,11 +307,48 @@ export const useP2PSync = () => {
       const rows = dump[table] ?? [];
       for (const ch of chunk(rows, CHUNK_SIZE)) {
         conn.send({ type: "DATA", table, rows: ch });
-        // Small yield to keep UI responsive
         await new Promise((r) => setTimeout(r, 10));
       }
     }
     conn.send({ type: "DONE" });
+    console.log("[P2P] sendDump complete");
+  };
+
+  // ── HOST incoming message handler ─────────────────────────────────────────
+  // Protocol: Guest sends HELLO → Host sends data → Host sends DONE
+  //           Guest merges → Guest sends data → Guest sends DONE
+  //           Host merges → Host sends ACK
+  const handleIncomingData = async (conn, msg) => {
+    if (!msg?.type) return;
+
+    if (msg.type === "HELLO") {
+      // Guest connected — host sends its data first
+      setState("syncing", "Sending local data…");
+      await sendDump(conn);
+    }
+
+    if (msg.type === "DATA") {
+      if (!conn._buffer) conn._buffer = {};
+      if (!conn._buffer[msg.table]) conn._buffer[msg.table] = [];
+      conn._buffer[msg.table].push(...msg.rows);
+    }
+
+    if (msg.type === "DONE") {
+      // Host received all guest rows — merge them
+      setState("syncing", "Merging guest data…");
+      const buffer = conn._buffer ?? {};
+      conn._buffer = {};
+
+      await applyRemoteDump(buffer);
+      await flushIfMobile();
+
+      conn.send({ type: "ACK" });
+
+      await new Promise((r) => setTimeout(r, 300));
+      useSyncTick().value++;
+      setState("done", "Sync complete ✓");
+      cleanup();
+    }
   };
 
   // ── Load PeerJS ────────────────────────────────────────────────────────────
@@ -352,13 +364,11 @@ export const useP2PSync = () => {
 
     try {
       _localDump = await collectLocalData();
+      console.log("[P2P] Host dump ready");
 
       const Peer = await loadPeer();
       _peer = new Peer(undefined, {
-        // Use public PeerJS cloud as signalling only — actual data is P2P
-        config: {
-          iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-        },
+        config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] },
       });
 
       _peer.on("open", (id) => {
@@ -394,13 +404,13 @@ export const useP2PSync = () => {
     error.value = null;
 
     try {
-      _localDump = await collectLocalData(); // collect BEFORE connecting
+      // Collect local data before connecting so we're ready to send
+      _localDump = await collectLocalData();
+      console.log("[P2P] Guest dump ready");
 
       const Peer = await loadPeer();
       _peer = new Peer(undefined, {
-        config: {
-          iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-        },
+        config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] },
       });
 
       _peer.on("open", () => {
@@ -408,38 +418,36 @@ export const useP2PSync = () => {
 
         _conn.on("open", () => {
           setState("syncing", "Connected — waiting for host data…");
+
           _conn.on("data", async (msg) => {
             if (!msg?.type) return;
 
-            // Buffer host's rows
+            // Buffer incoming rows from host
             if (msg.type === "DATA") {
               if (!_conn._buffer) _conn._buffer = {};
               if (!_conn._buffer[msg.table]) _conn._buffer[msg.table] = [];
               _conn._buffer[msg.table].push(...msg.rows);
             }
 
-            // Host finished sending → merge host data, then send our data
+            // Host finished sending — merge host data then send ours
             if (msg.type === "DONE") {
               setState("syncing", "Merging host data…");
-              if (_conn._buffer) {
-                await applyRemoteDump(_conn._buffer);
-                _conn._buffer = {};
-              }
+              const buffer = _conn._buffer ?? {};
+              _conn._buffer = {};
 
-              // Now send guest data to host
-              setState("syncing", "Sending local data to host…");
-              await sendDump(_conn); // ends with DONE
+              await applyRemoteDump(buffer);
 
-              // Flush guest side
-              try {
-                const { flushMobileDb } = await import("./useMobileDb");
-                await flushMobileDb();
-              } catch {}
+              // Flush and tick NOW so UI shows host's data immediately
+              await flushIfMobile();
               await new Promise((r) => setTimeout(r, 300));
               useSyncTick().value++;
+
+              // Now send guest's data to host
+              setState("syncing", "Sending local data to host…");
+              await sendDump(_conn);
             }
 
-            // Host merged our data and confirmed
+            // Host confirmed it received and merged our data
             if (msg.type === "ACK") {
               setState("done", "Sync complete ✓");
               cleanup();
@@ -478,7 +486,7 @@ export const useP2PSync = () => {
       _conn = null;
       _peer = null;
       _localDump = null;
-    }, 2000); // delay so ACK has time to arrive
+    }, 2000);
   };
 
   const reset = () => {

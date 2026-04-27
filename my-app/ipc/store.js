@@ -1425,7 +1425,7 @@ export function registerStoreHandlers(db, ipcMain) {
         db.prepare("PRAGMA foreign_keys = OFF").run();
         try {
           db.prepare(
-            `INSERT OR IGNORE INTO "${table}" (${colList}, synced_at) VALUES (${placeholders}, datetime('now'))`,
+            `INSERT OR REPLACE INTO "${table}" (${colList}, synced_at) VALUES (${placeholders}, datetime('now'))`,
           ).run(...cols.map((c) => normalized[c]));
         } finally {
           db.prepare("PRAGMA foreign_keys = ON").run();
@@ -1436,22 +1436,27 @@ export function registerStoreHandlers(db, ipcMain) {
       const remoteVersion = normalized.version ?? 0;
       const localVersion = existing.version ?? 0;
 
+      const pending = db
+        .prepare(
+          `SELECT id FROM sync_queue WHERE row_id=? AND synced_at IS NULL LIMIT 1`,
+        )
+        .get(normalized.id);
+
       if (remoteVersion < localVersion) {
         return { ok: true, skipped: true };
       }
 
-      // When versions are equal, only apply if remote updated_at is newer
       if (remoteVersion === localVersion) {
         const remoteTs = normalized.updated_at ?? "";
         const localTs = existing.updated_at ?? "";
         if (remoteTs <= localTs) {
-          const pending = db
-            .prepare(
-              `SELECT id FROM sync_queue WHERE row_id=? AND synced_at IS NULL LIMIT 1`,
-            )
-            .get(normalized.id);
-          if (pending) return { ok: true, skipped: true };
+          return { ok: true, skipped: true };
         }
+        if (pending) return { ok: true, skipped: true };
+      }
+
+      if (pending && remoteVersion === localVersion + 1) {
+        return { ok: true, skipped: true };
       }
 
       const skipCols = new Set(["id", "synced_at", "created_at"]);
