@@ -13,7 +13,8 @@
 // KEY DESIGN DECISIONS:
 //   - No dump caching — always collect fresh at send time
 //   - Buffer is local to each connection handler (no shared state)
-//   - applyRow uses INSERT OR REPLACE for new rows (never silently drops)
+//   - applyRemoteDump on mobile routes through useMobileStore().applyRemoteRow()
+//     so every write goes through the wrapped db that schedules persistence
 //   - initMobileSchema called only once before dump/apply, not repeatedly
 
 const PEERJS_CDN =
@@ -68,119 +69,6 @@ const dumpTable = async (db, table) => {
   }
 };
 
-// ── Apply one remote row into mobile sql.js db ────────────────────────────────
-const applyRow = async (db, table, row) => {
-  if (!ALL_TABLES.includes(table)) return;
-
-  // Normalize booleans → integers for SQLite
-  const normalized = {};
-  for (const [k, v] of Object.entries(row)) {
-    if (k === "synced_at") continue;
-    normalized[k] = typeof v === "boolean" ? (v ? 1 : 0) : v;
-  }
-  if (!normalized.id) return;
-
-  // Check existing row
-  let existing = null;
-  try {
-    existing =
-      (await db.query(`SELECT * FROM "${table}" WHERE id=?`, [normalized.id]))
-        .values?.[0] ?? null;
-  } catch (e) {
-    console.warn(`[P2P] SELECT failed [${table}]:`, e?.message);
-    return;
-  }
-
-  if (!existing) {
-    // New row — INSERT OR REPLACE (never silently swallowed)
-    normalized.synced_at = new Date().toISOString();
-    const cols = Object.keys(normalized);
-    const colList = cols.map((c) => `"${c}"`).join(", ");
-    const placeholders = cols.map(() => "?").join(", ");
-    const vals = cols.map((c) => normalized[c]);
-
-    await db.run("PRAGMA foreign_keys = OFF");
-    try {
-      await db.run(
-        `INSERT OR REPLACE INTO "${table}" (${colList}) VALUES (${placeholders})`,
-        vals,
-      );
-      console.log(`[P2P] Inserted ${table} ${normalized.id}`);
-    } catch (e) {
-      console.error(
-        `[P2P] INSERT failed [${table}] ${normalized.id}:`,
-        e?.message,
-      );
-    } finally {
-      await db.run("PRAGMA foreign_keys = ON");
-    }
-    return;
-  }
-
-  // Existing row — version/timestamp merge
-  const remoteVer = normalized.version ?? 0;
-  const localVer = existing.version ?? 0;
-  const remoteTs = normalized.updated_at ?? "";
-  const localTs = existing.updated_at ?? "";
-
-  // Check pending local edits
-  let hasPending = false;
-  try {
-    hasPending = !!(
-      await db.query(
-        `SELECT id FROM sync_queue WHERE row_id=? AND synced_at IS NULL LIMIT 1`,
-        [normalized.id],
-      )
-    ).values?.[0];
-  } catch {
-    // sync_queue may not exist yet — assume no pending
-  }
-
-  // Skip if local is clearly newer
-  if (remoteVer < localVer) return;
-  if (remoteVer === localVer && hasPending) return;
-  if (remoteVer === localVer && remoteTs <= localTs) return;
-
-  // Remote wins — update
-  const skipCols = new Set(["id", "synced_at", "created_at"]);
-  const updateCols = Object.keys(normalized).filter((k) => !skipCols.has(k));
-  if (!updateCols.length) return;
-
-  const mergedVer = Math.max(remoteVer, localVer) + 1;
-  const now = new Date().toISOString();
-  const dataCols = updateCols.filter(
-    (f) => f !== "version" && f !== "updated_at",
-  );
-
-  const setClause = [
-    ...dataCols.map((c) => `"${c}" = ?`),
-    `"version" = ?`,
-    `"updated_at" = ?`,
-    `"synced_at" = ?`,
-  ].join(", ");
-
-  const vals = [
-    ...dataCols.map((c) => normalized[c]),
-    mergedVer,
-    now,
-    now,
-    normalized.id,
-  ];
-
-  await db.run("PRAGMA foreign_keys = OFF");
-  try {
-    await db.run(`UPDATE "${table}" SET ${setClause} WHERE id = ?`, vals);
-    console.log(`[P2P] Updated ${table} ${normalized.id}`);
-  } catch (e) {
-    console.error(
-      `[P2P] UPDATE failed [${table}] ${normalized.id}:`,
-      e?.message,
-    );
-  } finally {
-    await db.run("PRAGMA foreign_keys = ON");
-  }
-};
-
 // ── Chunk large arrays ────────────────────────────────────────────────────────
 const chunk = (arr, size) => {
   const out = [];
@@ -204,12 +92,13 @@ export const useP2PSync = () => {
     statusMsg.value = msg;
   };
 
-  // ── Flush mobile db ────────────────────────────────────────────────────────
+  // ── Flush mobile db — force immediate persistence ──────────────────────────
   const flushIfMobile = async () => {
     if (isElectron()) return;
     try {
       const { flushMobileDb } = await import("./useMobileDb");
       await flushMobileDb();
+      console.log("[P2P] Mobile DB flushed to Preferences");
     } catch (e) {
       console.warn("[P2P] flush error:", e?.message);
     }
@@ -234,7 +123,7 @@ export const useP2PSync = () => {
       return dump;
     }
 
-    // Mobile
+    // Mobile — init schema once, then dump
     const { initMobileSchema } = await import("./useMobileSchema");
     await initMobileSchema();
     const { getMobileDb } = await import("./useMobileDb");
@@ -248,6 +137,14 @@ export const useP2PSync = () => {
   };
 
   // ── Apply a full incoming dump ─────────────────────────────────────────────
+  //
+  // IMPORTANT: On mobile, we route every row through useMobileStore().applyRemoteRow()
+  // instead of a local applyRow() helper. This guarantees:
+  //   1. Writes go through the wrapped db → scheduleSave() is always called
+  //   2. The same battle-tested version/timestamp merge logic is used everywhere
+  //   3. flushMobileDb() at the end persists everything before we return
+  //
+  // On Electron, we continue using window.store.applyRemoteRow() via IPC as before.
   const applyRemoteDump = async (dump) => {
     const totalRows = APPLY_ORDER.reduce(
       (s, t) => s + (dump[t]?.length ?? 0),
@@ -274,22 +171,35 @@ export const useP2PSync = () => {
       return;
     }
 
-    // Mobile — init schema once, then apply all rows
+    // ── Mobile path ────────────────────────────────────────────────────────
+    // Init schema once up front — not inside the per-row loop
     const { initMobileSchema } = await import("./useMobileSchema");
     await initMobileSchema();
-    const { getMobileDb } = await import("./useMobileDb");
-    const db = await getMobileDb();
+
+    // Get the store — applyRemoteRow() uses getMobileDb() internally and
+    // goes through the wrapped db that calls scheduleSave() on every write
+    const { useMobileStore } = await import("./useMobileStore");
+    const store = useMobileStore();
 
     for (const table of APPLY_ORDER) {
       for (const row of dump[table] ?? []) {
         try {
-          await applyRow(db, table, row);
+          await store.applyRemoteRow({ table, row });
         } catch (e) {
-          console.error(`[P2P] applyRow [${table}] ${row?.id}:`, e?.message);
+          console.error(
+            `[P2P] applyRemoteRow [${table}] ${row?.id}:`,
+            e?.message,
+          );
         }
         progress.value = { current: ++done, total: totalRows };
       }
     }
+
+    // Force immediate persistence — don't rely on the 600ms debounce
+    // This is the critical step that was missing: without it the in-memory
+    // SQLite changes are lost if the app is backgrounded or restarted
+    await flushIfMobile();
+    console.log(`[P2P] Applied and persisted ${totalRows} rows`);
   };
 
   // ── Send local data to peer ────────────────────────────────────────────────
@@ -363,8 +273,10 @@ export const useP2PSync = () => {
               setState("syncing", "Merging guest data…");
               const toApply = buffer;
               buffer = {};
+              // applyRemoteDump handles flush internally on mobile
               await applyRemoteDump(toApply);
-              await flushIfMobile();
+              // Extra flush for Electron (no-op on mobile — already done inside)
+              if (isElectron()) await flushIfMobile();
               conn.send({ type: "ACK" });
               await new Promise((r) => setTimeout(r, 300));
               useSyncTick().value++;
@@ -422,14 +334,17 @@ export const useP2PSync = () => {
               setState("syncing", "Merging host data…");
               const toApply = buffer;
               buffer = {};
+              // applyRemoteDump handles flush internally on mobile
               await applyRemoteDump(toApply);
 
-              // Flush + tick — UI shows host data now
-              await flushIfMobile();
+              // Extra flush for Electron (no-op on mobile — already done inside)
+              if (isElectron()) await flushIfMobile();
+
+              // Tick UI — pages reload with merged data
               await new Promise((r) => setTimeout(r, 300));
               useSyncTick().value++;
 
-              // Send our data to host
+              // Now send our data to host
               await sendDump(_conn);
             }
 
