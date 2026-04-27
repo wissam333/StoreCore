@@ -10,13 +10,16 @@
 //   4. Host receives DONE → merges → flushes → ticks UI → sends ACK
 //   5. Guest receives ACK → done
 //
-// KEY FIX (v2):
-//   PeerJS fires conn.on('data', async handler) without awaiting the previous
-//   invocation. This means DONE can be processed while DATA messages are still
-//   being buffered — resulting in "Applying 0 remote rows" on the guest side.
+// KEY FIX (v3):
+//   On mobile/Capacitor the WebRTC data channel can deliver messages
+//   BEFORE the PeerJS 'open' event fires on the guest side. Registering
+//   conn.on('data') inside conn.on('open') means those early DATA messages
+//   are dropped — the listener isn't attached yet. Result: buffer is empty
+//   when DONE arrives, so "Applying 0 remote rows".
 //
-//   Solution: route every incoming message through a serial async queue
-//   (makeQueue). Each message is processed strictly in order, one at a time.
+//   Fix: attach the 'data' listener IMMEDIATELY after _peer.connect() returns
+//   the DataConnection object, before 'open' fires. The serial queue (makeQueue)
+//   is still needed to prevent async handlers racing each other.
 
 const PEERJS_CDN =
   "https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js";
@@ -256,41 +259,59 @@ export const useP2PSync = () => {
         _conn = conn;
         setState("connecting", "Device connected…");
 
-        // ── Serial queue for host — prevents DONE racing ahead of DATA ────
         const enqueue = makeQueue();
         let buffer = {};
 
-        conn.on("open", () => {
-          conn.on("data", (msg) => {
-            // Enqueue synchronously — the handler itself is async but
-            // execution is serialised: next message waits for this one.
-            enqueue(async () => {
-              if (!msg?.type) return;
+        // ── Register data listener BEFORE open fires ───────────────────────
+        // Some PeerJS versions / network conditions can deliver the first
+        // message during the open handshake. Listening early is safe — the
+        // underlying DataChannel won't deliver app messages before open,
+        // but PeerJS may buffer and replay them. Belt-and-suspenders.
+        conn.on("data", (msg) => {
+          enqueue(async () => {
+            if (!msg?.type) return;
+            console.log(
+              `[P2P] Host received: ${msg.type}${
+                msg.table
+                  ? " table=" + msg.table + " rows=" + (msg.rows?.length ?? 0)
+                  : ""
+              }`,
+            );
 
-              if (msg.type === "HELLO") {
-                // Send host data first — dump is always fresh
-                await sendDump(conn);
-              }
+            if (msg.type === "HELLO") {
+              await sendDump(conn);
+            }
 
-              if (msg.type === "DATA") {
-                if (!buffer[msg.table]) buffer[msg.table] = [];
-                buffer[msg.table].push(...msg.rows);
-              }
+            if (msg.type === "DATA") {
+              if (!buffer[msg.table]) buffer[msg.table] = [];
+              buffer[msg.table].push(...msg.rows);
+            }
 
-              if (msg.type === "DONE") {
-                setState("syncing", "Merging guest data…");
-                const toApply = buffer;
-                buffer = {};
-                await applyRemoteDump(toApply);
-                if (isElectron()) await flushIfMobile();
-                conn.send({ type: "ACK" });
-                await new Promise((r) => setTimeout(r, 300));
-                useSyncTick().value++;
-                setState("done", "Sync complete ✓");
-                cleanup();
-              }
-            });
+            if (msg.type === "DONE") {
+              const totalBuffered = Object.values(buffer).reduce(
+                (s, r) => s + r.length,
+                0,
+              );
+              console.log(
+                `[P2P] Host received DONE — buffer has ${totalBuffered} rows`,
+              );
+              setState("syncing", "Merging guest data…");
+              const toApply = buffer;
+              buffer = {};
+              await applyRemoteDump(toApply);
+              if (isElectron()) await flushIfMobile();
+              conn.send({ type: "ACK" });
+              await new Promise((r) => setTimeout(r, 300));
+              useSyncTick().value++;
+              setState("done", "Sync complete ✓");
+              cleanup();
+            }
           });
+        });
+
+        conn.on("open", () => {
+          console.log("[P2P] Host: connection open");
+          // data listener already registered above — nothing extra needed
         });
 
         conn.on("error", (e) => {
@@ -323,68 +344,76 @@ export const useP2PSync = () => {
       _peer.on("open", () => {
         _conn = _peer.connect(hostPeerId, { reliable: true });
 
-        // ── Serial queue for guest — this is the critical fix ─────────────
-        // Without this, the async DATA handlers haven't finished populating
-        // `buffer` before the DONE handler fires and snapshots it as empty.
         const enqueue = makeQueue();
         let buffer = {};
 
-        _conn.on("open", () => {
-          setState("syncing", "Connected — waiting for host…");
+        // ── CRITICAL: register 'data' listener RIGHT NOW, synchronously ────
+        //
+        // Do NOT put this inside _conn.on('open', ...).
+        //
+        // On mobile/Capacitor WebView, the WebRTC DataChannel can transition
+        // to 'open' and deliver buffered messages before PeerJS fires the
+        // JavaScript 'open' event on the DataConnection object. If the 'data'
+        // listener is registered inside the 'open' callback, those early DATA
+        // messages are silently dropped — buffer stays empty — DONE arrives
+        // and we apply 0 rows.
+        //
+        // PeerJS DataConnection extends EventEmitter and queues events, so
+        // attaching the listener here (before 'open') is safe: no messages
+        // are delivered until the DataChannel is actually open at the WebRTC
+        // level, and by then our listener is already in place.
+        _conn.on("data", (msg) => {
+          enqueue(async () => {
+            if (!msg?.type) return;
+            console.log(
+              `[P2P] Guest received: ${msg.type}${
+                msg.table
+                  ? " table=" + msg.table + " rows=" + (msg.rows?.length ?? 0)
+                  : ""
+              }`,
+            );
 
-          _conn.on("data", (msg) => {
-            // Enqueue synchronously — do NOT await here.
-            // PeerJS calls this callback for every message; by passing an
-            // async fn to enqueue() we guarantee strict serial execution.
-            enqueue(async () => {
-              if (!msg?.type) return;
+            if (msg.type === "DATA") {
+              if (!buffer[msg.table]) buffer[msg.table] = [];
+              buffer[msg.table].push(...msg.rows);
+            }
 
-              if (msg.type === "DATA") {
-                if (!buffer[msg.table]) buffer[msg.table] = [];
-                buffer[msg.table].push(...msg.rows);
-                console.log(
-                  `[P2P] Guest buffered ${msg.rows.length} rows for ${
-                    msg.table
-                  } (total: ${buffer[msg.table].length})`,
-                );
-              }
+            if (msg.type === "DONE") {
+              const totalBuffered = Object.values(buffer).reduce(
+                (s, rows) => s + rows.length,
+                0,
+              );
+              console.log(
+                `[P2P] Guest received DONE — buffer has ${totalBuffered} rows across ${
+                  Object.keys(buffer).length
+                } tables`,
+              );
 
-              if (msg.type === "DONE") {
-                // At this point ALL DATA messages have been fully processed
-                // because the queue serialises them — buffer is complete.
-                const totalBuffered = Object.values(buffer).reduce(
-                  (s, rows) => s + rows.length,
-                  0,
-                );
-                console.log(
-                  `[P2P] Guest received DONE — buffer has ${totalBuffered} rows across ${
-                    Object.keys(buffer).length
-                  } tables`,
-                );
+              setState("syncing", "Merging host data…");
+              const toApply = buffer;
+              buffer = {};
+              await applyRemoteDump(toApply);
 
-                setState("syncing", "Merging host data…");
-                const toApply = buffer;
-                buffer = {};
-                await applyRemoteDump(toApply);
+              if (isElectron()) await flushIfMobile();
 
-                if (isElectron()) await flushIfMobile();
+              await new Promise((r) => setTimeout(r, 300));
+              useSyncTick().value++;
 
-                // Tick UI — pages reload with merged data
-                await new Promise((r) => setTimeout(r, 300));
-                useSyncTick().value++;
+              await sendDump(_conn);
+            }
 
-                // Now send our data back to the host
-                await sendDump(_conn);
-              }
-
-              if (msg.type === "ACK") {
-                setState("done", "Sync complete ✓");
-                cleanup();
-              }
-            });
+            if (msg.type === "ACK") {
+              setState("done", "Sync complete ✓");
+              cleanup();
+            }
           });
+        });
 
-          // Announce presence to host
+        // 'open' fires after the DataChannel is ready — use it only to send
+        // HELLO and update UI. The data listener is already attached above.
+        _conn.on("open", () => {
+          console.log("[P2P] Guest: connection open — sending HELLO");
+          setState("syncing", "Connected — waiting for host…");
           _conn.send({ type: "HELLO" });
         });
 
