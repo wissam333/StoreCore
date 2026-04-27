@@ -168,6 +168,20 @@
                 <div class="p2p-divider">
                   <span>{{ $t("p2p.guest.or") }}</span>
                 </div>
+
+                <!--
+                  ANDROID CAPACITOR QR SCAN
+                  ─────────────────────────
+                  On Android Capacitor, getUserMedia is unreliable in the WebView.
+                  The correct approach: trigger the hidden file input SYNCHRONOUSLY
+                  inside the tap handler (no await before click — that breaks the
+                  user-gesture chain and Android silently ignores the picker).
+
+                  capture="environment" tells Android to open the rear camera
+                  directly via the native camera app, no permissions dialog needed.
+                  The user takes a photo, Android returns it as a File, then we
+                  decode the QR from the image using jsQR.
+                -->
                 <button
                   class="p2p-scan-btn"
                   @click="startScan"
@@ -189,7 +203,12 @@
                   }}</span>
                   <span v-else>{{ $t("p2p.guest.openCamera") }}</span>
                 </button>
-                <!-- Hidden file input for native camera on mobile -->
+
+                <!--
+                  The file input is always rendered (not v-if) so the ref is
+                  always available when startScan() fires synchronously.
+                  capture="environment" = rear camera on Android.
+                -->
                 <input
                   ref="fileInputEl"
                   type="file"
@@ -200,7 +219,7 @@
                 />
               </div>
 
-              <!-- Live camera scan -->
+              <!-- Live camera scan (desktop / browser fallback only) -->
               <div v-else-if="guestStep === 'scan'" class="p2p-scan">
                 <p class="p2p-scan-label">{{ $t("p2p.guest.scanLabel") }}</p>
                 <div class="p2p-video-wrap">
@@ -216,7 +235,6 @@
                       <div class="p2p-scan-line"></div>
                     </div>
                   </div>
-                  <!-- Hidden canvas used for frame capture -->
                   <canvas ref="canvasEl" class="p2p-canvas-hidden"></canvas>
                 </div>
                 <button class="p2p-cancel-scan" @click="stopScan">
@@ -274,6 +292,23 @@
                     {{ $t("p2p.guest.tryAgain") }}
                   </button>
                 </div>
+
+                <!-- ── Debug log panel ─────────────────────────────────────
+                     Shows the last 12 [P2P] console lines directly in the UI
+                     so you can diagnose sync issues without DevTools.
+                     Remove this block once sync is confirmed working.
+                ──────────────────────────────────────────────────────────── -->
+                <div v-if="debugLogs.length" class="p2p-debug">
+                  <div class="p2p-debug-title">Debug log</div>
+                  <div
+                    v-for="(line, i) in debugLogs"
+                    :key="i"
+                    class="p2p-debug-line"
+                    :class="line.type"
+                  >
+                    {{ line.text }}
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -326,6 +361,44 @@ const videoEl = ref(null);
 const canvasEl = ref(null);
 const fileInputEl = ref(null);
 
+// ── Debug log (shown in UI — remove once sync is confirmed working) ───────────
+const debugLogs = ref([]);
+const MAX_LOGS = 12;
+
+const addLog = (text, type = "info") => {
+  debugLogs.value.push({ text, type });
+  if (debugLogs.value.length > MAX_LOGS)
+    debugLogs.value.splice(0, debugLogs.value.length - MAX_LOGS);
+};
+
+// Intercept console.log / console.error for [P2P] lines
+let _origLog = null;
+let _origError = null;
+const hookConsole = () => {
+  _origLog = console.log.bind(console);
+  _origError = console.error.bind(console);
+  console.log = (...args) => {
+    _origLog(...args);
+    const msg = args.join(" ");
+    if (msg.includes("[P2P]")) addLog(msg, "info");
+  };
+  console.error = (...args) => {
+    _origError(...args);
+    const msg = args.join(" ");
+    if (msg.includes("[P2P]")) addLog(msg, "error");
+  };
+};
+const unhookConsole = () => {
+  if (_origLog) {
+    console.log = _origLog;
+    _origLog = null;
+  }
+  if (_origError) {
+    console.error = _origError;
+    _origError = null;
+  }
+};
+
 let _qrInstance = null;
 let _videoStream = null;
 let _scanRaf = null;
@@ -347,7 +420,7 @@ const loadScript = (src) =>
     document.head.appendChild(s);
   });
 
-// ── QR rendering ─────────────────────────────────────────────────────────────
+// ── QR rendering ──────────────────────────────────────────────────────────────
 const chooseMode = async (m) => {
   mode.value = m;
   if (m === "host") await startHost();
@@ -370,7 +443,7 @@ watch([() => status.value, qrEl], async ([s, el]) => {
       height: 220,
       colorDark: "#0f172a",
       colorLight: "#f8fafc",
-      correctLevel: window.QRCode.CorrectLevel.H, // H = highest error correction = easier to scan
+      correctLevel: window.QRCode.CorrectLevel.H,
     });
   } catch (e) {
     console.warn("[P2P] QR generation failed:", e);
@@ -381,39 +454,54 @@ watch([() => status.value, qrEl], async ([s, el]) => {
 const connectManual = () => {
   const id = manualId.value.trim();
   if (!id) return;
+  debugLogs.value = [];
+  hookConsole();
   guestStep.value = "sync";
   connectToHost(id);
 };
 
-// ── QR scan entry point ───────────────────────────────────────────────────────
+// ── QR scan — Android Capacitor strategy ─────────────────────────────────────
+//
+// Rule: fileInputEl.click() MUST be called synchronously inside the tap handler.
+// Any await before the click breaks Android's user-gesture chain and the file
+// picker is silently ignored.
+//
 // Strategy:
-//   Native mobile (Capacitor) → file input with capture=environment
-//   Web/Electron with getUserMedia → live video scan
-//   Fallback → file input (no capture attr, opens gallery)
-const startScan = async () => {
-  scanLoading.value = true;
+//   1. Always click the hidden file input immediately (synchronous).
+//   2. In the background, also try getUserMedia for desktop/browser fallback.
+//      If getUserMedia succeeds we switch to the live scan view.
+//      If it fails (Android Capacitor), the file input is already open — no problem.
+const startScan = () => {
+  if (scanLoading.value) return;
 
-  // Try live camera first (works on web + Electron + modern mobile browsers)
-  if (navigator.mediaDevices?.getUserMedia) {
-    try {
-      await startWebScan();
-      scanLoading.value = false;
-      return;
-    } catch {
-      // Denied or not supported — fall through to file input
-    }
-  }
-
-  // Fallback: file input (native camera on mobile, gallery on desktop)
-  scanLoading.value = false;
-  await nextTick();
+  // ── Step 1: click file input RIGHT NOW, synchronously ─────────────────────
+  // This works on Android Capacitor because we're still inside the tap event.
   fileInputEl.value?.click();
+
+  // ── Step 2: try live camera in parallel (desktop / Chrome browser) ─────────
+  // We don't await this — it must not block the file input click above.
+  if (navigator.mediaDevices?.getUserMedia) {
+    scanLoading.value = true;
+    startWebScan()
+      .then(() => {
+        scanLoading.value = false;
+      })
+      .catch(() => {
+        // getUserMedia failed (denied, Capacitor WebView, etc.)
+        // File input is already open from step 1 — nothing else to do.
+        scanLoading.value = false;
+      });
+  }
 };
 
 // ── File input → jsQR decode ──────────────────────────────────────────────────
 const onFileInputChange = async (event) => {
   const file = event.target.files?.[0];
   if (!file) return;
+
+  // If live scan opened in parallel, close it — user chose a photo instead
+  stopScan();
+
   scanLoading.value = true;
   try {
     const dataUrl = await new Promise((resolve, reject) => {
@@ -427,7 +515,7 @@ const onFileInputChange = async (event) => {
       handleScannedId(qrId);
     } else {
       alert(
-        "No QR code detected. Try holding your camera closer and steadier.",
+        "No QR code found. Try getting closer and holding steady, then tap the button again.",
       );
     }
   } catch (e) {
@@ -438,20 +526,18 @@ const onFileInputChange = async (event) => {
   }
 };
 
-// ── Decode QR from dataUrl — tries multiple scales + filters ─────────────────
+// ── Decode QR from dataUrl — tries multiple scales ────────────────────────────
 const decodeQrFromDataUrl = async (dataUrl) => {
   await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js");
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
-      // Try multiple scale factors — far/small QR codes often need scaling up
       const scales = [1, 2, 1.5, 0.75, 3];
       for (const scale of scales) {
         const canvas = document.createElement("canvas");
         canvas.width = Math.round(img.width * scale);
         canvas.height = Math.round(img.height * scale);
         const ctx = canvas.getContext("2d");
-        // Enhance contrast to help with difficult captures
         ctx.filter = "contrast(1.5) brightness(1.1) saturate(0)";
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         ctx.filter = "none";
@@ -460,7 +546,7 @@ const decodeQrFromDataUrl = async (dataUrl) => {
           inversionAttempts: "attemptBoth",
         });
         if (code?.data) {
-          console.log(`[P2P] QR decoded at scale ${scale}`);
+          console.log(`[P2P] QR decoded at scale ${scale}: ${code.data}`);
           resolve(code.data);
           return;
         }
@@ -472,9 +558,8 @@ const decodeQrFromDataUrl = async (dataUrl) => {
   });
 };
 
-// ── Live camera scan ──────────────────────────────────────────────────────────
+// ── Live camera scan (desktop / browser fallback) ─────────────────────────────
 const startWebScan = async () => {
-  // Request high-resolution rear camera
   _videoStream = await navigator.mediaDevices.getUserMedia({
     video: {
       facingMode: { ideal: "environment" },
@@ -482,18 +567,13 @@ const startWebScan = async () => {
       height: { ideal: 1080 },
     },
   });
-
   guestStep.value = "scan";
   await nextTick();
-
   if (videoEl.value) {
     videoEl.value.srcObject = _videoStream;
     await videoEl.value.play().catch(() => {});
   }
-
-  // Load jsQR in parallel while camera warms up
   await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js");
-
   _scanActive = true;
   scheduleScan();
 };
@@ -508,22 +588,18 @@ const stopScan = () => {
     _videoStream.getTracks().forEach((t) => t.stop());
     _videoStream = null;
   }
-  guestStep.value = "enter";
+  if (guestStep.value === "scan") guestStep.value = "enter";
 };
 
-// Use requestAnimationFrame for smooth scanning — much faster than setTimeout
 const scheduleScan = () => {
-  if (!_scanActive) return;
-  _scanRaf = requestAnimationFrame(scanFrame);
+  if (_scanActive) _scanRaf = requestAnimationFrame(scanFrame);
 };
 
 let _lastScanTime = 0;
-const SCAN_INTERVAL_MS = 100; // scan at most 10 times/sec to avoid CPU overload
+const SCAN_INTERVAL_MS = 100;
 
 const scanFrame = async (timestamp) => {
   if (!_scanActive) return;
-
-  // Throttle to SCAN_INTERVAL_MS
   if (timestamp - _lastScanTime < SCAN_INTERVAL_MS) {
     scheduleScan();
     return;
@@ -548,7 +624,6 @@ const scanFrame = async (timestamp) => {
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
 
   try {
-    // Try BarcodeDetector first — native, very fast, works at any distance
     if ("BarcodeDetector" in window) {
       const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
       const codes = await detector.detect(video);
@@ -557,7 +632,6 @@ const scanFrame = async (timestamp) => {
         return;
       }
     } else {
-      // jsQR fallback — draw frame with contrast boost
       ctx.filter = "contrast(1.4) brightness(1.05) saturate(0)";
       ctx.drawImage(video, 0, 0, W, H);
       ctx.filter = "none";
@@ -570,8 +644,8 @@ const scanFrame = async (timestamp) => {
         return;
       }
     }
-  } catch (e) {
-    // ignore scan errors, keep trying
+  } catch {
+    /* ignore scan errors */
   }
 
   scheduleScan();
@@ -582,6 +656,8 @@ const handleScannedId = (id) => {
   if (!id?.trim()) return;
   stopScan();
   manualId.value = id.trim();
+  debugLogs.value = [];
+  hookConsole();
   guestStep.value = "sync";
   connectToHost(id.trim());
 };
@@ -589,10 +665,12 @@ const handleScannedId = (id) => {
 // ── Navigation ────────────────────────────────────────────────────────────────
 const goBack = () => {
   stopScan();
+  unhookConsole();
   reset();
   mode.value = "pick";
   guestStep.value = "enter";
   manualId.value = "";
+  debugLogs.value = [];
   _qrInstance = null;
 };
 
@@ -604,17 +682,20 @@ const tryClose = () => {
 const handleClose = () => {
   if (status.value === "done") emit("synced");
   stopScan();
+  unhookConsole();
   reset();
   mode.value = "pick";
   guestStep.value = "enter";
   manualId.value = "";
   scanLoading.value = false;
+  debugLogs.value = [];
   _qrInstance = null;
   emit("update:modelValue", false);
 };
 
 onUnmounted(() => {
   stopScan();
+  unhookConsole();
   reset();
 });
 </script>
@@ -1188,6 +1269,37 @@ onUnmounted(() => {
 }
 .p2p-cancel-scan:hover {
   color: var(--p2p-text);
+}
+
+/* ── Debug log panel ─────────────────────────────────────────────────────────
+   Visible only during sync, shows last 12 [P2P] log lines in the modal.
+   Remove this block (and the .p2p-debug-* rules) once sync is confirmed working.
+────────────────────────────────────────────────────────────────────────────── */
+.p2p-debug {
+  margin: 12px 20px 0;
+  background: #0f172a;
+  border-radius: 8px;
+  padding: 10px 12px;
+  max-height: 160px;
+  overflow-y: auto;
+  font-family: monospace;
+}
+.p2p-debug-title {
+  font-size: 10px;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 6px;
+}
+.p2p-debug-line {
+  font-size: 10px;
+  line-height: 1.5;
+  word-break: break-all;
+  white-space: pre-wrap;
+  color: #94a3b8;
+}
+.p2p-debug-line.error {
+  color: #f87171;
 }
 
 .p2p-footer {
