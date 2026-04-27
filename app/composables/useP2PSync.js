@@ -3,23 +3,24 @@
 // Peer-to-peer local sync using PeerJS (WebRTC data channels).
 // No internet required — works on the same WiFi/LAN network.
 //
-// PROTOCOL (sequential, no races):
-//   1. Guest connects → sends HELLO
-//   2. Host receives HELLO → collects FRESH dump → sends DATA+DONE
-//   3. Guest receives DONE → merges → flushes → ticks UI → sends DATA+DONE
-//   4. Host receives DONE → merges → flushes → ticks UI → sends ACK
-//   5. Guest receives ACK → done
+// PROTOCOL v4 — explicit handshake, host waits for READY:
+//   1. Guest open fires → guest sends HELLO
+//   2. Host receives HELLO → replies with HELLO_ACK (no data yet)
+//   3. Guest receives HELLO_ACK → sends READY (confirms listener is live)
+//   4. Host receives READY → starts sendDump (DATA chunks + DONE)
+//   5. Guest receives DATA* + DONE → merges → sends DATA* + DONE back
+//   6. Host receives DATA* + DONE → merges → sends ACK
+//   7. Guest receives ACK → done
 //
-// KEY FIX (v3):
-//   On mobile/Capacitor the WebRTC data channel can deliver messages
-//   BEFORE the PeerJS 'open' event fires on the guest side. Registering
-//   conn.on('data') inside conn.on('open') means those early DATA messages
-//   are dropped — the listener isn't attached yet. Result: buffer is empty
-//   when DONE arrives, so "Applying 0 remote rows".
+// WHY THE HANDSHAKE:
+//   Without it the host blasts DATA immediately after receiving HELLO.
+//   On Capacitor WebView, PeerJS's internal message replay runs before the
+//   app-level 'data' EventEmitter listener is attached — every DATA is
+//   silently dropped, buffer stays empty, guest applies 0 rows.
 //
-//   Fix: attach the 'data' listener IMMEDIATELY after _peer.connect() returns
-//   the DataConnection object, before 'open' fires. The serial queue (makeQueue)
-//   is still needed to prevent async handlers racing each other.
+//   HELLO → HELLO_ACK → READY forces two full network RTTs before data
+//   flows. By then the guest JS stack has completely unwound and the
+//   'data' listener is guaranteed to be live.
 
 const PEERJS_CDN =
   "https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js";
@@ -36,7 +37,6 @@ const ALL_TABLES = [
   "staff",
 ];
 
-// FK-safe apply order
 const APPLY_ORDER = [
   "categories",
   "customers",
@@ -48,16 +48,14 @@ const APPLY_ORDER = [
 ];
 
 // ── Serial async queue ────────────────────────────────────────────────────────
-// Returns an `enqueue(fn)` function. Every fn() is awaited before the next
-// one starts. This is the core fix: it prevents DONE from racing ahead of DATA.
+// Guarantees that async message handlers run strictly one at a time.
+// Prevents DONE from being processed before all DATA handlers finish.
 const makeQueue = () => {
   let _tail = Promise.resolve();
   return (fn) => {
     _tail = _tail
       .then(() => fn())
-      .catch((e) => {
-        console.error("[P2P] queue error:", e?.message ?? e);
-      });
+      .catch((e) => console.error("[P2P] queue error:", e?.message ?? e));
     return _tail;
   };
 };
@@ -77,7 +75,7 @@ const loadScript = (src) =>
 const isElectron = () =>
   typeof window !== "undefined" && !!window.__ELECTRON__ && !!window.store;
 
-// ── Dump all rows for a table via sql.js ─────────────────────────────────────
+// ── Dump one table ────────────────────────────────────────────────────────────
 const dumpTable = async (db, table) => {
   try {
     const r = await db.query(`SELECT * FROM "${table}"`);
@@ -111,7 +109,7 @@ export const useP2PSync = () => {
     statusMsg.value = msg;
   };
 
-  // ── Flush mobile db — force immediate persistence ──────────────────────────
+  // ── Flush mobile db ───────────────────────────────────────────────────────
   const flushIfMobile = async () => {
     if (isElectron()) return;
     try {
@@ -123,7 +121,7 @@ export const useP2PSync = () => {
     }
   };
 
-  // ── Collect all rows — always fresh, never cached ─────────────────────────
+  // ── Collect all rows (always fresh) ──────────────────────────────────────
   const collectLocalData = async () => {
     if (isElectron()) {
       const dump = {};
@@ -142,7 +140,6 @@ export const useP2PSync = () => {
       return dump;
     }
 
-    // Mobile — init schema once, then dump
     const { initMobileSchema } = await import("./useMobileSchema");
     await initMobileSchema();
     const { getMobileDb } = await import("./useMobileDb");
@@ -155,7 +152,7 @@ export const useP2PSync = () => {
     return dump;
   };
 
-  // ── Apply a full incoming dump ─────────────────────────────────────────────
+  // ── Apply incoming dump ───────────────────────────────────────────────────
   const applyRemoteDump = async (dump) => {
     const totalRows = APPLY_ORDER.reduce(
       (s, t) => s + (dump[t]?.length ?? 0),
@@ -182,10 +179,8 @@ export const useP2PSync = () => {
       return;
     }
 
-    // ── Mobile path ────────────────────────────────────────────────────────
     const { initMobileSchema } = await import("./useMobileSchema");
     await initMobileSchema();
-
     const { useMobileStore } = await import("./useMobileStore");
     const store = useMobileStore();
 
@@ -207,7 +202,7 @@ export const useP2PSync = () => {
     console.log(`[P2P] Applied and persisted ${totalRows} rows`);
   };
 
-  // ── Send local data to peer ────────────────────────────────────────────────
+  // ── Send local data to peer ───────────────────────────────────────────────
   const sendDump = async (conn) => {
     setState("syncing", "Collecting local data…");
     const dump = await collectLocalData();
@@ -226,10 +221,12 @@ export const useP2PSync = () => {
         conn.send({ type: "DATA", table, rows: ch });
         sent += ch.length;
         progress.value = { current: sent, total: totalRows };
-        // Small yield — lets PeerJS flush the send buffer
-        await new Promise((r) => setTimeout(r, 15));
+        await new Promise((r) => setTimeout(r, 20));
       }
     }
+    // Extra pause before DONE — gives the receiver's event loop time to
+    // process the last DATA chunk before DONE is dispatched
+    await new Promise((r) => setTimeout(r, 100));
     conn.send({ type: "DONE" });
     console.log(`[P2P] Sent ${totalRows} rows`);
   };
@@ -239,7 +236,7 @@ export const useP2PSync = () => {
     return window.Peer;
   };
 
-  // ── HOST ───────────────────────────────────────────────────────────────────
+  // ── HOST ──────────────────────────────────────────────────────────────────
   const startHost = async () => {
     setState("loading", "Preparing…");
     error.value = null;
@@ -262,23 +259,26 @@ export const useP2PSync = () => {
         const enqueue = makeQueue();
         let buffer = {};
 
-        // ── Register data listener BEFORE open fires ───────────────────────
-        // Some PeerJS versions / network conditions can deliver the first
-        // message during the open handshake. Listening early is safe — the
-        // underlying DataChannel won't deliver app messages before open,
-        // but PeerJS may buffer and replay them. Belt-and-suspenders.
         conn.on("data", (msg) => {
           enqueue(async () => {
             if (!msg?.type) return;
             console.log(
-              `[P2P] Host received: ${msg.type}${
-                msg.table
-                  ? " table=" + msg.table + " rows=" + (msg.rows?.length ?? 0)
-                  : ""
-              }`,
+              `[P2P] Host received: ${msg.type}` +
+                (msg.table
+                  ? ` table=${msg.table} rows=${msg.rows?.length ?? 0}`
+                  : ""),
             );
 
             if (msg.type === "HELLO") {
+              // Step 2: acknowledge HELLO — do NOT send data yet.
+              // Wait for READY from guest before blasting DATA.
+              console.log("[P2P] Host sending HELLO_ACK");
+              conn.send({ type: "HELLO_ACK" });
+            }
+
+            if (msg.type === "READY") {
+              // Step 4: guest confirmed its listener is live — safe to send
+              console.log("[P2P] Host received READY — starting sendDump");
               await sendDump(conn);
             }
 
@@ -310,8 +310,7 @@ export const useP2PSync = () => {
         });
 
         conn.on("open", () => {
-          console.log("[P2P] Host: connection open");
-          // data listener already registered above — nothing extra needed
+          console.log("[P2P] Host: data channel open");
         });
 
         conn.on("error", (e) => {
@@ -330,7 +329,7 @@ export const useP2PSync = () => {
     }
   };
 
-  // ── GUEST ──────────────────────────────────────────────────────────────────
+  // ── GUEST ─────────────────────────────────────────────────────────────────
   const connectToHost = async (hostPeerId) => {
     setState("loading", "Connecting…");
     error.value = null;
@@ -347,31 +346,32 @@ export const useP2PSync = () => {
         const enqueue = makeQueue();
         let buffer = {};
 
-        // ── CRITICAL: register 'data' listener RIGHT NOW, synchronously ────
-        //
-        // Do NOT put this inside _conn.on('open', ...).
-        //
-        // On mobile/Capacitor WebView, the WebRTC DataChannel can transition
-        // to 'open' and deliver buffered messages before PeerJS fires the
-        // JavaScript 'open' event on the DataConnection object. If the 'data'
-        // listener is registered inside the 'open' callback, those early DATA
-        // messages are silently dropped — buffer stays empty — DONE arrives
-        // and we apply 0 rows.
-        //
-        // PeerJS DataConnection extends EventEmitter and queues events, so
-        // attaching the listener here (before 'open') is safe: no messages
-        // are delivered until the DataChannel is actually open at the WebRTC
-        // level, and by then our listener is already in place.
+        // ── Attach 'data' listener immediately, before 'open' fires ────────
+        // This is necessary but not sufficient on Capacitor — the handshake
+        // (HELLO → HELLO_ACK → READY) is what actually guarantees the host
+        // doesn't send DATA before this listener is processing events.
         _conn.on("data", (msg) => {
           enqueue(async () => {
             if (!msg?.type) return;
             console.log(
-              `[P2P] Guest received: ${msg.type}${
-                msg.table
-                  ? " table=" + msg.table + " rows=" + (msg.rows?.length ?? 0)
-                  : ""
-              }`,
+              `[P2P] Guest received: ${msg.type}` +
+                (msg.table
+                  ? ` table=${msg.table} rows=${msg.rows?.length ?? 0}`
+                  : ""),
             );
+
+            if (msg.type === "HELLO_ACK") {
+              // Step 3: host acknowledged us. Our data listener is now
+              // provably live (we just received this message through it).
+              // Signal host that it's safe to start sending DATA.
+              console.log("[P2P] Guest received HELLO_ACK — sending READY");
+              setState("syncing", "Receiving data from host…");
+
+              // Yield one macrotask before sending READY.
+              // Ensures any pending microtasks/PeerJS internals have settled.
+              await new Promise((r) => setTimeout(r, 50));
+              _conn.send({ type: "READY" });
+            }
 
             if (msg.type === "DATA") {
               if (!buffer[msg.table]) buffer[msg.table] = [];
@@ -393,7 +393,6 @@ export const useP2PSync = () => {
               const toApply = buffer;
               buffer = {};
               await applyRemoteDump(toApply);
-
               if (isElectron()) await flushIfMobile();
 
               await new Promise((r) => setTimeout(r, 300));
@@ -409,11 +408,9 @@ export const useP2PSync = () => {
           });
         });
 
-        // 'open' fires after the DataChannel is ready — use it only to send
-        // HELLO and update UI. The data listener is already attached above.
         _conn.on("open", () => {
-          console.log("[P2P] Guest: connection open — sending HELLO");
-          setState("syncing", "Connected — waiting for host…");
+          console.log("[P2P] Guest: data channel open — sending HELLO");
+          setState("syncing", "Connected — handshaking…");
           _conn.send({ type: "HELLO" });
         });
 
@@ -433,7 +430,7 @@ export const useP2PSync = () => {
     }
   };
 
-  // ── Cleanup ────────────────────────────────────────────────────────────────
+  // ── Cleanup ───────────────────────────────────────────────────────────────
   const cleanup = () => {
     setTimeout(() => {
       try {
