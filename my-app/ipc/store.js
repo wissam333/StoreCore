@@ -1,12 +1,6 @@
 // store-app/ipc/store.js
 // Register all store IPC handlers.
 // Call registerStoreHandlers(db, ipcMain) from main.js after DB is ready.
-//
-// SYNC UPGRADE: Field-level change tracking.
-// Every enqueue() call now records which fields actually changed (changedFields).
-// The sync push sends PATCH + _changed_fields so the server can merge
-// concurrent edits to different columns of the same row without data loss.
-// e.g. User A edits product.name, User B edits product.stock → both survive.
 
 export function registerStoreHandlers(db, ipcMain) {
   const ALLOWED_TABLES = new Set([
@@ -15,20 +9,24 @@ export function registerStoreHandlers(db, ipcMain) {
     "customers",
     "orders",
     "order_items",
+    "order_payments",
     "dues",
     "staff",
   ]);
 
   const fk = (v) => (v === undefined || v === null || v === "" ? null : v);
-
-  // ── UUID generator (Node 19+ has crypto.randomUUID globally) ─────────────
   const uuid = () => crypto.randomUUID();
 
-  // ── Strip JOIN-computed fields before enqueueing ──────────────────────────
   const PRODUCT_JOIN = new Set(["category_name"]);
-  const ORDER_JOIN = new Set(["customer_name", "customer_phone", "item_count"]);
+  const ORDER_JOIN = new Set([
+    "customer_name",
+    "customer_phone",
+    "item_count",
+    "total_paid_sp",
+  ]);
   const DUE_JOIN = new Set(["customer_name", "customer_phone"]);
   const ITEM_JOIN = new Set(["current_stock"]);
+  const PAYMENT_JOIN = new Set([]);
 
   const strip = (obj, fieldSet) => {
     if (!obj || !fieldSet.size) return obj;
@@ -37,7 +35,6 @@ export function registerStoreHandlers(db, ipcMain) {
     return copy;
   };
 
-  // ── Editable field lists per table (used for changedFields diffing) ───────
   const EDITABLE_FIELDS = {
     categories: ["name", "description"],
     products: [
@@ -74,6 +71,14 @@ export function registerStoreHandlers(db, ipcMain) {
       "currency_at_sale",
       "line_total_sp",
     ],
+    order_payments: [
+      "order_id",
+      "amount",
+      "currency",
+      "amount_sp",
+      "note",
+      "paid_at",
+    ],
     dues: [
       "customer_id",
       "order_id",
@@ -96,16 +101,14 @@ export function registerStoreHandlers(db, ipcMain) {
     ],
   };
 
-  // ── Diff two rows, return array of field names that changed ───────────────
   const diffFields = (table, before, after) => {
     const fields = EDITABLE_FIELDS[table] ?? [];
-    if (!before) return fields; // insert — all fields are "new"
+    if (!before) return fields;
     return fields.filter(
       (f) => String(before[f] ?? "") !== String(after[f] ?? ""),
     );
   };
 
-  // ── Helper: enqueue sync item (now includes changedFields) ────────────────
   const enqueue = (
     table,
     operation,
@@ -125,11 +128,9 @@ export function registerStoreHandlers(db, ipcMain) {
     );
   };
 
-  // ── Helper: read back a freshly-written row ───────────────────────────────
   const freshRow = (table, id) =>
     db.prepare(`SELECT * FROM "${table}" WHERE id=?`).get(id) ?? null;
 
-  // ── Helper: dollar rate ───────────────────────────────────────────────────
   const getDollarRate = () => {
     const row = db
       .prepare(`SELECT value FROM settings WHERE key='dollar_rate'`)
@@ -139,6 +140,67 @@ export function registerStoreHandlers(db, ipcMain) {
 
   const toSP = (amount, currency) =>
     currency === "USD" ? amount * getDollarRate() : amount;
+
+  // ── Recalculate order totals from payments ────────────────────────────────
+  // Returns { paid_amount_sp, status }
+  const recalcOrder = (orderId) => {
+    const order = db.prepare(`SELECT * FROM orders WHERE id=?`).get(orderId);
+    if (!order) return null;
+    const rate = getDollarRate();
+
+    const paidSP = db
+      .prepare(
+        `
+      SELECT COALESCE(SUM(amount_sp), 0) as n
+      FROM order_payments
+      WHERE order_id=? AND _deleted=0
+    `,
+      )
+      .get(orderId).n;
+
+    let status;
+    if (paidSP <= 0) status = "pending";
+    else if (paidSP >= order.total_sp - 0.01) status = "paid";
+    else status = "partly_paid";
+
+    // paid_amount stored in display_currency for backwards compatibility
+    const paidDisplay =
+      order.display_currency === "USD" ? paidSP / rate : paidSP;
+
+    db.prepare(
+      `
+      UPDATE orders
+      SET paid_amount=?, status=?, version=version+1, updated_at=datetime('now')
+      WHERE id=?
+    `,
+    ).run(paidDisplay, status, orderId);
+
+    // Auto-pay linked dues if fully paid
+    if (status === "paid") {
+      db.prepare(
+        `
+        UPDATE dues SET paid=1, paid_at=datetime('now'),
+        version=version+1, updated_at=datetime('now')
+        WHERE order_id=? AND paid=0
+      `,
+      ).run(orderId);
+      const updatedDues = db
+        .prepare(`SELECT * FROM dues WHERE order_id=? AND paid=1`)
+        .all(orderId);
+      for (const due of updatedDues)
+        enqueue("dues", "update", due.id, strip(due, DUE_JOIN), [
+          "paid",
+          "paid_at",
+        ]);
+    }
+
+    const freshOrder = freshRow("orders", orderId);
+    enqueue("orders", "update", orderId, strip(freshOrder, ORDER_JOIN), [
+      "paid_amount",
+      "status",
+    ]);
+    return { paidSP, status };
+  };
 
   const deriveStatus = (totalSp, paidAmount, displayCurrency) => {
     const rate = getDollarRate();
@@ -177,11 +239,20 @@ export function registerStoreHandlers(db, ipcMain) {
           `SELECT COUNT(*) as n FROM orders WHERE date(order_date)=? AND _deleted=0`,
         )
         .get(today).n;
-      const monthRevSP = db
+
+      // Revenue = total actual collected payments this month
+      const monthCollectedSP = db
         .prepare(
-          `SELECT COALESCE(SUM(total_sp), 0) as n FROM orders WHERE status='paid' AND _deleted=0 AND order_date >= ?`,
+          `
+        SELECT COALESCE(SUM(op.amount_sp), 0) as n
+        FROM order_payments op
+        JOIN orders o ON op.order_id = o.id
+        WHERE op._deleted=0 AND o._deleted=0
+          AND date(op.paid_at) >= ?
+      `,
         )
         .get(firstOfMonth).n;
+
       const unpaidDues = db
         .prepare(`SELECT COUNT(*) as n FROM dues WHERE paid=0 AND _deleted=0`)
         .get().n;
@@ -199,7 +270,7 @@ export function registerStoreHandlers(db, ipcMain) {
           totalCustomers,
           lowStock,
           todayOrders,
-          monthRevenue: monthRevSP / divisor,
+          monthRevenue: monthCollectedSP / divisor,
           reportCurrency,
           unpaidDues,
           unpaidDuesAmount: unpaidDuesAmount / divisor,
@@ -213,10 +284,12 @@ export function registerStoreHandlers(db, ipcMain) {
   // ── CATEGORIES ────────────────────────────────────────────────────────────
   ipcMain.handle("store:getCategories", () => {
     try {
-      const data = db
-        .prepare(`SELECT * FROM categories WHERE _deleted=0 ORDER BY name`)
-        .all();
-      return { ok: true, data };
+      return {
+        ok: true,
+        data: db
+          .prepare(`SELECT * FROM categories WHERE _deleted=0 ORDER BY name`)
+          .all(),
+      };
     } catch (err) {
       return { ok: false, error: err.message };
     }
@@ -227,22 +300,23 @@ export function registerStoreHandlers(db, ipcMain) {
       if (cat.id) {
         const before = freshRow("categories", cat.id);
         db.prepare(
-          `UPDATE categories
-           SET name=@name, description=@description,
-               version=version+1, updated_at=datetime('now')
-           WHERE id=@id`,
+          `UPDATE categories SET name=@name, description=@description, version=version+1, updated_at=datetime('now') WHERE id=@id`,
         ).run(cat);
         const fresh = freshRow("categories", cat.id);
-        const changedFields = diffFields("categories", before, fresh);
-        enqueue("categories", "update", cat.id, fresh, changedFields);
+        enqueue(
+          "categories",
+          "update",
+          cat.id,
+          fresh,
+          diffFields("categories", before, fresh),
+        );
         return { ok: true, id: cat.id };
       } else {
         const id = uuid();
         db.prepare(
           `INSERT INTO categories (id, name, description) VALUES (?, ?, ?)`,
         ).run(id, cat.name, cat.description);
-        const fresh = freshRow("categories", id);
-        enqueue("categories", "insert", id, fresh, null);
+        enqueue("categories", "insert", id, freshRow("categories", id), null);
         return { ok: true, id };
       }
     } catch (err) {
@@ -292,10 +366,7 @@ export function registerStoreHandlers(db, ipcMain) {
         }
         const data = db
           .prepare(
-            `SELECT p.*, c.name as category_name
-             FROM products p
-             LEFT JOIN categories c ON p.category_id=c.id
-             WHERE ${where} ORDER BY p.name ASC LIMIT ? OFFSET ?`,
+            `SELECT p.*, c.name as category_name FROM products p LEFT JOIN categories c ON p.category_id=c.id WHERE ${where} ORDER BY p.name ASC LIMIT ? OFFSET ?`,
           )
           .all(...params, limit, offset);
         const total = db
@@ -312,10 +383,7 @@ export function registerStoreHandlers(db, ipcMain) {
     try {
       const data = db
         .prepare(
-          `SELECT p.*, c.name as category_name
-           FROM products p
-           LEFT JOIN categories c ON p.category_id=c.id
-           WHERE p.id=? AND p._deleted=0`,
+          `SELECT p.*, c.name as category_name FROM products p LEFT JOIN categories c ON p.category_id=c.id WHERE p.id=? AND p._deleted=0`,
         )
         .get(id);
       if (!data) return { ok: false, error: "Not found" };
@@ -331,31 +399,21 @@ export function registerStoreHandlers(db, ipcMain) {
       if (clean.id) {
         const before = freshRow("products", clean.id);
         db.prepare(
-          `UPDATE products
-           SET name=@name, description=@description, category_id=@category_id,
-               barcode=@barcode, buy_price=@buy_price, sell_price=@sell_price,
-               currency=@currency, stock=@stock, min_stock=@min_stock,
-               unit=@unit, image_url=@image_url, is_active=@is_active,
-               version=version+1, updated_at=datetime('now')
-           WHERE id=@id`,
+          `UPDATE products SET name=@name, description=@description, category_id=@category_id, barcode=@barcode, buy_price=@buy_price, sell_price=@sell_price, currency=@currency, stock=@stock, min_stock=@min_stock, unit=@unit, image_url=@image_url, is_active=@is_active, version=version+1, updated_at=datetime('now') WHERE id=@id`,
         ).run(clean);
         const fresh = freshRow("products", clean.id);
-        const changedFields = diffFields("products", before, fresh);
         enqueue(
           "products",
           "update",
           clean.id,
           strip(fresh, PRODUCT_JOIN),
-          changedFields,
+          diffFields("products", before, fresh),
         );
         return { ok: true, id: clean.id };
       } else {
         const id = uuid();
         db.prepare(
-          `INSERT INTO products
-             (id, name, description, category_id, barcode, buy_price, sell_price,
-              currency, stock, min_stock, unit, image_url, is_active)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO products (id, name, description, category_id, barcode, buy_price, sell_price, currency, stock, min_stock, unit, image_url, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
           id,
           clean.name,
@@ -371,8 +429,13 @@ export function registerStoreHandlers(db, ipcMain) {
           clean.image_url,
           clean.is_active,
         );
-        const fresh = freshRow("products", id);
-        enqueue("products", "insert", id, strip(fresh, PRODUCT_JOIN), null);
+        enqueue(
+          "products",
+          "insert",
+          id,
+          strip(freshRow("products", id), PRODUCT_JOIN),
+          null,
+        );
         return { ok: true, id };
       }
     } catch (err) {
@@ -395,12 +458,9 @@ export function registerStoreHandlers(db, ipcMain) {
   ipcMain.handle("store:adjustStock", (_, { id, delta }) => {
     try {
       db.prepare(
-        `UPDATE products
-         SET stock=MAX(0, stock + ?), version=version+1, updated_at=datetime('now')
-         WHERE id=?`,
+        `UPDATE products SET stock=MAX(0, stock + ?), version=version+1, updated_at=datetime('now') WHERE id=?`,
       ).run(delta, id);
       const fresh = freshRow("products", id);
-      // Only stock changed — be precise so other fields aren't stomped
       enqueue("products", "update", id, strip(fresh, PRODUCT_JOIN), ["stock"]);
       return { ok: true, stock: fresh?.stock };
     } catch (err) {
@@ -416,15 +476,12 @@ export function registerStoreHandlers(db, ipcMain) {
         const like = `%${search}%`;
         const data = db
           .prepare(
-            `SELECT * FROM customers
-             WHERE _deleted=0 AND (name LIKE ? OR phone LIKE ?)
-             ORDER BY name ASC LIMIT ? OFFSET ?`,
+            `SELECT * FROM customers WHERE _deleted=0 AND (name LIKE ? OR phone LIKE ?) ORDER BY name ASC LIMIT ? OFFSET ?`,
           )
           .all(like, like, limit, offset);
         const total = db
           .prepare(
-            `SELECT COUNT(*) as n FROM customers
-             WHERE _deleted=0 AND (name LIKE ? OR phone LIKE ?)`,
+            `SELECT COUNT(*) as n FROM customers WHERE _deleted=0 AND (name LIKE ? OR phone LIKE ?)`,
           )
           .get(like, like).n;
         return { ok: true, data, total };
@@ -442,16 +499,12 @@ export function registerStoreHandlers(db, ipcMain) {
       if (!customer) return { ok: false, error: "Not found" };
       const orders = db
         .prepare(
-          `SELECT * FROM orders
-           WHERE customer_id=? AND _deleted=0
-           ORDER BY order_date DESC LIMIT 50`,
+          `SELECT * FROM orders WHERE customer_id=? AND _deleted=0 ORDER BY order_date DESC LIMIT 50`,
         )
         .all(id);
       const dues = db
         .prepare(
-          `SELECT * FROM dues
-           WHERE customer_id=? AND _deleted=0
-           ORDER BY created_at DESC`,
+          `SELECT * FROM dues WHERE customer_id=? AND _deleted=0 ORDER BY created_at DESC`,
         )
         .all(id);
       return { ok: true, data: { ...customer, orders, dues } };
@@ -465,22 +518,23 @@ export function registerStoreHandlers(db, ipcMain) {
       if (c.id) {
         const before = freshRow("customers", c.id);
         db.prepare(
-          `UPDATE customers
-           SET name=@name, phone=@phone, address=@address, notes=@notes,
-               version=version+1, updated_at=datetime('now')
-           WHERE id=@id`,
+          `UPDATE customers SET name=@name, phone=@phone, address=@address, notes=@notes, version=version+1, updated_at=datetime('now') WHERE id=@id`,
         ).run(c);
         const fresh = freshRow("customers", c.id);
-        const changedFields = diffFields("customers", before, fresh);
-        enqueue("customers", "update", c.id, fresh, changedFields);
+        enqueue(
+          "customers",
+          "update",
+          c.id,
+          fresh,
+          diffFields("customers", before, fresh),
+        );
         return { ok: true, id: c.id };
       } else {
         const id = uuid();
         db.prepare(
           `INSERT INTO customers (id, name, phone, address, notes) VALUES (?, ?, ?, ?, ?)`,
         ).run(id, c.name, c.phone, c.address, c.notes);
-        const fresh = freshRow("customers", id);
-        enqueue("customers", "insert", id, fresh, null);
+        enqueue("customers", "insert", id, freshRow("customers", id), null);
         return { ok: true, id };
       }
     } catch (err) {
@@ -562,18 +616,20 @@ export function registerStoreHandlers(db, ipcMain) {
         }
         const data = db
           .prepare(
-            `SELECT o.*, c.name as customer_name, c.phone as customer_phone,
-                    (SELECT COUNT(*) FROM order_items WHERE order_id=o.id AND _deleted=0) as item_count
-             FROM orders o
-             LEFT JOIN customers c ON o.customer_id=c.id
-             WHERE ${where} ORDER BY o.order_date DESC LIMIT ? OFFSET ?`,
+            `
+        SELECT o.*,
+          c.name as customer_name, c.phone as customer_phone,
+          (SELECT COUNT(*) FROM order_items WHERE order_id=o.id AND _deleted=0) as item_count,
+          (SELECT COALESCE(SUM(amount_sp),0) FROM order_payments WHERE order_id=o.id AND _deleted=0) as total_paid_sp
+        FROM orders o
+        LEFT JOIN customers c ON o.customer_id=c.id
+        WHERE ${where} ORDER BY o.order_date DESC LIMIT ? OFFSET ?
+      `,
           )
           .all(...params, limit, offset);
         const total = db
           .prepare(
-            `SELECT COUNT(*) as n FROM orders o
-             LEFT JOIN customers c ON o.customer_id=c.id
-             WHERE ${where}`,
+            `SELECT COUNT(*) as n FROM orders o LEFT JOIN customers c ON o.customer_id=c.id WHERE ${where}`,
           )
           .get(...params).n;
         return { ok: true, data, total };
@@ -587,19 +643,31 @@ export function registerStoreHandlers(db, ipcMain) {
     try {
       const order = db
         .prepare(
-          `SELECT o.*, c.name as customer_name, c.phone as customer_phone
-           FROM orders o
-           LEFT JOIN customers c ON o.customer_id=c.id
-           WHERE o.id=? AND o._deleted=0`,
+          `
+        SELECT o.*, c.name as customer_name, c.phone as customer_phone,
+          (SELECT COALESCE(SUM(amount_sp),0) FROM order_payments WHERE order_id=o.id AND _deleted=0) as total_paid_sp
+        FROM orders o
+        LEFT JOIN customers c ON o.customer_id=c.id
+        WHERE o.id=? AND o._deleted=0
+      `,
         )
         .get(id);
       if (!order) return { ok: false, error: "Not found" };
       order.items = db
         .prepare(
-          `SELECT oi.*, p.stock as current_stock
-           FROM order_items oi
-           LEFT JOIN products p ON oi.product_id=p.id
-           WHERE oi.order_id=? AND oi._deleted=0`,
+          `
+        SELECT oi.*, p.stock as current_stock, p.buy_price as buy_price_current
+        FROM order_items oi
+        LEFT JOIN products p ON oi.product_id=p.id
+        WHERE oi.order_id=? AND oi._deleted=0
+      `,
+        )
+        .all(id);
+      order.payments = db
+        .prepare(
+          `
+        SELECT * FROM order_payments WHERE order_id=? AND _deleted=0 ORDER BY paid_at ASC
+      `,
         )
         .all(id);
       return { ok: true, data: order };
@@ -621,31 +689,21 @@ export function registerStoreHandlers(db, ipcMain) {
             item.currency_at_sale,
           );
         const totalUsd = totalSp / rate;
-        const status = deriveStatus(
-          totalSp,
-          order.paid_amount ?? 0,
-          order.display_currency ?? "SP",
-        );
         const cleanOrder = strip(order, ORDER_JOIN);
 
         if (orderId) {
-          // ── EDIT PATH ─────────────────────────────────────────────────────
-          const orderBefore = freshRow("orders", orderId);
+          // ── EDIT: restore stock, soft-delete old items
           const oldItems = db
             .prepare(
               `SELECT * FROM order_items WHERE order_id=? AND _deleted=0`,
             )
             .all(orderId);
-
-          // Restore stock from old items
           for (const oi of oldItems) {
             if (oi.product_id)
               db.prepare(
                 `UPDATE products SET stock=stock+?, version=version+1, updated_at=datetime('now') WHERE id=?`,
               ).run(oi.quantity, oi.product_id);
           }
-
-          // Soft-delete old items
           for (const oi of oldItems) {
             db.prepare(
               `UPDATE order_items SET _deleted=1, version=version+1, updated_at=datetime('now') WHERE id=?`,
@@ -653,56 +711,61 @@ export function registerStoreHandlers(db, ipcMain) {
             enqueue("order_items", "delete", oi.id, null, null);
           }
 
-          // Update order row
+          // Recalc paid from existing payments
+          const existingPaidSP = db
+            .prepare(
+              `SELECT COALESCE(SUM(amount_sp),0) as n FROM order_payments WHERE order_id=? AND _deleted=0`,
+            )
+            .get(orderId).n;
+          let newStatus;
+          if (existingPaidSP <= 0) newStatus = "pending";
+          else if (existingPaidSP >= totalSp - 0.01) newStatus = "paid";
+          else newStatus = "partly_paid";
+          const paidDisplay =
+            cleanOrder.display_currency === "USD"
+              ? existingPaidSP / rate
+              : existingPaidSP;
+
+          const orderBefore = freshRow("orders", orderId);
           db.prepare(
-            `UPDATE orders
-             SET customer_id=@customer_id, order_date=@order_date, status=@status,
-                 total_sp=@total_sp, total_usd=@total_usd, paid_amount=@paid_amount,
-                 display_currency=@display_currency, notes=@notes,
-                 version=version+1, updated_at=datetime('now')
-             WHERE id=@id`,
+            `UPDATE orders SET customer_id=@customer_id, order_date=@order_date, status=@status, total_sp=@total_sp, total_usd=@total_usd, paid_amount=@paid_amount, display_currency=@display_currency, notes=@notes, version=version+1, updated_at=datetime('now') WHERE id=@id`,
           ).run({
             ...cleanOrder,
-            status,
+            status: newStatus,
             total_sp: totalSp,
             total_usd: totalUsd,
+            paid_amount: paidDisplay,
             id: orderId,
           });
-
           const freshOrder = freshRow("orders", orderId);
-          const orderChanged = diffFields("orders", orderBefore, freshOrder);
           enqueue(
             "orders",
             "update",
             orderId,
             strip(freshOrder, ORDER_JOIN),
-            orderChanged,
+            diffFields("orders", orderBefore, freshOrder),
           );
         } else {
-          // ── INSERT PATH ───────────────────────────────────────────────────
+          // ── INSERT
           orderId = uuid();
           db.prepare(
-            `INSERT INTO orders
-               (id, customer_id, order_date, status, total_sp, total_usd,
-                paid_amount, display_currency, notes)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO orders (id, customer_id, order_date, status, total_sp, total_usd, paid_amount, display_currency, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).run(
             orderId,
             cleanOrder.customer_id,
             cleanOrder.order_date ?? new Date().toISOString(),
-            status,
+            "pending",
             totalSp,
             totalUsd,
-            cleanOrder.paid_amount ?? 0,
+            0,
             cleanOrder.display_currency ?? "SP",
             cleanOrder.notes,
           );
-          const freshOrder = freshRow("orders", orderId);
           enqueue(
             "orders",
             "insert",
             orderId,
-            strip(freshOrder, ORDER_JOIN),
+            strip(freshRow("orders", orderId), ORDER_JOIN),
             null,
           );
         }
@@ -716,10 +779,7 @@ export function registerStoreHandlers(db, ipcMain) {
           );
           const itemId = uuid();
           db.prepare(
-            `INSERT INTO order_items
-               (id, order_id, product_id, product_name, quantity,
-                sell_price_at_sale, currency_at_sale, line_total_sp)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO order_items (id, order_id, product_id, product_name, quantity, sell_price_at_sale, currency_at_sale, line_total_sp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           ).run(
             itemId,
             orderId,
@@ -751,43 +811,19 @@ export function registerStoreHandlers(db, ipcMain) {
         if (order.customer_id) {
           const custBefore = freshRow("customers", order.customer_id);
           db.prepare(
-            `UPDATE customers
-             SET total_orders=(SELECT COUNT(*) FROM orders WHERE customer_id=? AND _deleted=0 AND status='paid'),
-                 total_spent =(SELECT COALESCE(SUM(total_sp),0) FROM orders WHERE customer_id=? AND _deleted=0 AND status='paid'),
-                 last_order  =datetime('now'),
-                 version     =version+1,
-                 updated_at  =datetime('now')
-             WHERE id=?`,
+            `UPDATE customers SET total_orders=(SELECT COUNT(*) FROM orders WHERE customer_id=? AND _deleted=0 AND status='paid'), total_spent=(SELECT COALESCE(SUM(total_sp),0) FROM orders WHERE customer_id=? AND _deleted=0 AND status='paid'), last_order=datetime('now'), version=version+1, updated_at=datetime('now') WHERE id=?`,
           ).run(order.customer_id, order.customer_id, order.customer_id);
           const freshCust = freshRow("customers", order.customer_id);
-          const custChanged = diffFields("customers", custBefore, freshCust);
           if (freshCust)
             enqueue(
               "customers",
               "update",
               order.customer_id,
               freshCust,
-              custChanged,
+              diffFields("customers", custBefore, freshCust),
             );
         }
 
-        // Auto-pay linked dues
-        if (status === "paid") {
-          db.prepare(
-            `UPDATE dues SET paid=1, paid_at=datetime('now'), version=version+1, updated_at=datetime('now')
-             WHERE order_id=? AND paid=0`,
-          ).run(orderId);
-          const updatedDues = db
-            .prepare(`SELECT * FROM dues WHERE order_id=? AND paid=1`)
-            .all(orderId);
-          for (const due of updatedDues)
-            enqueue("dues", "update", due.id, strip(due, DUE_JOIN), [
-              "paid",
-              "paid_at",
-            ]);
-        }
-
-        // Enqueue affected product stocks
         for (const pid of affectedProductIds) {
           const prod = freshRow("products", pid);
           if (prod)
@@ -806,29 +842,142 @@ export function registerStoreHandlers(db, ipcMain) {
     }
   });
 
+  // ── ORDER PAYMENTS ────────────────────────────────────────────────────────
+
+  ipcMain.handle("store:getOrderPayments", (_, orderId) => {
+    try {
+      const data = db
+        .prepare(
+          `SELECT * FROM order_payments WHERE order_id=? AND _deleted=0 ORDER BY paid_at ASC`,
+        )
+        .all(orderId);
+      return { ok: true, data };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle(
+    "store:addOrderPayment",
+    (_, { order_id, amount, currency, note }) => {
+      try {
+        const rate = getDollarRate();
+        const amount_sp = currency === "USD" ? amount * rate : amount;
+
+        const addPayment = db.transaction(() => {
+          const id = uuid();
+          db.prepare(
+            `
+          INSERT INTO order_payments (id, order_id, amount, currency, amount_sp, note)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `,
+          ).run(id, order_id, amount, currency, amount_sp, note ?? null);
+
+          const fresh = freshRow("order_payments", id);
+          enqueue("order_payments", "insert", id, fresh, null);
+
+          // Recalc order
+          recalcOrder(order_id);
+
+          return { id };
+        });
+
+        const result = addPayment();
+        return { ok: true, id: result.id };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    },
+  );
+
+  ipcMain.handle("store:deleteOrderPayment", (_, paymentId) => {
+    try {
+      const del = db.transaction(() => {
+        const payment = freshRow("order_payments", paymentId);
+        if (!payment) return { ok: false, error: "Not found" };
+
+        db.prepare(
+          `UPDATE order_payments SET _deleted=1, version=version+1, updated_at=datetime('now') WHERE id=?`,
+        ).run(paymentId);
+        enqueue("order_payments", "delete", paymentId, null, null);
+
+        // Recalc order totals
+        recalcOrder(payment.order_id);
+        return { ok: true };
+      });
+      return del();
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // Mark entire order as paid in one click
+  ipcMain.handle(
+    "store:markOrderFullyPaid",
+    (_, { order_id, currency, note }) => {
+      try {
+        const markPaid = db.transaction(() => {
+          const order = db
+            .prepare(`SELECT * FROM orders WHERE id=? AND _deleted=0`)
+            .get(order_id);
+          if (!order) return { ok: false, error: "Not found" };
+          const rate = getDollarRate();
+
+          // How much already paid?
+          const alreadyPaidSP = db
+            .prepare(
+              `SELECT COALESCE(SUM(amount_sp),0) as n FROM order_payments WHERE order_id=? AND _deleted=0`,
+            )
+            .get(order_id).n;
+          const remainingSP = order.total_sp - alreadyPaidSP;
+          if (remainingSP <= 0.01) return { ok: true, id: null }; // already paid
+
+          const cur = currency ?? order.display_currency ?? "SP";
+          const amount = cur === "USD" ? remainingSP / rate : remainingSP;
+          const amount_sp = remainingSP;
+
+          const id = uuid();
+          db.prepare(
+            `INSERT INTO order_payments (id, order_id, amount, currency, amount_sp, note) VALUES (?, ?, ?, ?, ?, ?)`,
+          ).run(id, order_id, amount, cur, amount_sp, note ?? "Full payment");
+          enqueue(
+            "order_payments",
+            "insert",
+            id,
+            freshRow("order_payments", id),
+            null,
+          );
+          recalcOrder(order_id);
+          return { ok: true, id };
+        });
+        return markPaid();
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    },
+  );
+
+  // Legacy — keep for backwards compat (used by old quick-pay UI)
   ipcMain.handle(
     "store:updateOrderPayment",
     (_, { id, paid_amount, display_currency }) => {
       try {
         const order = db.prepare(`SELECT * FROM orders WHERE id=?`).get(id);
         if (!order) return { ok: false, error: "Not found" };
-
+        const rate = getDollarRate();
+        const paidSp =
+          display_currency === "USD" ? paid_amount * rate : paid_amount;
         const status = deriveStatus(
           order.total_sp,
           paid_amount,
           display_currency,
         );
         db.prepare(
-          `UPDATE orders
-           SET paid_amount=?, display_currency=?, status=?,
-               version=version+1, updated_at=datetime('now')
-           WHERE id=?`,
+          `UPDATE orders SET paid_amount=?, display_currency=?, status=?, version=version+1, updated_at=datetime('now') WHERE id=?`,
         ).run(paid_amount, display_currency, status, id);
-
         if (status === "paid") {
           db.prepare(
-            `UPDATE dues SET paid=1, paid_at=datetime('now'), version=version+1, updated_at=datetime('now')
-             WHERE order_id=? AND paid=0`,
+            `UPDATE dues SET paid=1, paid_at=datetime('now'), version=version+1, updated_at=datetime('now') WHERE order_id=? AND paid=0`,
           ).run(id);
           const updatedDues = db
             .prepare(`SELECT * FROM dues WHERE order_id=? AND paid=1`)
@@ -839,13 +988,13 @@ export function registerStoreHandlers(db, ipcMain) {
               "paid_at",
             ]);
         }
-
-        const freshOrder = freshRow("orders", id);
-        enqueue("orders", "update", id, strip(freshOrder, ORDER_JOIN), [
-          "paid_amount",
-          "display_currency",
-          "status",
-        ]);
+        enqueue(
+          "orders",
+          "update",
+          id,
+          strip(freshRow("orders", id), ORDER_JOIN),
+          ["paid_amount", "display_currency", "status"],
+        );
         return { ok: true, status };
       } catch (err) {
         return { ok: false, error: err.message };
@@ -878,6 +1027,18 @@ export function registerStoreHandlers(db, ipcMain) {
             `UPDATE order_items SET _deleted=1, version=version+1, updated_at=datetime('now') WHERE id=?`,
           ).run(item.id);
           enqueue("order_items", "delete", item.id, null, null);
+        }
+        // Soft-delete payments too
+        const payments = db
+          .prepare(
+            `SELECT * FROM order_payments WHERE order_id=? AND _deleted=0`,
+          )
+          .all(id);
+        for (const p of payments) {
+          db.prepare(
+            `UPDATE order_payments SET _deleted=1, version=version+1, updated_at=datetime('now') WHERE id=?`,
+          ).run(p.id);
+          enqueue("order_payments", "delete", p.id, null, null);
         }
         db.prepare(
           `UPDATE orders SET _deleted=1, version=version+1, updated_at=datetime('now') WHERE id=?`,
@@ -919,10 +1080,7 @@ export function registerStoreHandlers(db, ipcMain) {
         }
         const data = db
           .prepare(
-            `SELECT d.*, c.name as customer_name, c.phone as customer_phone
-             FROM dues d
-             LEFT JOIN customers c ON d.customer_id=c.id
-             WHERE ${where} ORDER BY d.created_at DESC LIMIT ? OFFSET ?`,
+            `SELECT d.*, c.name as customer_name, c.phone as customer_phone FROM dues d LEFT JOIN customers c ON d.customer_id=c.id WHERE ${where} ORDER BY d.created_at DESC LIMIT ? OFFSET ?`,
           )
           .all(...params, limit, offset);
         const total = db
@@ -930,8 +1088,7 @@ export function registerStoreHandlers(db, ipcMain) {
           .get(...params).n;
         const totalUnpaidSp = db
           .prepare(
-            `SELECT COALESCE(SUM(amount_sp),0) as n FROM dues d
-             WHERE d._deleted=0 AND d.paid=0${customerId ? " AND d.customer_id=?" : ""}`,
+            `SELECT COALESCE(SUM(amount_sp),0) as n FROM dues d WHERE d._deleted=0 AND d.paid=0${customerId ? " AND d.customer_id=?" : ""}`,
           )
           .get(...(customerId ? [customerId] : [])).n;
         return { ok: true, data, total, totalUnpaidSp };
@@ -948,28 +1105,21 @@ export function registerStoreHandlers(db, ipcMain) {
       if (due.id) {
         const before = freshRow("dues", due.id);
         db.prepare(
-          `UPDATE dues
-           SET customer_id=@customer_id, order_id=@order_id, amount=@amount,
-               currency=@currency, amount_sp=@amount_sp, description=@description,
-               due_date=@due_date, version=version+1, updated_at=datetime('now')
-           WHERE id=@id`,
+          `UPDATE dues SET customer_id=@customer_id, order_id=@order_id, amount=@amount, currency=@currency, amount_sp=@amount_sp, description=@description, due_date=@due_date, version=version+1, updated_at=datetime('now') WHERE id=@id`,
         ).run({ ...cleanDue, amount_sp: amountSp });
         const fresh = freshRow("dues", due.id);
-        const changedFields = diffFields("dues", before, fresh);
         enqueue(
           "dues",
           "update",
           due.id,
           strip(fresh, DUE_JOIN),
-          changedFields,
+          diffFields("dues", before, fresh),
         );
         return { ok: true, id: due.id };
       } else {
         const id = uuid();
         db.prepare(
-          `INSERT INTO dues
-             (id, customer_id, order_id, amount, currency, amount_sp, description, due_date)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO dues (id, customer_id, order_id, amount, currency, amount_sp, description, due_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
           id,
           cleanDue.customer_id,
@@ -980,8 +1130,13 @@ export function registerStoreHandlers(db, ipcMain) {
           cleanDue.description,
           cleanDue.due_date,
         );
-        const fresh = freshRow("dues", id);
-        enqueue("dues", "insert", id, strip(fresh, DUE_JOIN), null);
+        enqueue(
+          "dues",
+          "insert",
+          id,
+          strip(freshRow("dues", id), DUE_JOIN),
+          null,
+        );
         return { ok: true, id };
       }
     } catch (err) {
@@ -994,9 +1149,7 @@ export function registerStoreHandlers(db, ipcMain) {
       db.prepare(
         `UPDATE dues SET paid=1, paid_at=datetime('now'), version=version+1, updated_at=datetime('now') WHERE id=?`,
       ).run(id);
-      const fresh = freshRow("dues", id);
-      // Only paid + paid_at changed — be precise
-      enqueue("dues", "update", id, strip(fresh, DUE_JOIN), [
+      enqueue("dues", "update", id, strip(freshRow("dues", id), DUE_JOIN), [
         "paid",
         "paid_at",
       ]);
@@ -1022,15 +1175,14 @@ export function registerStoreHandlers(db, ipcMain) {
   ipcMain.handle("store:getStaff", (_, { search = "" } = {}) => {
     try {
       const like = `%${search}%`;
-      const data = db
-        .prepare(
-          `SELECT id, full_name, username, role, phone, email, is_active, created_at
-           FROM staff
-           WHERE _deleted=0 AND (full_name LIKE ? OR username LIKE ?)
-           ORDER BY full_name`,
-        )
-        .all(like, like);
-      return { ok: true, data };
+      return {
+        ok: true,
+        data: db
+          .prepare(
+            `SELECT id, full_name, username, role, phone, email, is_active, created_at FROM staff WHERE _deleted=0 AND (full_name LIKE ? OR username LIKE ?) ORDER BY full_name`,
+          )
+          .all(like, like),
+      };
     } catch (err) {
       return { ok: false, error: err.message };
     }
@@ -1040,26 +1192,16 @@ export function registerStoreHandlers(db, ipcMain) {
     try {
       if (s.id) {
         const before = freshRow("staff", s.id);
-        if (s.password) {
+        if (s.password)
           db.prepare(
-            `UPDATE staff
-             SET full_name=@full_name, username=@username, password=@password,
-                 role=@role, phone=@phone, email=@email, is_active=@is_active,
-                 version=version+1, updated_at=datetime('now')
-             WHERE id=@id`,
+            `UPDATE staff SET full_name=@full_name, username=@username, password=@password, role=@role, phone=@phone, email=@email, is_active=@is_active, version=version+1, updated_at=datetime('now') WHERE id=@id`,
           ).run(s);
-        } else {
+        else
           db.prepare(
-            `UPDATE staff
-             SET full_name=@full_name, username=@username, role=@role,
-                 phone=@phone, email=@email, is_active=@is_active,
-                 version=version+1, updated_at=datetime('now')
-             WHERE id=@id`,
+            `UPDATE staff SET full_name=@full_name, username=@username, role=@role, phone=@phone, email=@email, is_active=@is_active, version=version+1, updated_at=datetime('now') WHERE id=@id`,
           ).run(s);
-        }
         const fresh = freshRow("staff", s.id);
-        // Never sync the password field — strip it from changed list too
-        const changedFields = diffFields("staff", before, fresh).filter(
+        const changed = diffFields("staff", before, fresh).filter(
           (f) => f !== "password",
         );
         enqueue(
@@ -1067,15 +1209,13 @@ export function registerStoreHandlers(db, ipcMain) {
           "update",
           s.id,
           fresh ? { ...fresh, password: undefined } : { id: s.id },
-          changedFields,
+          changed,
         );
         return { ok: true, id: s.id };
       } else {
         const id = uuid();
         db.prepare(
-          `INSERT INTO staff
-             (id, full_name, username, password, role, phone, email, is_active)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO staff (id, full_name, username, password, role, phone, email, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
           id,
           s.full_name,
@@ -1127,55 +1267,109 @@ export function registerStoreHandlers(db, ipcMain) {
           .get()?.value ?? "SP";
       const divisor = reportCurrency === "USD" ? rate : 1;
 
+      // Daily: collected payments per day
       const daily = db
         .prepare(
-          `SELECT date(order_date) as day,
-                  SUM(total_sp) as total_sp,
-                  COUNT(*) as orders,
-                  SUM(CASE WHEN status='paid'  THEN total_sp ELSE 0 END) as paid_sp,
-                  SUM(CASE WHEN status!='paid' THEN total_sp ELSE 0 END) as unpaid_sp
-           FROM orders
-           WHERE _deleted=0 AND date(order_date) BETWEEN ? AND ?
-           GROUP BY day ORDER BY day`,
+          `
+        SELECT date(op.paid_at) as day,
+          COALESCE(SUM(op.amount_sp), 0)  as collected_sp,
+          COUNT(DISTINCT op.order_id)      as payment_count
+        FROM order_payments op
+        JOIN orders o ON op.order_id = o.id
+        WHERE op._deleted=0 AND o._deleted=0
+          AND date(op.paid_at) BETWEEN ? AND ?
+        GROUP BY day ORDER BY day
+      `,
         )
         .all(f, t)
         .map((row) => ({
           ...row,
-          total: row.total_sp / divisor,
-          paid: row.paid_sp / divisor,
-          unpaid: row.unpaid_sp / divisor,
+          collected: row.collected_sp / divisor,
         }));
 
+      // By status
       const byStatus = db
         .prepare(
-          `SELECT status, COUNT(*) as count, SUM(total_sp) as total_sp
-           FROM orders
-           WHERE _deleted=0 AND date(order_date) BETWEEN ? AND ?
-           GROUP BY status`,
+          `
+        SELECT status, COUNT(*) as count, SUM(total_sp) as total_sp
+        FROM orders WHERE _deleted=0 AND date(order_date) BETWEEN ? AND ?
+        GROUP BY status
+      `,
         )
         .all(f, t);
 
+      // Top products by revenue
       const topProducts = db
         .prepare(
-          `SELECT oi.product_name, SUM(oi.quantity) as qty, SUM(oi.line_total_sp) as total_sp
-           FROM order_items oi
-           JOIN orders o ON oi.order_id=o.id
-           WHERE oi._deleted=0 AND o._deleted=0 AND date(o.order_date) BETWEEN ? AND ?
-           GROUP BY oi.product_name ORDER BY qty DESC LIMIT 10`,
+          `
+        SELECT oi.product_name,
+          SUM(oi.quantity)        as qty,
+          SUM(oi.line_total_sp)   as revenue_sp,
+          COALESCE(SUM(oi.quantity * p.buy_price *
+            CASE WHEN p.currency='USD' THEN ? ELSE 1 END), 0) as cost_sp
+        FROM order_items oi
+        JOIN orders o ON oi.order_id=o.id
+        LEFT JOIN products p ON oi.product_id=p.id
+        WHERE oi._deleted=0 AND o._deleted=0
+          AND date(o.order_date) BETWEEN ? AND ?
+        GROUP BY oi.product_name ORDER BY qty DESC LIMIT 10
+      `,
         )
-        .all(f, t)
-        .map((row) => ({ ...row, total: row.total_sp / divisor }));
+        .all(rate, f, t)
+        .map((row) => ({
+          ...row,
+          revenue: row.revenue_sp / divisor,
+          cost: row.cost_sp / divisor,
+          profit: (row.revenue_sp - row.cost_sp) / divisor,
+        }));
 
+      // Grand totals
       const totals = db
         .prepare(
-          `SELECT COALESCE(SUM(total_sp),0) as revenue_sp,
-                  COUNT(*) as orders,
-                  COALESCE(SUM(CASE WHEN status='paid'  THEN total_sp ELSE 0 END),0) as paid_sp,
-                  COALESCE(SUM(CASE WHEN status!='paid' THEN total_sp ELSE 0 END),0) as unpaid_sp
-           FROM orders
-           WHERE _deleted=0 AND date(order_date) BETWEEN ? AND ?`,
+          `
+        SELECT
+          COALESCE(SUM(total_sp), 0)  as order_value_sp,
+          COUNT(*)                    as orders,
+          COALESCE(SUM(CASE WHEN status='paid'        THEN total_sp ELSE 0 END), 0) as fully_paid_sp,
+          COALESCE(SUM(CASE WHEN status='partly_paid' THEN total_sp ELSE 0 END), 0) as partly_paid_sp,
+          COALESCE(SUM(CASE WHEN status='pending'     THEN total_sp ELSE 0 END), 0) as pending_sp
+        FROM orders WHERE _deleted=0 AND date(order_date) BETWEEN ? AND ?
+      `,
         )
         .get(f, t);
+
+      // Total actually collected (from payments table — cross-period accurate)
+      const collectedSP = db
+        .prepare(
+          `
+        SELECT COALESCE(SUM(op.amount_sp), 0) as n
+        FROM order_payments op
+        JOIN orders o ON op.order_id=o.id
+        WHERE op._deleted=0 AND o._deleted=0
+          AND date(op.paid_at) BETWEEN ? AND ?
+      `,
+        )
+        .get(f, t).n;
+
+      // Total cost of goods sold
+      const costSP = db
+        .prepare(
+          `
+        SELECT COALESCE(SUM(
+          oi.quantity * p.buy_price *
+          CASE WHEN p.currency='USD' THEN ? ELSE 1 END
+        ), 0) as n
+        FROM order_items oi
+        JOIN orders o ON oi.order_id=o.id
+        LEFT JOIN products p ON oi.product_id=p.id
+        WHERE oi._deleted=0 AND o._deleted=0
+          AND date(o.order_date) BETWEEN ? AND ?
+      `,
+        )
+        .get(rate, f, t).n;
+
+      // Outstanding (unpaid portion of all orders in range)
+      const outstandingSP = totals.order_value_sp - collectedSP;
 
       return {
         ok: true,
@@ -1185,10 +1379,15 @@ export function registerStoreHandlers(db, ipcMain) {
           topProducts,
           reportCurrency,
           totals: {
-            revenue: totals.revenue_sp / divisor,
+            orderValue: totals.order_value_sp / divisor,
             orders: totals.orders,
-            paid: totals.paid_sp / divisor,
-            unpaid: totals.unpaid_sp / divisor,
+            collected: collectedSP / divisor,
+            outstanding: Math.max(0, outstandingSP) / divisor,
+            cost: costSP / divisor,
+            profit: (collectedSP - costSP) / divisor,
+            fullyPaid: totals.fully_paid_sp / divisor,
+            partlyPaid: totals.partly_paid_sp / divisor,
+            pending: totals.pending_sp / divisor,
           },
         },
       };
@@ -1207,30 +1406,17 @@ export function registerStoreHandlers(db, ipcMain) {
           .prepare(`SELECT value FROM settings WHERE key='report_currency'`)
           .get()?.value ?? "SP";
       const divisor = reportCurrency === "USD" ? rate : 1;
-
       const summary = db
         .prepare(
-          `SELECT COUNT(*) as total_dues,
-                  COALESCE(SUM(CASE WHEN paid=0 THEN amount_sp ELSE 0 END),0) as unpaid_sp,
-                  COALESCE(SUM(CASE WHEN paid=1 THEN amount_sp ELSE 0 END),0) as paid_sp,
-                  COUNT(CASE WHEN paid=0 THEN 1 END) as unpaid_count,
-                  COUNT(CASE WHEN paid=1 THEN 1 END) as paid_count
-           FROM dues
-           WHERE _deleted=0 AND date(created_at) BETWEEN ? AND ?`,
+          `SELECT COUNT(*) as total_dues, COALESCE(SUM(CASE WHEN paid=0 THEN amount_sp ELSE 0 END),0) as unpaid_sp, COALESCE(SUM(CASE WHEN paid=1 THEN amount_sp ELSE 0 END),0) as paid_sp, COUNT(CASE WHEN paid=0 THEN 1 END) as unpaid_count, COUNT(CASE WHEN paid=1 THEN 1 END) as paid_count FROM dues WHERE _deleted=0 AND date(created_at) BETWEEN ? AND ?`,
         )
         .get(f, t);
-
       const topDebtors = db
         .prepare(
-          `SELECT c.name, c.phone, COALESCE(SUM(d.amount_sp),0) as total_sp
-           FROM dues d
-           JOIN customers c ON d.customer_id=c.id
-           WHERE d._deleted=0 AND d.paid=0
-           GROUP BY d.customer_id ORDER BY total_sp DESC LIMIT 10`,
+          `SELECT c.name, c.phone, COALESCE(SUM(d.amount_sp),0) as total_sp FROM dues d JOIN customers c ON d.customer_id=c.id WHERE d._deleted=0 AND d.paid=0 GROUP BY d.customer_id ORDER BY total_sp DESC LIMIT 10`,
         )
         .all()
         .map((r) => ({ ...r, total: r.total_sp / divisor }));
-
       return {
         ok: true,
         data: {
@@ -1250,10 +1436,14 @@ export function registerStoreHandlers(db, ipcMain) {
   // ── SETTINGS ──────────────────────────────────────────────────────────────
   ipcMain.handle("store:getSettings", () => {
     try {
-      const rows = db.prepare(`SELECT key, value FROM settings`).all();
       return {
         ok: true,
-        data: Object.fromEntries(rows.map((r) => [r.key, r.value])),
+        data: Object.fromEntries(
+          db
+            .prepare(`SELECT key, value FROM settings`)
+            .all()
+            .map((r) => [r.key, r.value]),
+        ),
       };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -1263,8 +1453,7 @@ export function registerStoreHandlers(db, ipcMain) {
   ipcMain.handle("store:setSetting", (_, { key, value }) => {
     try {
       db.prepare(
-        `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
-         ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
+        `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
       ).run(key, value);
       return { ok: true };
     } catch (err) {
@@ -1315,14 +1504,14 @@ export function registerStoreHandlers(db, ipcMain) {
   // ── SYNC ──────────────────────────────────────────────────────────────────
   ipcMain.handle("store:getSyncQueue", () => {
     try {
-      const data = db
-        .prepare(
-          `SELECT * FROM sync_queue
-           WHERE synced_at IS NULL AND (retry_count IS NULL OR retry_count < 5)
-           ORDER BY id ASC LIMIT 500`,
-        )
-        .all();
-      return { ok: true, data };
+      return {
+        ok: true,
+        data: db
+          .prepare(
+            `SELECT * FROM sync_queue WHERE synced_at IS NULL AND (retry_count IS NULL OR retry_count < 5) ORDER BY id ASC LIMIT 500`,
+          )
+          .all(),
+      };
     } catch (err) {
       return { ok: false, error: err.message };
     }
@@ -1331,9 +1520,8 @@ export function registerStoreHandlers(db, ipcMain) {
   ipcMain.handle("store:markSynced", (_, ids) => {
     try {
       if (!ids?.length) return { ok: true };
-      const placeholders = ids.map(() => "?").join(",");
       db.prepare(
-        `UPDATE sync_queue SET synced_at=datetime('now') WHERE id IN (${placeholders})`,
+        `UPDATE sync_queue SET synced_at=datetime('now') WHERE id IN (${ids.map(() => "?").join(",")})`,
       ).run(...ids);
       db.prepare(
         `UPDATE sync_meta SET value=datetime('now') WHERE key='last_synced_at'`,
@@ -1346,10 +1534,13 @@ export function registerStoreHandlers(db, ipcMain) {
 
   ipcMain.handle("store:getLastSyncedAt", () => {
     try {
-      const r = db
-        .prepare(`SELECT value FROM sync_meta WHERE key='last_synced_at'`)
-        .get();
-      return { ok: true, data: r?.value ?? null };
+      return {
+        ok: true,
+        data:
+          db
+            .prepare(`SELECT value FROM sync_meta WHERE key='last_synced_at'`)
+            .get()?.value ?? null,
+      };
     } catch (err) {
       return { ok: false, error: err.message };
     }
@@ -1358,8 +1549,7 @@ export function registerStoreHandlers(db, ipcMain) {
   ipcMain.handle("store:setLastSyncedAt", (_, iso) => {
     try {
       db.prepare(
-        `INSERT INTO sync_meta (key, value) VALUES ('last_synced_at', ?)
-         ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+        `INSERT INTO sync_meta (key, value) VALUES ('last_synced_at', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
       ).run(iso);
       return { ok: true };
     } catch (err) {
@@ -1371,8 +1561,7 @@ export function registerStoreHandlers(db, ipcMain) {
     try {
       if (!ALLOWED_TABLES.has(table))
         return { ok: false, error: `Unknown table: ${table}` };
-      const data = db.prepare(`SELECT * FROM "${table}"`).all();
-      return { ok: true, data };
+      return { ok: true, data: db.prepare(`SELECT * FROM "${table}"`).all() };
     } catch (err) {
       return { ok: false, error: err.message };
     }
@@ -1380,25 +1569,20 @@ export function registerStoreHandlers(db, ipcMain) {
 
   ipcMain.handle("store:getAllOrderItems", () => {
     try {
-      const data = db
-        .prepare(`SELECT * FROM order_items WHERE _deleted=0`)
-        .all();
-      return { ok: true, data };
+      return {
+        ok: true,
+        data: db.prepare(`SELECT * FROM order_items WHERE _deleted=0`).all(),
+      };
     } catch (err) {
       return { ok: false, error: err.message };
     }
   });
 
-  // ── applyRemoteRow — field-level pull merge ───────────────────────────────
-  // On pull, we receive the already-merged row from the server.
-  // Locally we do a version-aware field-level update so any uncommitted
-  // local edits to OTHER fields are preserved until the next push cycle.
+  // ── applyRemoteRow ────────────────────────────────────────────────────────
   ipcMain.handle("store:applyRemoteRow", (_, { table, row }) => {
     try {
       if (!ALLOWED_TABLES.has(table))
         return { ok: false, error: `Unknown table: ${table}` };
-
-      // Normalise booleans → integers for SQLite
       const normalized = {};
       for (const [k, v] of Object.entries(row)) {
         if (k === "synced_at") continue;
@@ -1406,7 +1590,6 @@ export function registerStoreHandlers(db, ipcMain) {
         else normalized[k] = v;
       }
       if (!("id" in normalized)) return { ok: false, error: "Missing row.id" };
-
       const existing = (() => {
         try {
           return db
@@ -1416,75 +1599,52 @@ export function registerStoreHandlers(db, ipcMain) {
           return null;
         }
       })();
-
       if (!existing) {
-        // Row is brand-new on this device — plain insert
         const cols = Object.keys(normalized);
-        const colList = cols.map((c) => `"${c}"`).join(", ");
-        const placeholders = cols.map(() => "?").join(", ");
         db.prepare("PRAGMA foreign_keys = OFF").run();
         try {
           db.prepare(
-            `INSERT OR REPLACE INTO "${table}" (${colList}, synced_at) VALUES (${placeholders}, datetime('now'))`,
+            `INSERT OR REPLACE INTO "${table}" (${cols.map((c) => `"${c}"`).join(", ")}, synced_at) VALUES (${cols.map(() => "?").join(", ")}, datetime('now'))`,
           ).run(...cols.map((c) => normalized[c]));
         } finally {
           db.prepare("PRAGMA foreign_keys = ON").run();
         }
         return { ok: true };
       }
-
       const remoteVersion = normalized.version ?? 0;
       const localVersion = existing.version ?? 0;
-
       const pending = db
         .prepare(
           `SELECT id FROM sync_queue WHERE row_id=? AND synced_at IS NULL LIMIT 1`,
         )
         .get(normalized.id);
-
-      if (remoteVersion < localVersion) {
-        return { ok: true, skipped: true };
-      }
-
+      if (remoteVersion < localVersion) return { ok: true, skipped: true };
       if (remoteVersion === localVersion) {
-        const remoteTs = normalized.updated_at ?? "";
-        const localTs = existing.updated_at ?? "";
-        if (remoteTs <= localTs) {
+        if ((normalized.updated_at ?? "") <= (existing.updated_at ?? ""))
           return { ok: true, skipped: true };
-        }
         if (pending) return { ok: true, skipped: true };
       }
-
-      if (pending && remoteVersion === localVersion + 1) {
+      if (pending && remoteVersion === localVersion + 1)
         return { ok: true, skipped: true };
-      }
-
       const skipCols = new Set(["id", "synced_at", "created_at"]);
       const updateCols = Object.keys(normalized).filter(
         (k) => !skipCols.has(k),
       );
-
       if (updateCols.length === 0) return { ok: true };
-
-      const setClause = updateCols.map((c) => `"${c}" = ?`).join(", ");
-      const vals = [...updateCols.map((c) => normalized[c]), normalized.id];
-
       db.prepare("PRAGMA foreign_keys = OFF").run();
       try {
         db.prepare(
-          `UPDATE "${table}" SET ${setClause}, synced_at = datetime('now') WHERE id = ?`,
-        ).run(...vals);
+          `UPDATE "${table}" SET ${updateCols.map((c) => `"${c}" = ?`).join(", ")}, synced_at = datetime('now') WHERE id = ?`,
+        ).run(...updateCols.map((c) => normalized[c]), normalized.id);
       } finally {
         db.prepare("PRAGMA foreign_keys = ON").run();
       }
-
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
     }
   });
 
-  // ── Native fetch passthrough (used by renderer for external APIs) ─────────
   ipcMain.handle("native-fetch", async (_event, url) => {
     try {
       const response = await fetch(url, {

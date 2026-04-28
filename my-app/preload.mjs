@@ -1,3 +1,4 @@
+// store-app/electron/preload.js
 import { contextBridge, ipcRenderer } from "electron";
 
 const invoke = (channel, ...args) => ipcRenderer.invoke(channel, ...args);
@@ -32,6 +33,13 @@ contextBridge.exposeInMainWorld("store", {
   updateOrderPayment: (opts) => invoke("store:updateOrderPayment", opts),
   deleteOrder: (id) => invoke("store:deleteOrder", id),
 
+  // ── Order Payments (new) ─────────────────────────────────────────────────
+  getOrderPayments: (orderId) => invoke("store:getOrderPayments", orderId),
+  addOrderPayment: (opts) => invoke("store:addOrderPayment", opts),
+  deleteOrderPayment: (paymentId) =>
+    invoke("store:deleteOrderPayment", paymentId),
+  markOrderFullyPaid: (opts) => invoke("store:markOrderFullyPaid", opts),
+
   // Dues
   getDues: (opts) => invoke("store:getDues", opts),
   saveDue: (due) => invoke("store:saveDue", due),
@@ -59,7 +67,7 @@ contextBridge.exposeInMainWorld("store", {
   setLastSyncedAt: (iso) => invoke("store:setLastSyncedAt", iso),
   applyRemoteRow: (payload) => invoke("store:applyRemoteRow", payload),
 
-  // P2P sync — was missing, caused "Sent 0 rows" on PC side
+  // P2P sync
   getRawTable: (table) => invoke("store:getRawTable", table),
   getAllOrderItems: () => invoke("store:getAllOrderItems"),
 });

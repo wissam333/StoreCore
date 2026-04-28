@@ -37,6 +37,12 @@ export const useStore = () => {
     saveOrder: (p) => s().saveOrder(p),
     updateOrderPayment: (opts) => s().updateOrderPayment(opts),
     deleteOrder: (id) => s().deleteOrder(id),
+    // ── Payment methods ───────────────────────────────────────────────────
+    getOrderPayments: (orderId) => s().getOrderPayments(orderId),
+    addOrderPayment: (opts) => s().addOrderPayment(opts),
+    deleteOrderPayment: (paymentId) => s().deleteOrderPayment(paymentId),
+    markOrderFullyPaid: (opts) => s().markOrderFullyPaid(opts),
+    // ── Dues ──────────────────────────────────────────────────────────────
     getDues: (opts) => s().getDues(opts),
     saveDue: (due) => s().saveDue(due),
     markDuePaid: (id) => s().markDuePaid(id),

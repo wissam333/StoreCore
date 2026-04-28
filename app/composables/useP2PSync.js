@@ -1,38 +1,20 @@
 // store-app/composables/useP2PSync.js
-//
-// Peer-to-peer local sync using PeerJS (WebRTC data channels).
-// No internet required — works on the same WiFi/LAN network.
-//
-// PROTOCOL v4 — explicit handshake, host waits for READY:
-//   1. Guest open fires → guest sends HELLO
-//   2. Host receives HELLO → replies with HELLO_ACK (no data yet)
-//   3. Guest receives HELLO_ACK → sends READY (confirms listener is live)
-//   4. Host receives READY → starts sendDump (DATA chunks + DONE)
-//   5. Guest receives DATA* + DONE → merges → sends DATA* + DONE back
-//   6. Host receives DATA* + DONE → merges → sends ACK
-//   7. Guest receives ACK → done
-//
-// WHY THE HANDSHAKE:
-//   Without it the host blasts DATA immediately after receiving HELLO.
-//   On Capacitor WebView, PeerJS's internal message replay runs before the
-//   app-level 'data' EventEmitter listener is attached — every DATA is
-//   silently dropped, buffer stays empty, guest applies 0 rows.
-//
-//   HELLO → HELLO_ACK → READY forces two full network RTTs before data
-//   flows. By then the guest JS stack has completely unwound and the
-//   'data' listener is guaranteed to be live.
+// UPDATED: order_payments added to ALL_TABLES and APPLY_ORDER
+// Protocol v4 unchanged — only table lists updated.
 
 const PEERJS_CDN =
   "https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js";
 const QRCODE_CDN =
   "https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js";
 
+// ── Table lists ───────────────────────────────────────────────────────────────
 const ALL_TABLES = [
   "categories",
   "products",
   "customers",
   "orders",
   "order_items",
+  "order_payments", // ← NEW
   "dues",
   "staff",
 ];
@@ -44,12 +26,11 @@ const APPLY_ORDER = [
   "products",
   "orders",
   "order_items",
+  "order_payments", // ← NEW: after orders + order_items (FK constraint)
   "dues",
 ];
 
 // ── Serial async queue ────────────────────────────────────────────────────────
-// Guarantees that async message handlers run strictly one at a time.
-// Prevents DONE from being processed before all DATA handlers finish.
 const makeQueue = () => {
   let _tail = Promise.resolve();
   return (fn) => {
@@ -60,7 +41,6 @@ const makeQueue = () => {
   };
 };
 
-// ── Load script from CDN (idempotent) ─────────────────────────────────────────
 const loadScript = (src) =>
   new Promise((resolve, reject) => {
     if (document.querySelector(`script[src="${src}"]`)) return resolve();
@@ -71,11 +51,9 @@ const loadScript = (src) =>
     document.head.appendChild(s);
   });
 
-// ── Platform detection ────────────────────────────────────────────────────────
 const isElectron = () =>
   typeof window !== "undefined" && !!window.__ELECTRON__ && !!window.store;
 
-// ── Dump one table ────────────────────────────────────────────────────────────
 const dumpTable = async (db, table) => {
   try {
     const r = await db.query(`SELECT * FROM "${table}"`);
@@ -86,14 +64,12 @@ const dumpTable = async (db, table) => {
   }
 };
 
-// ── Chunk large arrays ────────────────────────────────────────────────────────
 const chunk = (arr, size) => {
   const out = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
   return out;
 };
 
-// ── Main composable ───────────────────────────────────────────────────────────
 export const useP2PSync = () => {
   const status = ref("idle");
   const statusMsg = ref("");
@@ -109,7 +85,6 @@ export const useP2PSync = () => {
     statusMsg.value = msg;
   };
 
-  // ── Flush mobile db ───────────────────────────────────────────────────────
   const flushIfMobile = async () => {
     if (isElectron()) return;
     try {
@@ -121,12 +96,12 @@ export const useP2PSync = () => {
     }
   };
 
-  // ── Collect all rows (always fresh) ──────────────────────────────────────
   const collectLocalData = async () => {
     if (isElectron()) {
       const dump = {};
       for (const table of ALL_TABLES) {
         try {
+          // order_payments needs special handling in Electron — use getRawTable
           const r = await window.store.getRawTable(table);
           dump[table] = r.ok ? r.data : [];
           console.log(
@@ -152,7 +127,6 @@ export const useP2PSync = () => {
     return dump;
   };
 
-  // ── Apply incoming dump ───────────────────────────────────────────────────
   const applyRemoteDump = async (dump) => {
     const totalRows = APPLY_ORDER.reduce(
       (s, t) => s + (dump[t]?.length ?? 0),
@@ -202,7 +176,6 @@ export const useP2PSync = () => {
     console.log(`[P2P] Applied and persisted ${totalRows} rows`);
   };
 
-  // ── Send local data to peer ───────────────────────────────────────────────
   const sendDump = async (conn) => {
     setState("syncing", "Collecting local data…");
     const dump = await collectLocalData();
@@ -224,8 +197,6 @@ export const useP2PSync = () => {
         await new Promise((r) => setTimeout(r, 20));
       }
     }
-    // Extra pause before DONE — gives the receiver's event loop time to
-    // process the last DATA chunk before DONE is dispatched
     await new Promise((r) => setTimeout(r, 100));
     conn.send({ type: "DONE" });
     console.log(`[P2P] Sent ${totalRows} rows`);
@@ -270,14 +241,11 @@ export const useP2PSync = () => {
             );
 
             if (msg.type === "HELLO") {
-              // Step 2: acknowledge HELLO — do NOT send data yet.
-              // Wait for READY from guest before blasting DATA.
               console.log("[P2P] Host sending HELLO_ACK");
               conn.send({ type: "HELLO_ACK" });
             }
 
             if (msg.type === "READY") {
-              // Step 4: guest confirmed its listener is live — safe to send
               console.log("[P2P] Host received READY — starting sendDump");
               await sendDump(conn);
             }
@@ -346,10 +314,6 @@ export const useP2PSync = () => {
         const enqueue = makeQueue();
         let buffer = {};
 
-        // ── Attach 'data' listener immediately, before 'open' fires ────────
-        // This is necessary but not sufficient on Capacitor — the handshake
-        // (HELLO → HELLO_ACK → READY) is what actually guarantees the host
-        // doesn't send DATA before this listener is processing events.
         _conn.on("data", (msg) => {
           enqueue(async () => {
             if (!msg?.type) return;
@@ -361,14 +325,8 @@ export const useP2PSync = () => {
             );
 
             if (msg.type === "HELLO_ACK") {
-              // Step 3: host acknowledged us. Our data listener is now
-              // provably live (we just received this message through it).
-              // Signal host that it's safe to start sending DATA.
               console.log("[P2P] Guest received HELLO_ACK — sending READY");
               setState("syncing", "Receiving data from host…");
-
-              // Yield one macrotask before sending READY.
-              // Ensures any pending microtasks/PeerJS internals have settled.
               await new Promise((r) => setTimeout(r, 50));
               _conn.send({ type: "READY" });
             }
@@ -430,7 +388,6 @@ export const useP2PSync = () => {
     }
   };
 
-  // ── Cleanup ───────────────────────────────────────────────────────────────
   const cleanup = () => {
     setTimeout(() => {
       try {

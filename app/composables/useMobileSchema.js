@@ -150,6 +150,26 @@ export const initMobileSchema = async () => {
   await exec(
     db,
     `
+    CREATE TABLE IF NOT EXISTS order_payments (
+      id          TEXT    PRIMARY KEY,
+      order_id    TEXT    NOT NULL REFERENCES orders(id),
+      amount      REAL    NOT NULL,
+      currency    TEXT    NOT NULL DEFAULT 'SP',
+      amount_sp   REAL    NOT NULL DEFAULT 0,
+      note        TEXT,
+      paid_at     TEXT    DEFAULT (datetime('now')),
+      version     INTEGER NOT NULL DEFAULT 1,
+      created_at  TEXT    DEFAULT (datetime('now')),
+      updated_at  TEXT    DEFAULT (datetime('now')),
+      _deleted    INTEGER DEFAULT 0,
+      synced_at   TEXT
+    );
+  `,
+  );
+
+  await exec(
+    db,
+    `
     CREATE TABLE IF NOT EXISTS staff (
       id          TEXT    PRIMARY KEY,
       full_name   TEXT    NOT NULL,

@@ -1,3 +1,4 @@
+<!-- store-app/pages/dashboard/index.vue -->
 <template>
   <div>
     <!-- ── Stats grid ─────────────────────────────────────────────────────── -->
@@ -6,8 +7,9 @@
         v-for="(card, i) in statCards"
         :key="card.key"
         class="stat-card"
-        :class="`accent-${card.color}`"
+        :class="[`accent-${card.color}`, { clickable: !!card.onClick }]"
         :style="{ animationDelay: `${i * 60}ms` }"
+        @click="card.onClick?.()"
       >
         <div class="stat-card__top">
           <div class="stat-card__icon">
@@ -24,7 +26,34 @@
         <div v-if="card.description" class="stat-card__desc">
           {{ card.description }}
         </div>
+        <div v-if="card.onClick" class="stat-card__cta">
+          <Icon name="mdi:arrow-right" size="12" />
+          {{ $t("clickToView") }}
+        </div>
       </div>
+    </div>
+
+    <!-- ── Order Status Quick Filter ─────────────────────────────────────── -->
+    <div class="status-pills-row">
+      <button
+        v-for="s in orderStatuses"
+        :key="s.value"
+        class="status-pill"
+        :class="[s.class, { active: activeStatus === s.value }]"
+        @click="toggleStatus(s.value)"
+      >
+        <span class="pill-dot" />
+        {{ $t("order." + s.value) }}
+        <span class="pill-count">{{ statusCounts[s.value] ?? 0 }}</span>
+      </button>
+      <button
+        v-if="activeStatus"
+        class="status-pill pill-clear"
+        @click="clearStatus"
+      >
+        <Icon name="mdi:close" size="12" />
+        {{ $t("clearFilter") }}
+      </button>
     </div>
 
     <!-- ── Low stock alert ────────────────────────────────────────────────── -->
@@ -64,16 +93,32 @@
 
     <!-- ── Bottom two-col ─────────────────────────────────────────────────── -->
     <div class="two-col mt-4">
-      <!-- Recent orders -->
+      <!-- Recent orders (filtered if status active) -->
       <div class="panel">
         <div class="panel-head">
           <div class="panel-head__left">
             <div class="panel-icon blue">
               <Icon name="mdi:receipt-text-outline" size="15" />
             </div>
-            <span>{{ $t("recentOrders") }}</span>
+            <span>
+              {{ $t("recentOrders") }}
+              <span
+                v-if="activeStatus"
+                class="panel-filter-badge"
+                :class="statusBadgeClass(activeStatus)"
+              >
+                {{ $t("order." + activeStatus) }}
+              </span>
+            </span>
           </div>
-          <NuxtLink to="/dashboard/orders" class="panel-link">
+          <NuxtLink
+            :to="
+              activeStatus
+                ? '/dashboard/orders?status=' + activeStatus
+                : '/dashboard/orders'
+            "
+            class="panel-link"
+          >
             {{ $t("seeAll") }}
             <Icon name="mdi:arrow-right" size="14" />
           </NuxtLink>
@@ -82,29 +127,29 @@
         <div v-if="loading" class="panel-skeletons">
           <div v-for="n in 4" :key="n" class="skeleton-row" />
         </div>
-        <div v-else-if="!recentOrders.length" class="panel-empty">
+        <div v-else-if="!filteredOrders.length" class="panel-empty">
           <Icon name="mdi:receipt-text-outline" size="36" />
           <p>{{ $t("noOrders") }}</p>
         </div>
         <div v-else class="order-list">
           <div
-            v-for="(o, i) in recentOrders"
-            :key="i"
+            v-for="(o, i) in filteredOrders"
+            :key="o.id"
             class="order-row"
             @click="navigateTo('/dashboard/orders/' + o.id)"
           >
             <div class="or-id">#{{ i + 1 }}</div>
             <div class="or-info">
               <span class="or-customer">{{
-                o.customer_name || $t("unknown")
+                o.customer_name || $t("walkIn")
               }}</span>
               <span class="or-date">{{ formatDate(o.order_date) }}</span>
             </div>
             <div class="or-right">
               <span class="or-amount">{{ fmtSP(o.total_sp) }}</span>
-              <span class="badge" :class="statusClass(o.status)">{{
-                $t("order." + o.status)
-              }}</span>
+              <span class="badge" :class="statusClass(o.status)">
+                {{ $t("order." + o.status) }}
+              </span>
             </div>
           </div>
         </div>
@@ -137,7 +182,7 @@
             v-for="(d, i) in topDebtors"
             :key="i"
             class="debtor-row"
-            @click="navigateTo(`/dashboard/customers`)"
+            @click="navigateTo('/dashboard/customers')"
           >
             <div class="debtor-rank">{{ i + 1 }}</div>
             <div class="debtor-avatar">
@@ -165,9 +210,9 @@ definePageMeta({
   },
 });
 
-// ✅ Top-level — same pattern as useClinic()
 const { getStats, getOrders, getDuesReport, getProducts } = useStore();
 const currency = useCurrency();
+const { t: $t } = useI18n();
 
 const loading = ref(true);
 const stats = ref({});
@@ -176,7 +221,38 @@ const recentOrders = ref([]);
 const topDebtors = ref([]);
 const fmtSP = ref((v) => v);
 const fmt = ref((v) => v);
+const activeStatus = ref(null); // "pending" | "partly_paid" | "paid" | null
 
+const orderStatuses = [
+  { value: "pending", class: "pill-warning" },
+  { value: "partly_paid", class: "pill-info" },
+  { value: "paid", class: "pill-success" },
+];
+
+// ── Status counts from loaded orders ─────────────────────────────────────────
+const statusCounts = computed(() => {
+  const counts = { pending: 0, partly_paid: 0, paid: 0 };
+  for (const o of recentOrders.value) {
+    if (counts[o.status] !== undefined) counts[o.status]++;
+  }
+  return counts;
+});
+
+// ── Filtered orders list ──────────────────────────────────────────────────────
+const filteredOrders = computed(() => {
+  if (!activeStatus.value) return recentOrders.value;
+  return recentOrders.value.filter((o) => o.status === activeStatus.value);
+});
+
+const toggleStatus = (val) => {
+  activeStatus.value = activeStatus.value === val ? null : val;
+};
+
+const clearStatus = () => {
+  activeStatus.value = null;
+};
+
+// ── Stat cards ────────────────────────────────────────────────────────────────
 const formatDate = (d) =>
   d
     ? new Date(d).toLocaleDateString(undefined, {
@@ -193,6 +269,13 @@ const statusClass = (s) =>
     paid: "badge-success",
   }[s] ?? "badge-secondary");
 
+const statusBadgeClass = (s) =>
+  ({
+    pending: "filter-badge-warning",
+    partly_paid: "filter-badge-info",
+    paid: "filter-badge-success",
+  }[s] ?? "");
+
 const statCards = computed(() => [
   {
     key: "products",
@@ -200,6 +283,7 @@ const statCards = computed(() => [
     value: stats.value.totalProducts ?? 0,
     icon: "mdi:package-variant-closed",
     color: "blue",
+    onClick: () => navigateTo("/dashboard/products"),
   },
   {
     key: "customers",
@@ -207,6 +291,7 @@ const statCards = computed(() => [
     value: stats.value.totalCustomers ?? 0,
     icon: "mdi:account-group-outline",
     color: "teal",
+    onClick: () => navigateTo("/dashboard/customers"),
   },
   {
     key: "todayOrders",
@@ -214,6 +299,7 @@ const statCards = computed(() => [
     value: stats.value.todayOrders ?? 0,
     icon: "mdi:receipt-text-outline",
     color: "green",
+    onClick: () => navigateTo("/dashboard/orders"),
   },
   {
     key: "revenue",
@@ -222,6 +308,7 @@ const statCards = computed(() => [
     icon: "mdi:cash-multiple",
     color: "amber",
     formatter: (v) => fmt.value(v),
+    onClick: () => navigateTo("/dashboard/reports/revenue"),
   },
   {
     key: "lowStock",
@@ -229,6 +316,7 @@ const statCards = computed(() => [
     value: stats.value.lowStock ?? 0,
     icon: "mdi:alert-circle-outline",
     color: "orange",
+    onClick: () => navigateTo("/dashboard/products?lowStock=1"),
   },
   {
     key: "dues",
@@ -239,9 +327,11 @@ const statCards = computed(() => [
     description: stats.value.unpaidDuesAmount
       ? fmt.value(stats.value.unpaidDuesAmount)
       : undefined,
+    onClick: () => navigateTo("/dashboard/dues"),
   },
 ]);
 
+// ── Load ──────────────────────────────────────────────────────────────────────
 const load = async () => {
   loading.value = true;
   try {
@@ -251,7 +341,7 @@ const load = async () => {
 
     const [sR, oR, dR] = await Promise.all([
       getStats(),
-      getOrders({ limit: 6 }),
+      getOrders({ limit: 20 }), // load more so status counts are meaningful
       getDuesReport(),
     ]);
 
@@ -301,79 +391,51 @@ watch(useSyncTick(), () => load());
   flex-direction: column;
   gap: 10px;
   animation: fadeUp 0.4s ease both;
-  transition: box-shadow 0.2s, transform 0.2s;
+  transition: box-shadow 0.2s, transform 0.2s, border-color 0.2s;
   position: relative;
   overflow: hidden;
 
-  // &::before {
-  //   content: "";
-  //   position: absolute;
-  //   inset-inline-start: 0;
-  //   top: 0;
-  //   bottom: 0;
-  //   width: 3px;
-  //   border-radius: 3px 0 0 3px;
-  //   opacity: 0.7;
-  // }
+  &.clickable {
+    cursor: pointer;
+    &:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.1);
+      border-color: var(--primary);
+    }
+    &:active {
+      transform: translateY(-1px);
+    }
+  }
 
-  &:hover {
+  &:not(.clickable):hover {
     transform: translateY(-2px);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
   }
 
-  &.accent-blue {
-    &::before {
-      background: #3b82f6;
-    }
-    .stat-card__icon {
-      background: rgba(59, 130, 246, 0.1);
-      color: #3b82f6;
-    }
+  // Color accents
+  &.accent-blue .stat-card__icon {
+    background: rgba(59, 130, 246, 0.1);
+    color: #3b82f6;
   }
-  &.accent-teal {
-    &::before {
-      background: #14b8a6;
-    }
-    .stat-card__icon {
-      background: rgba(20, 184, 166, 0.1);
-      color: #14b8a6;
-    }
+  &.accent-teal .stat-card__icon {
+    background: rgba(20, 184, 166, 0.1);
+    color: #14b8a6;
   }
-  &.accent-green {
-    &::before {
-      background: #10b981;
-    }
-    .stat-card__icon {
-      background: rgba(16, 185, 129, 0.1);
-      color: #10b981;
-    }
+  &.accent-green .stat-card__icon {
+    background: rgba(16, 185, 129, 0.1);
+    color: #10b981;
   }
-  &.accent-amber {
-    &::before {
-      background: #f59e0b;
-    }
-    .stat-card__icon {
-      background: rgba(245, 158, 11, 0.1);
-      color: #f59e0b;
-    }
+  &.accent-amber .stat-card__icon {
+    background: rgba(245, 158, 11, 0.1);
+    color: #f59e0b;
   }
-  &.accent-orange {
-    &::before {
-      background: #f97316;
-    }
-    .stat-card__icon {
-      background: rgba(249, 115, 22, 0.1);
-      color: #f97316;
-    }
+  &.accent-orange .stat-card__icon {
+    background: rgba(249, 115, 22, 0.1);
+    color: #f97316;
   }
-  &.accent-red {
-    &::before {
-      background: #ef4444;
-    }
-    .stat-card__icon {
-      background: rgba(239, 68, 68, 0.1);
-      color: #ef4444;
-    }
+  &.accent-red .stat-card__icon {
+    background: rgba(239, 68, 68, 0.1);
+    color: #ef4444;
   }
 }
 
@@ -418,6 +480,22 @@ watch(useSyncTick(), () => load());
   margin-top: -4px;
 }
 
+.stat-card__cta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--primary);
+  opacity: 0;
+  transition: opacity 0.15s;
+  margin-top: -4px;
+}
+
+.stat-card.clickable:hover .stat-card__cta {
+  opacity: 1;
+}
+
 .skeleton-val {
   display: block;
   height: 1.8rem;
@@ -431,6 +509,95 @@ watch(useSyncTick(), () => load());
   );
   background-size: 200% 100%;
   animation: shimmer 1.4s infinite;
+}
+
+// ── Status pill filters ───────────────────────────────────────────────────────
+.status-pills-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 1rem;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  border: 1.5px solid transparent;
+  background: var(--bg-elevated);
+  color: var(--text-sub);
+  cursor: pointer;
+  transition: all 0.18s;
+
+  &:hover {
+    transform: translateY(-1px);
+  }
+
+  &.pill-warning {
+    &.active,
+    &:hover {
+      background: rgba(245, 158, 11, 0.12);
+      border-color: #f59e0b;
+      color: #f59e0b;
+    }
+  }
+  &.pill-info {
+    &.active,
+    &:hover {
+      background: rgba(6, 182, 212, 0.12);
+      border-color: #06b6d4;
+      color: #06b6d4;
+    }
+  }
+  &.pill-success {
+    &.active,
+    &:hover {
+      background: rgba(16, 185, 129, 0.12);
+      border-color: #10b981;
+      color: #10b981;
+    }
+  }
+
+  &.pill-clear {
+    background: transparent;
+    border-color: var(--border-color);
+    color: var(--text-muted);
+    &:hover {
+      background: rgba(239, 68, 68, 0.08);
+      border-color: #ef4444;
+      color: #ef4444;
+    }
+  }
+}
+
+.pill-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.pill-count {
+  background: currentColor;
+  color: var(--bg-surface);
+  border-radius: 20px;
+  padding: 0 6px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  min-width: 18px;
+  text-align: center;
+  line-height: 1.6;
+}
+
+.status-pill:not(.active):not(:hover) .pill-count {
+  background: var(--border-color);
+  color: var(--text-muted);
 }
 
 // ── Low stock ─────────────────────────────────────────────────────────────────
@@ -574,7 +741,7 @@ watch(useSyncTick(), () => load());
   }
 }
 
-// ── Panel shared ──────────────────────────────────────────────────────────────
+// ── Panel ─────────────────────────────────────────────────────────────────────
 .panel {
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
@@ -597,6 +764,28 @@ watch(useSyncTick(), () => load());
   font-size: 0.875rem;
   font-weight: 650;
   color: var(--text-primary);
+}
+
+.panel-filter-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 20px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  margin-inline-start: 4px;
+
+  &.filter-badge-warning {
+    background: rgba(245, 158, 11, 0.12);
+    color: #f59e0b;
+  }
+  &.filter-badge-info {
+    background: rgba(6, 182, 212, 0.12);
+    color: #06b6d4;
+  }
+  &.filter-badge-success {
+    background: rgba(16, 185, 129, 0.12);
+    color: #10b981;
+  }
 }
 
 .panel-icon {
@@ -824,6 +1013,11 @@ watch(useSyncTick(), () => load());
 .badge-secondary {
   background: var(--bg-elevated);
   color: var(--text-muted);
+}
+
+// ── Utils ─────────────────────────────────────────────────────────────────────
+.mt-4 {
+  margin-top: 1rem;
 }
 
 // ── Animations ────────────────────────────────────────────────────────────────
