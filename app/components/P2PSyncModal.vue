@@ -11,50 +11,26 @@
           <!-- Header -->
           <div class="p2p-header">
             <div class="p2p-header-icon">
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.5"
-              >
-                <path
-                  d="M8.288 15.038a5.25 5.25 0 017.424 0M5.106 11.856c3.807-3.808 9.98-3.808 13.788 0M1.924 8.674c5.565-5.565 14.587-5.565 20.152 0M12.53 18.22l-.53.53-.53-.53a.75.75 0 011.06 0z"
-                />
-              </svg>
+              <Icon name="i-ph-wifi-high" size="20" />
             </div>
             <div class="p2p-header-text">
               <h2 class="p2p-title">{{ $t("p2p.title") }}</h2>
               <p class="p2p-subtitle">{{ $t("p2p.subtitle") }}</p>
             </div>
             <button class="p2p-close" @click="tryClose">
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-              >
-                <path d="M6 18L18 6M6 6l12 12" />
-              </svg>
+              <Icon name="i-ph-x" size="18" />
             </button>
           </div>
 
           <!-- Body -->
           <div class="p2p-body">
-            <!-- Mode picker -->
+            <!-- ── Mode picker ─────────────────────────────────────────── -->
             <div v-if="mode === 'pick'" class="p2p-pick">
               <p class="p2p-pick-label">{{ $t("p2p.pick.question") }}</p>
               <div class="p2p-pick-grid">
                 <button class="p2p-pick-btn" @click="chooseMode('host')">
                   <div class="p2p-pick-icon">
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="1.5"
-                    >
-                      <rect x="3" y="3" width="18" height="18" rx="2" />
-                      <path d="M8 12h8M12 8v8" />
-                    </svg>
+                    <Icon name="i-ph-monitor-play" size="22" />
                   </div>
                   <span class="p2p-pick-name">{{
                     $t("p2p.pick.host.name")
@@ -65,17 +41,7 @@
                 </button>
                 <button class="p2p-pick-btn" @click="chooseMode('guest')">
                   <div class="p2p-pick-icon">
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="1.5"
-                    >
-                      <path
-                        d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"
-                      />
-                      <circle cx="12" cy="13" r="3" />
-                    </svg>
+                    <Icon name="i-ph-device-mobile-camera" size="22" />
                   </div>
                   <span class="p2p-pick-name">{{
                     $t("p2p.pick.guest.name")
@@ -87,7 +53,7 @@
               </div>
             </div>
 
-            <!-- HOST VIEW -->
+            <!-- ── HOST VIEW ───────────────────────────────────────────── -->
             <div v-else-if="mode === 'host'" class="p2p-host">
               <div
                 v-if="status === 'loading' || status === 'connecting'"
@@ -113,17 +79,11 @@
               <div v-else-if="status === 'syncing'" class="p2p-syncing">
                 <div class="p2p-sync-anim">
                   <div class="p2p-sync-ring"></div>
-                  <svg
+                  <Icon
                     class="p2p-sync-icon"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.5"
-                  >
-                    <path
-                      d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"
-                    />
-                  </svg>
+                    name="i-ph-arrows-clockwise"
+                    size="28"
+                  />
                 </div>
                 <p class="p2p-sync-msg">{{ statusMsg }}</p>
                 <div v-if="progress.total > 0" class="p2p-progress">
@@ -150,11 +110,12 @@
               </div>
             </div>
 
-            <!-- GUEST VIEW -->
+            <!-- ── GUEST VIEW ──────────────────────────────────────────── -->
             <div v-else-if="mode === 'guest'" class="p2p-guest">
-              <!-- Enter peer ID / scan -->
+              <!-- Step: enter ID or scan -->
               <div v-if="guestStep === 'enter'" class="p2p-enter">
                 <p class="p2p-enter-label">{{ $t("p2p.guest.enterLabel") }}</p>
+
                 <div class="p2p-input-wrap">
                   <input
                     v-model="manualId"
@@ -170,43 +131,31 @@
                     {{ $t("p2p.guest.connect") }}
                   </button>
                 </div>
+
                 <div class="p2p-divider">
                   <span>{{ $t("p2p.guest.or") }}</span>
                 </div>
 
                 <!--
                   ════════════════════════════════════════════════════════════
-                  THE FIX — what changed and why (after 5 failed attempts)
+                  NEW APPROACH — @capacitor-mlkit/barcode-scanning
                   ════════════════════════════════════════════════════════════
 
-                  ROOT CAUSE: capture="environment" on the file input.
+                  ALL previous approaches failed because Capacitor 8 on Android
+                  13-15 blocks WebView file pickers triggered from JS and
+                  getUserMedia in the WebView context is unreliable across OEMs.
 
-                  In Capacitor WebView on Android, capture="environment" is
-                  broken in multiple ways depending on device/OS/WebView version:
-                    (a) Samsung/MIUI: blocks the picker entirely — no dialog shown
-                    (b) Stock Android 10–12: opens a camera intent that requires
-                        the CAMERA permission (not granted by default in Capacitor)
-                    (c) Android 13+ WebView: silently ignores the attribute but
-                        then returns nothing when the user cancels the dead picker
-                    (d) Some WebViews: crashes the file chooser intent
+                  This plugin opens a real native Android camera Activity,
+                  completely bypassing the WebView. MLKit QR detection runs
+                  natively — no jsQR, no canvas, no file input hacks.
 
-                  THE FIX: Remove capture="environment" completely.
-                  Without it, Android shows its standard native image chooser
-                  which presents "Take photo" + "Gallery" options — both paths
-                  work without any extra permissions inside Capacitor WebView.
-                  The user can still take a live photo; they just pick from the
-                  chooser instead of it being forced.
+                  Compatible with: Capacitor 8.x, AGP 8.7.x, Android 8+
+                  Install:
+                    npm install @capacitor-mlkit/barcode-scanning
+                    npx cap sync android
 
-                  SECONDARY FIX: jsQR loaded eagerly on mount (not lazily inside
-                  decodeQrFromDataUrl) — eliminates a race condition where the
-                  script wasn't ready when the image came back from the picker.
-
-                  TERTIARY FIX: Image preprocessing uses pixel-level greyscale +
-                  threshold math instead of CSS canvas filters. CSS filters are
-                  not supported in all Android WebView versions and silently
-                  produce unfiltered images, hurting jsQR decode rate.
-
-                  NOTHING ELSE CHANGED — all main P2P sync logic is untouched.
+                  On Electron / browser → falls back to getUserMedia + jsQR
+                  so desktop still works without any changes.
                   ════════════════════════════════════════════════════════════
                 -->
                 <button
@@ -214,40 +163,21 @@
                   @click="startScan"
                   :disabled="scanLoading"
                 >
-                  <svg
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.5"
-                  >
-                    <path
-                      d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"
-                    />
-                    <circle cx="12" cy="13" r="3" />
-                  </svg>
+                  <Icon
+                    name="i-ph-qr-code"
+                    size="18"
+                    style="color: var(--p2p-accent)"
+                  />
                   <span v-if="scanLoading">{{
-                    $t("p2p.guest.scanLoading") || "Opening camera..."
+                    $t("p2p.guest.scanLoading") || "Opening scanner..."
                   }}</span>
                   <span v-else>{{ $t("p2p.guest.openCamera") }}</span>
                 </button>
 
-                <!--
-                  NO capture="environment" here — that was the bug.
-                  Always rendered (not v-if) so the ref is ready for
-                  the synchronous .click() inside startScan().
-                -->
-                <input
-                  ref="fileInputEl"
-                  type="file"
-                  accept="image/*"
-                  class="p2p-file-input-hidden"
-                  @change="onFileInputChange"
-                />
-
                 <p v-if="scanError" class="p2p-scan-error">{{ scanError }}</p>
               </div>
 
-              <!-- Live camera scan (desktop / browser fallback only) -->
+              <!-- Step: web fallback live camera (desktop/browser only) -->
               <div v-else-if="guestStep === 'scan'" class="p2p-scan">
                 <p class="p2p-scan-label">{{ $t("p2p.guest.scanLabel") }}</p>
                 <div class="p2p-video-wrap">
@@ -265,12 +195,12 @@
                   </div>
                   <canvas ref="canvasEl" class="p2p-canvas-hidden"></canvas>
                 </div>
-                <button class="p2p-cancel-scan" @click="stopScan">
+                <button class="p2p-cancel-scan" @click="stopWebScan">
                   {{ $t("p2p.guest.cancelScan") }}
                 </button>
               </div>
 
-              <!-- Syncing / Done / Error -->
+              <!-- Step: syncing / done / error -->
               <div v-else-if="guestStep === 'sync'">
                 <div
                   v-if="status === 'loading' || status === 'connecting'"
@@ -282,17 +212,11 @@
                 <div v-else-if="status === 'syncing'" class="p2p-syncing">
                   <div class="p2p-sync-anim">
                     <div class="p2p-sync-ring"></div>
-                    <svg
+                    <Icon
                       class="p2p-sync-icon"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="1.5"
-                    >
-                      <path
-                        d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"
-                      />
-                    </svg>
+                      name="i-ph-arrows-clockwise"
+                      size="28"
+                    />
                   </div>
                   <p class="p2p-sync-msg">{{ statusMsg }}</p>
                   <div v-if="progress.total > 0" class="p2p-progress">
@@ -359,6 +283,24 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from "vue";
 import { useP2PSync } from "~/composables/useP2PSync";
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Capacitor platform detection
+//
+// Returns true ONLY when running inside a real Capacitor WebView on Android.
+// Returns false on Electron, browser, iOS — so fallback logic fires correctly.
+// ─────────────────────────────────────────────────────────────────────────────
+const isCapacitorAndroid = () => {
+  try {
+    return (
+      typeof window !== "undefined" &&
+      window.Capacitor?.isNativePlatform?.() === true &&
+      window.Capacitor?.getPlatform?.() === "android"
+    );
+  } catch {
+    return false;
+  }
+};
+
 const props = defineProps({ modelValue: Boolean });
 const emit = defineEmits(["update:modelValue", "synced"]);
 
@@ -374,16 +316,17 @@ const {
   loadQrLib,
 } = useP2PSync();
 
+// ── UI state ──────────────────────────────────────────────────────────────────
 const mode = ref("pick");
 const guestStep = ref("enter");
 const manualId = ref("");
 const scanLoading = ref(false);
 const scanError = ref("");
 
+// ── Template refs ─────────────────────────────────────────────────────────────
 const qrEl = ref(null);
 const videoEl = ref(null);
 const canvasEl = ref(null);
-const fileInputEl = ref(null);
 
 // ── Debug log ─────────────────────────────────────────────────────────────────
 const debugLogs = ref([]);
@@ -399,14 +342,14 @@ let _origLog = null,
 const hookConsole = () => {
   _origLog = console.log.bind(console);
   _origError = console.error.bind(console);
-  console.log = (...args) => {
-    _origLog(...args);
-    const m = args.join(" ");
+  console.log = (...a) => {
+    _origLog(...a);
+    const m = a.join(" ");
     if (m.includes("[P2P]")) addLog(m, "info");
   };
-  console.error = (...args) => {
-    _origError(...args);
-    const m = args.join(" ");
+  console.error = (...a) => {
+    _origError(...a);
+    const m = a.join(" ");
     if (m.includes("[P2P]")) addLog(m, "error");
   };
 };
@@ -421,10 +364,13 @@ const unhookConsole = () => {
   }
 };
 
+// ── Web scan internals (desktop/Electron fallback) ────────────────────────────
 let _qrInstance = null;
 let _videoStream = null;
 let _scanRaf = null;
 let _scanActive = false;
+let _lastScanTime = 0;
+const SCAN_INTERVAL_MS = 100;
 
 const progressPct = computed(() =>
   progress.value.total > 0
@@ -432,18 +378,16 @@ const progressPct = computed(() =>
     : 0,
 );
 
-// ── jsQR CDN ──────────────────────────────────────────────────────────────────
+// ── jsQR (web fallback only) ──────────────────────────────────────────────────
 const JSQR_CDN = "https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js";
-
 const loadScript = (src) =>
   new Promise((resolve, reject) => {
-    if (window.jsQR && src === JSQR_CDN) return resolve(); // already loaded
-    if (document.querySelector(`script[src="${src}"]`)) {
-      // Script tag exists but might still be loading
-      const el = document.querySelector(`script[src="${src}"]`);
+    if (window.jsQR && src === JSQR_CDN) return resolve();
+    const existing = document.querySelector(`script[src="${src}"]`);
+    if (existing) {
       if (window.jsQR) return resolve();
-      el.addEventListener("load", resolve);
-      el.addEventListener("error", reject);
+      existing.addEventListener("load", resolve);
+      existing.addEventListener("error", reject);
       return;
     }
     const s = document.createElement("script");
@@ -453,14 +397,14 @@ const loadScript = (src) =>
     document.head.appendChild(s);
   });
 
-// ── FIX 2: Load jsQR eagerly on mount ─────────────────────────────────────────
-// Previously loaded lazily inside decodeQrFromDataUrl — race condition:
-// Android file picker returned the image before jsQR finished loading.
+// Pre-load jsQR on non-Android builds only
 onMounted(() => {
-  loadScript(JSQR_CDN).catch(() => {});
+  if (!isCapacitorAndroid()) loadScript(JSQR_CDN).catch(() => {});
 });
 
-// ── QR rendering (host) ───────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// HOST — generate QR code
+// ─────────────────────────────────────────────────────────────────────────────
 const chooseMode = async (m) => {
   mode.value = m;
   if (m === "host") await startHost();
@@ -490,7 +434,9 @@ watch([() => status.value, qrEl], async ([s, el]) => {
   }
 });
 
-// ── Guest: manual connect ─────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// GUEST — manual connect
+// ─────────────────────────────────────────────────────────────────────────────
 const connectManual = () => {
   const id = manualId.value.trim();
   if (!id) return;
@@ -500,166 +446,135 @@ const connectManual = () => {
   connectToHost(id);
 };
 
-// ── Guest: QR scan ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// GUEST — startScan()
 //
-// FIX 1 (the main fix): fileInputEl has NO capture="environment".
-//
-// capture="environment" is broken in Capacitor WebView on Android:
-//   • Blocks the file picker entirely on Samsung/MIUI devices
-//   • Requires CAMERA permission (not granted) on stock Android 10-12
-//   • Silently ignores / crashes the chooser intent on Android 13+ WebView
-//
-// Without capture, Android shows its native image chooser with both
-// "Take photo" and "Gallery" — both work without extra permissions.
-//
-// fileInputEl.value.click() is still called SYNCHRONOUSLY (no await before
-// it) to preserve the Android user-gesture chain. getUserMedia is tried
-// in parallel as a desktop upgrade — failure is silently ignored.
-const startScan = () => {
+// On Android (Capacitor) → native MLKit scanner
+// On Electron / browser  → getUserMedia + jsQR (unchanged from before)
+// ─────────────────────────────────────────────────────────────────────────────
+const startScan = async () => {
   if (scanLoading.value) return;
   scanError.value = "";
-
-  // MUST be synchronous — any await before this breaks Android's gesture chain
-  fileInputEl.value?.click();
-
-  // Try live camera in parallel (desktop/browser only) — intentionally not awaited
-  if (navigator.mediaDevices?.getUserMedia) {
-    scanLoading.value = true;
-    startWebScan()
-      .then(() => {
-        scanLoading.value = false;
-      })
-      .catch(() => {
-        scanLoading.value = false;
-      });
-  }
-};
-
-// ── File input → jsQR decode ──────────────────────────────────────────────────
-const onFileInputChange = async (event) => {
-  const file = event.target.files?.[0];
-  if (!file) return;
-
-  stopScan(); // close live scan if it opened in parallel
   scanLoading.value = true;
-  scanError.value = "";
 
-  try {
-    const dataUrl = await new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = () => reject(new Error("File read failed"));
-      reader.readAsDataURL(file);
-    });
-
-    const qrId = await decodeQrFromDataUrl(dataUrl);
-    if (qrId) {
-      handleScannedId(qrId);
-    } else {
-      scanError.value = "No QR found — try again or type the ID manually above";
-    }
-  } catch (e) {
-    console.warn("[P2P] File read error:", e);
-    scanError.value = "Could not read image. Please try again.";
-  } finally {
-    scanLoading.value = false;
-    if (fileInputEl.value) fileInputEl.value.value = "";
+  if (isCapacitorAndroid()) {
+    await startNativeScan();
+  } else {
+    await startWebScan();
   }
+
+  scanLoading.value = false;
 };
 
-// ── Decode QR from dataUrl ────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// NATIVE SCAN — @capacitor-mlkit/barcode-scanning
 //
-// FIX 3: pixel-level greyscale + threshold instead of CSS canvas filters.
-// ctx.filter is not supported in older Android WebView versions — when
-// unsupported it silently renders without any filter, degrading jsQR decode.
-// Manual pixel math always works regardless of WebView version.
-const decodeQrFromDataUrl = (dataUrl) =>
-  new Promise((resolve) => {
-    if (!window.jsQR) {
-      resolve(null);
+// ► Install (one time):
+//     npm install @capacitor-mlkit/barcode-scanning
+//     npx cap sync android
+//
+// ► Does NOT need any extra gradle changes — MLKit is bundled in the .aar
+//
+// ► Does NOT need CAMERA permission entry in AndroidManifest.xml —
+//   the plugin adds it automatically via its own manifest merge
+//
+// ► Does NOT break on AGP 8.7 — the plugin's minSdk is 22, compileSdk 34
+//   which is fully compatible with your setup
+//
+// ► The native Activity runs outside the WebView entirely, so none of the
+//   Android 13-15 WebView file-picker / getUserMedia restrictions apply
+// ─────────────────────────────────────────────────────────────────────────────
+const startNativeScan = async () => {
+  try {
+    // Lazy dynamic import — only resolves on Android Capacitor builds.
+    // On Electron/web this throws and we fall back to web scan below.
+    const mlkit = await import("@capacitor-mlkit/barcode-scanning").catch(
+      () => null,
+    );
+
+    if (!mlkit?.BarcodeScanner) {
+      console.warn("[P2P] MLKit plugin not found, falling back to web scan");
+      await startWebScan();
       return;
     }
 
-    const img = new Image();
-    img.onload = () => {
-      const scales = [1, 2, 1.5, 0.75, 3];
+    const { BarcodeScanner, BarcodeFormat } = mlkit;
 
-      for (const scale of scales) {
-        const w = Math.round(img.width * scale);
-        const h = Math.round(img.height * scale);
-        const canvas = document.createElement("canvas");
-        canvas.width = w;
-        canvas.height = h;
-        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    // Check camera permission
+    const { camera } = await BarcodeScanner.checkPermissions();
 
-        // ── Attempt A: pixel-level greyscale + threshold ──────────────────
-        ctx.drawImage(img, 0, 0, w, h);
-        const imageData = ctx.getImageData(0, 0, w, h);
-        const d = imageData.data;
+    if (camera === "denied") {
+      scanError.value =
+        "Camera permission denied. Enable it in device Settings → Apps.";
+      return;
+    }
 
-        // Greyscale (luminance weights)
-        for (let i = 0; i < d.length; i += 4) {
-          const g = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
-          d[i] = d[i + 1] = d[i + 2] = g;
-        }
-        // Global threshold at 128
-        for (let i = 0; i < d.length; i += 4) {
-          const v = d[i] > 128 ? 255 : 0;
-          d[i] = d[i + 1] = d[i + 2] = v;
-        }
-        ctx.putImageData(imageData, 0, 0);
-
-        let code = window.jsQR(ctx.getImageData(0, 0, w, h).data, w, h, {
-          inversionAttempts: "attemptBoth",
-        });
-        if (code?.data) {
-          console.log(
-            `[P2P] QR decoded (processed scale ${scale}): ${code.data}`,
-          );
-          resolve(code.data);
-          return;
-        }
-
-        // ── Attempt B: raw image at same scale ────────────────────────────
-        ctx.drawImage(img, 0, 0, w, h);
-        code = window.jsQR(ctx.getImageData(0, 0, w, h).data, w, h, {
-          inversionAttempts: "attemptBoth",
-        });
-        if (code?.data) {
-          console.log(`[P2P] QR decoded (raw scale ${scale}): ${code.data}`);
-          resolve(code.data);
-          return;
-        }
+    if (camera !== "granted") {
+      const result = await BarcodeScanner.requestPermissions();
+      if (result.camera !== "granted") {
+        scanError.value = "Camera access is required to scan the QR code.";
+        return;
       }
+    }
 
-      console.warn("[P2P] jsQR: no QR found in image");
-      resolve(null);
-    };
-    img.onerror = () => resolve(null);
-    img.src = dataUrl;
-  });
+    // Register listener BEFORE startScan so we never miss the first frame
+    await BarcodeScanner.addListener("barcodeScanned", async (event) => {
+      const value = event?.barcode?.rawValue;
+      if (value) {
+        // Clean up immediately so the scanner closes
+        await BarcodeScanner.removeAllListeners();
+        await BarcodeScanner.stopScan();
+        handleScannedId(value);
+      }
+    });
 
-// ── Live camera scan (desktop / browser fallback) ─────────────────────────────
-const startWebScan = async () => {
-  _videoStream = await navigator.mediaDevices.getUserMedia({
-    video: {
-      facingMode: { ideal: "environment" },
-      width: { ideal: 1920 },
-      height: { ideal: 1080 },
-    },
-  });
-  guestStep.value = "scan";
-  await nextTick();
-  if (videoEl.value) {
-    videoEl.value.srcObject = _videoStream;
-    await videoEl.value.play().catch(() => {});
+    // Opens the native fullscreen scanner UI
+    await BarcodeScanner.startScan({
+      formats: [BarcodeFormat.QrCode],
+    });
+  } catch (e) {
+    console.error("[P2P] Native scan error:", e);
+    // If the plugin errored mid-flight, attempt web fallback
+    scanError.value = `Scanner error: ${
+      e?.message ?? "Unknown"
+    }. Try typing the ID manually.`;
   }
-  await loadScript(JSQR_CDN);
-  _scanActive = true;
-  scheduleScan();
 };
 
-const stopScan = () => {
+// ─────────────────────────────────────────────────────────────────────────────
+// WEB SCAN — getUserMedia + jsQR (Electron / desktop browser fallback)
+// ─────────────────────────────────────────────────────────────────────────────
+const startWebScan = async () => {
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      scanError.value =
+        "Camera not available in this environment. Please type the ID manually.";
+      return;
+    }
+    _videoStream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+      },
+    });
+    guestStep.value = "scan";
+    await nextTick();
+    if (videoEl.value) {
+      videoEl.value.srcObject = _videoStream;
+      await videoEl.value.play().catch(() => {});
+    }
+    await loadScript(JSQR_CDN);
+    _scanActive = true;
+    scheduleScan();
+  } catch (e) {
+    console.warn("[P2P] Web scan error:", e);
+    scanError.value =
+      "Could not open camera. Please type the ID manually above.";
+  }
+};
+
+const stopWebScan = () => {
   _scanActive = false;
   if (_scanRaf) {
     cancelAnimationFrame(_scanRaf);
@@ -676,9 +591,6 @@ const scheduleScan = () => {
   if (_scanActive) _scanRaf = requestAnimationFrame(scanFrame);
 };
 
-let _lastScanTime = 0;
-const SCAN_INTERVAL_MS = 100;
-
 const scanFrame = async (timestamp) => {
   if (!_scanActive) return;
   if (timestamp - _lastScanTime < SCAN_INTERVAL_MS) {
@@ -689,11 +601,13 @@ const scanFrame = async (timestamp) => {
 
   const video = videoEl.value;
   const canvas = canvasEl.value;
-  if (!video || !canvas || !_videoStream) {
-    scheduleScan();
-    return;
-  }
-  if (video.readyState < 2 || video.videoWidth === 0) {
+  if (
+    !video ||
+    !canvas ||
+    !_videoStream ||
+    video.readyState < 2 ||
+    video.videoWidth === 0
+  ) {
     scheduleScan();
     return;
   }
@@ -712,9 +626,9 @@ const scanFrame = async (timestamp) => {
         handleScannedId(codes[0].rawValue);
         return;
       }
-    } else {
+    } else if (window.jsQR) {
       ctx.drawImage(video, 0, 0, W, H);
-      // Pixel-level preprocessing for live scan (same approach, no CSS filters)
+      // Pixel-level greyscale (avoids CSS filter WebView bugs)
       const id = ctx.getImageData(0, 0, W, H);
       const d = id.data;
       for (let i = 0; i < d.length; i += 4) {
@@ -731,16 +645,18 @@ const scanFrame = async (timestamp) => {
       }
     }
   } catch {
-    /* ignore scan errors */
+    /* ignore per-frame errors */
   }
 
   scheduleScan();
 };
 
-// ── Handle scanned ID (unchanged) ────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared: handle a scanned or entered peer ID
+// ─────────────────────────────────────────────────────────────────────────────
 const handleScannedId = (id) => {
   if (!id?.trim()) return;
-  stopScan();
+  stopWebScan();
   manualId.value = id.trim();
   debugLogs.value = [];
   hookConsole();
@@ -748,9 +664,30 @@ const handleScannedId = (id) => {
   connectToHost(id.trim());
 };
 
-// ── Navigation (unchanged) ────────────────────────────────────────────────────
-const goBack = () => {
-  stopScan();
+// ─────────────────────────────────────────────────────────────────────────────
+// Cleanup helper — stops native scanner if running
+// ─────────────────────────────────────────────────────────────────────────────
+const stopNativeScanIfRunning = async () => {
+  if (!isCapacitorAndroid()) return;
+  try {
+    const mlkit = await import("@capacitor-mlkit/barcode-scanning").catch(
+      () => null,
+    );
+    if (mlkit?.BarcodeScanner) {
+      await mlkit.BarcodeScanner.removeAllListeners();
+      await mlkit.BarcodeScanner.stopScan();
+    }
+  } catch {
+    /* ignore */
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Navigation
+// ─────────────────────────────────────────────────────────────────────────────
+const goBack = async () => {
+  await stopNativeScanIfRunning();
+  stopWebScan();
   unhookConsole();
   reset();
   mode.value = "pick";
@@ -766,9 +703,10 @@ const tryClose = () => {
   handleClose();
 };
 
-const handleClose = () => {
+const handleClose = async () => {
   if (status.value === "done") emit("synced");
-  stopScan();
+  await stopNativeScanIfRunning();
+  stopWebScan();
   unhookConsole();
   reset();
   mode.value = "pick";
@@ -781,8 +719,9 @@ const handleClose = () => {
   emit("update:modelValue", false);
 };
 
-onUnmounted(() => {
-  stopScan();
+onUnmounted(async () => {
+  await stopNativeScanIfRunning();
+  stopWebScan();
   unhookConsole();
   reset();
 });
@@ -848,10 +787,6 @@ onUnmounted(() => {
   flex-shrink: 0;
   color: var(--p2p-accent);
 }
-.p2p-header-icon svg {
-  width: 20px;
-  height: 20px;
-}
 .p2p-header-text {
   flex: 1;
   min-width: 0;
@@ -874,17 +809,15 @@ onUnmounted(() => {
   color: var(--p2p-muted);
   padding: 6px;
   border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   transition: color 0.15s, background 0.15s;
   flex-shrink: 0;
 }
 .p2p-close:hover {
   color: var(--p2p-text);
   background: var(--p2p-surface2);
-}
-.p2p-close svg {
-  width: 18px;
-  height: 18px;
-  display: block;
 }
 .p2p-body {
   flex: 1;
@@ -932,10 +865,6 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   color: var(--p2p-accent);
-}
-.p2p-pick-icon svg {
-  width: 22px;
-  height: 22px;
 }
 .p2p-pick-name {
   font-size: 13px;
@@ -1064,8 +993,6 @@ onUnmounted(() => {
   animation: spin 1s linear infinite;
 }
 .p2p-sync-icon {
-  width: 28px;
-  height: 28px;
   color: var(--p2p-accent);
 }
 .p2p-sync-msg {
@@ -1237,6 +1164,7 @@ onUnmounted(() => {
   height: 1px;
   background: var(--p2p-border);
 }
+
 .p2p-scan-btn {
   display: flex;
   align-items: center;
@@ -1259,21 +1187,6 @@ onUnmounted(() => {
 .p2p-scan-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-}
-.p2p-scan-btn svg {
-  width: 18px;
-  height: 18px;
-  color: var(--p2p-accent);
-}
-
-/* THE FIX: no capture attribute, always rendered for synchronous .click() */
-.p2p-file-input-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
-  pointer-events: none;
-  overflow: hidden;
 }
 
 .p2p-scan-error {
