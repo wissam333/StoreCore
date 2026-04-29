@@ -496,7 +496,7 @@ const startNativeScan = async () => {
       console.warn("[P2P] MLKit plugin not found, falling back to web scan");
       await startWebScan();
       return;
-    }
+    }   
 
     const { BarcodeScanner, BarcodeFormat } = mlkit;
 
