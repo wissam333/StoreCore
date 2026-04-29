@@ -96,51 +96,98 @@ export const useP2PSync = () => {
     }
   };
 
+  // In useP2PSync.js — replace collectLocalData with this:
   const collectLocalData = async () => {
+    const dump = {};
+    const changedFieldsMap = {}; // { "table:rowId": ["field1", "field2"] }
+
     if (isElectron()) {
-      const dump = {};
       for (const table of ALL_TABLES) {
         try {
-          // order_payments needs special handling in Electron — use getRawTable
           const r = await window.store.getRawTable(table);
           dump[table] = r.ok ? r.data : [];
-          console.log(
-            `[P2P] Electron dump ${table}: ${dump[table].length} rows`,
-          );
         } catch (e) {
-          console.warn(`[P2P] Electron dump failed [${table}]:`, e?.message);
           dump[table] = [];
         }
       }
-      return dump;
+      // Get sync_queue to know which fields were locally changed
+      try {
+        const q = await window.store.getSyncQueue();
+        if (q.ok) {
+          for (const entry of q.data) {
+            const key = `${entry.table_name}:${entry.row_id}`;
+            const fields = entry.changed_fields
+              ? JSON.parse(entry.changed_fields)
+              : null;
+            if (fields) {
+              if (!changedFieldsMap[key]) changedFieldsMap[key] = new Set();
+              for (const f of fields) changedFieldsMap[key].add(f);
+            }
+          }
+          // Convert Sets to arrays
+          for (const key of Object.keys(changedFieldsMap)) {
+            changedFieldsMap[key] = [...changedFieldsMap[key]];
+          }
+        }
+      } catch (e) {
+        console.warn("[P2P] Could not collect changedFieldsMap:", e?.message);
+      }
+      return { dump, changedFieldsMap };
     }
 
     const { initMobileSchema } = await import("./useMobileSchema");
     await initMobileSchema();
     const { getMobileDb } = await import("./useMobileDb");
     const db = await getMobileDb();
-    const dump = {};
+
     for (const table of ALL_TABLES) {
       dump[table] = await dumpTable(db, table);
-      console.log(`[P2P] Mobile dump ${table}: ${dump[table].length} rows`);
     }
-    return dump;
+
+    // Get changed_fields from sync_queue
+    try {
+      const qRows =
+        (
+          await db.query(
+            `SELECT table_name, row_id, changed_fields FROM sync_queue WHERE synced_at IS NULL AND (retry_count IS NULL OR retry_count < 5)`,
+          )
+        ).values ?? [];
+      for (const entry of qRows) {
+        const key = `${entry.table_name}:${entry.row_id}`;
+        const fields = entry.changed_fields
+          ? JSON.parse(entry.changed_fields)
+          : null;
+        if (fields) {
+          if (!changedFieldsMap[key]) changedFieldsMap[key] = [];
+          for (const f of fields) {
+            if (!changedFieldsMap[key].includes(f))
+              changedFieldsMap[key].push(f);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("[P2P] Could not collect changedFieldsMap:", e?.message);
+    }
+
+    return { dump, changedFieldsMap };
   };
 
-  const applyRemoteDump = async (dump) => {
+  // Replace applyRemoteDump signature:
+  const applyRemoteDump = async (dump, changedFieldsMap = {}) => {
     const totalRows = APPLY_ORDER.reduce(
       (s, t) => s + (dump[t]?.length ?? 0),
       0,
     );
     let done = 0;
     progress.value = { current: 0, total: totalRows };
-    console.log(`[P2P] Applying ${totalRows} remote rows`);
 
     if (isElectron()) {
       for (const table of APPLY_ORDER) {
         for (const row of dump[table] ?? []) {
           try {
-            await window.store.applyRemoteRow({ table, row });
+            const key = `${table}:${row.id}`;
+            const changedFields = changedFieldsMap[key] ?? null;
+            await window.store.applyRemoteRow({ table, row, changedFields });
           } catch (e) {
             console.error(
               `[P2P] Electron applyRemoteRow [${table}]:`,
@@ -161,7 +208,9 @@ export const useP2PSync = () => {
     for (const table of APPLY_ORDER) {
       for (const row of dump[table] ?? []) {
         try {
-          await store.applyRemoteRow({ table, row });
+          const key = `${table}:${row.id}`;
+          const changedFields = changedFieldsMap[key] ?? null;
+          await store.applyRemoteRow({ table, row, changedFields });
         } catch (e) {
           console.error(
             `[P2P] applyRemoteRow [${table}] ${row?.id}:`,
@@ -173,12 +222,12 @@ export const useP2PSync = () => {
     }
 
     await flushIfMobile();
-    console.log(`[P2P] Applied and persisted ${totalRows} rows`);
   };
 
+  // Replace sendDump:
   const sendDump = async (conn) => {
     setState("syncing", "Collecting local data…");
-    const dump = await collectLocalData();
+    const { dump, changedFieldsMap } = await collectLocalData();
     const CHUNK_SIZE = 50;
 
     setState("syncing", "Sending data…");
@@ -197,9 +246,13 @@ export const useP2PSync = () => {
         await new Promise((r) => setTimeout(r, 20));
       }
     }
+
+    // Send the changed fields map so receiver knows what was intentionally edited
+    conn.send({ type: "CHANGED_FIELDS_MAP", map: changedFieldsMap });
+
     await new Promise((r) => setTimeout(r, 100));
     conn.send({ type: "DONE" });
-    console.log(`[P2P] Sent ${totalRows} rows`);
+    console.log(`[P2P] Sent ${totalRows} rows + changedFieldsMap`);
   };
 
   const loadPeer = async () => {
@@ -229,6 +282,7 @@ export const useP2PSync = () => {
 
         const enqueue = makeQueue();
         let buffer = {};
+        let remoteChangedFieldsMap = {};
 
         conn.on("data", (msg) => {
           enqueue(async () => {
@@ -255,19 +309,17 @@ export const useP2PSync = () => {
               buffer[msg.table].push(...msg.rows);
             }
 
+            if (msg.type === "CHANGED_FIELDS_MAP") {
+              remoteChangedFieldsMap = msg.map ?? {};
+            }
+
             if (msg.type === "DONE") {
-              const totalBuffered = Object.values(buffer).reduce(
-                (s, r) => s + r.length,
-                0,
-              );
-              console.log(
-                `[P2P] Host received DONE — buffer has ${totalBuffered} rows`,
-              );
               setState("syncing", "Merging guest data…");
               const toApply = buffer;
+              const toApplyMap = remoteChangedFieldsMap;
               buffer = {};
-              await applyRemoteDump(toApply);
-              if (isElectron()) await flushIfMobile();
+              remoteChangedFieldsMap = {};
+              await applyRemoteDump(toApply, toApplyMap); // pass the map
               conn.send({ type: "ACK" });
               await new Promise((r) => setTimeout(r, 300));
               useSyncTick().value++;
@@ -313,6 +365,7 @@ export const useP2PSync = () => {
 
         const enqueue = makeQueue();
         let buffer = {};
+        let remoteChangedFieldsMap = {};
 
         _conn.on("data", (msg) => {
           enqueue(async () => {
@@ -336,26 +389,20 @@ export const useP2PSync = () => {
               buffer[msg.table].push(...msg.rows);
             }
 
-            if (msg.type === "DONE") {
-              const totalBuffered = Object.values(buffer).reduce(
-                (s, rows) => s + rows.length,
-                0,
-              );
-              console.log(
-                `[P2P] Guest received DONE — buffer has ${totalBuffered} rows across ${
-                  Object.keys(buffer).length
-                } tables`,
-              );
+            if (msg.type === "CHANGED_FIELDS_MAP") {
+              remoteChangedFieldsMap = msg.map ?? {};
+            }
 
+            if (msg.type === "DONE") {
               setState("syncing", "Merging host data…");
               const toApply = buffer;
+              const toApplyMap = remoteChangedFieldsMap;
               buffer = {};
-              await applyRemoteDump(toApply);
-              if (isElectron()) await flushIfMobile();
+              remoteChangedFieldsMap = {};
+              await applyRemoteDump(toApply, toApplyMap); // pass the map
 
               await new Promise((r) => setTimeout(r, 300));
               useSyncTick().value++;
-
               await sendDump(_conn);
             }
 

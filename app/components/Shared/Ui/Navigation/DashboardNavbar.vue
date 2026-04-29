@@ -333,11 +333,12 @@ const currentUser = computed(
 );
 
 const computedUserName = computed(() => {
-  const info = currentUser.value;
-  if (!info) return props.user?.name || "";
-  const first = info.firstName || "";
-  const last = info.lastName || "";
-  return `${first} ${last}`.trim() || props.user?.full_name || "";
+  // const info = currentUser.value;
+  // if (!info) return props.user?.name || "";
+  // const first = info.firstName || "";
+  // const last = info.lastName || "";
+  // return `${first} ${last}`.trim() || props.user?.full_name || "";
+  return "Admin";
 });
 
 const computedUserRole = computed(() => {

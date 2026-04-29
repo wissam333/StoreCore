@@ -1,5 +1,4 @@
 <!-- store-app/pages/dashboard/orders/new.vue -->
-<!-- New order (and edit when route.params.id exists) -->
 <template>
   <div>
     <SharedUiHeaderPage
@@ -24,6 +23,10 @@
             <span v-if="!selectedCustomer" class="optional-badge">{{
               $t("optional")
             }}</span>
+            <span v-else class="selected-badge">
+              <Icon name="mdi:check-circle" size="12" />
+              {{ selectedCustomer.name }}
+            </span>
           </div>
 
           <SharedUiFormCombobox
@@ -42,13 +45,15 @@
           />
         </div>
 
-        <!-- Items card -->
+        <!-- Items — empty state -->
         <div v-if="!items.length" class="items-empty">
-          <Icon name="mdi:cart-outline" size="48" />
+          <div class="empty-icon-wrap">
+            <Icon name="mdi:cart-outline" size="40" />
+          </div>
           <p>{{ $t("noItemsYet") }}</p>
           <SharedUiButtonBase
             size="sm"
-            variant="outline"
+            variant="primary"
             icon-left="mdi:plus"
             @click="addItem"
           >
@@ -56,68 +61,143 @@
           </SharedUiButtonBase>
         </div>
 
+        <!-- Items list -->
         <div v-else class="items-list">
-          <div v-for="(item, idx) in items" :key="idx" class="item-card">
-            <!-- Row 1: Product select + delete -->
-            <div class="item-top">
-              <div class="item-product">
-                <SharedUiFormBaseSelect
-                  v-model="item.product_id"
-                  :options="productOptions"
-                  :placeholder="$t('selectProduct')"
-                  searchable
-                  @change="onProductSelect(idx, $event)"
-                />
-                <span
-                  v-if="item._maxStock !== null"
-                  class="stock-tag"
-                  :class="item._maxStock === 0 ? 'stock-out' : ''"
-                >
-                  <Icon name="mdi:cube-outline" size="12" />
-                  {{ $t("inStock") }}: {{ item._maxStock }}
-                </span>
+          <TransitionGroup name="item-anim">
+            <div
+              v-for="(item, idx) in items"
+              :key="item._key"
+              class="item-card"
+            >
+              <!-- Row 1: Product select + delete -->
+              <div class="item-top">
+                <div class="item-product">
+                  <SharedUiFormBaseSelect
+                    v-model="item.product_id"
+                    :options="productOptions"
+                    :placeholder="$t('selectProduct')"
+                    searchable
+                    @change="onProductSelect(idx, $event)"
+                  />
+                  <div class="item-tags">
+                    <span
+                      v-if="item._maxStock !== null"
+                      class="stock-tag"
+                      :class="
+                        item._maxStock === 0
+                          ? 'stock-out'
+                          : item._maxStock <= 5
+                          ? 'stock-low'
+                          : ''
+                      "
+                    >
+                      <Icon
+                        :name="
+                          item._maxStock === 0
+                            ? 'mdi:close-circle'
+                            : 'mdi:cube-outline'
+                        "
+                        size="11"
+                      />
+                      {{
+                        item._maxStock === 0
+                          ? $t("outOfStock")
+                          : `${$t("inStock")}: ${item._maxStock}`
+                      }}
+                    </span>
+                    <span v-if="item._maxStock === 0" class="error-tag">
+                      {{ $t("cannotAddOutOfStock") }}
+                    </span>
+                    <span
+                      v-if="
+                        item.quantity > item._maxStock &&
+                        item._maxStock !== null &&
+                        item._maxStock > 0
+                      "
+                      class="warn-tag"
+                    >
+                      <Icon name="mdi:alert" size="11" />
+                      {{ $t("exceedsStock") }}
+                    </span>
+                  </div>
+                </div>
+                <button class="del-btn" @click="removeItem(idx)">
+                  <Icon name="mdi:trash-can-outline" size="16" />
+                </button>
               </div>
-              <button class="del-btn" @click="items.splice(idx, 1)">
-                <Icon name="mdi:trash-can-outline" size="16" />
-              </button>
+
+              <!-- Row 2: Price · Currency · Qty · Total -->
+              <div class="item-bottom">
+                <div class="item-field">
+                  <label class="field-label">{{ $t("price") }}</label>
+                  <SharedUiFormBaseInput
+                    v-model.number="item.sell_price_at_sale"
+                    type="number"
+                    min="0"
+                    step="any"
+                    :class="{ 'input-error': item.sell_price_at_sale <= 0 }"
+                  />
+                </div>
+
+                <div class="item-field item-field--cur">
+                  <label class="field-label">{{ $t("cur") }}</label>
+                  <SharedUiFormBaseSelect
+                    v-model="item.currency_at_sale"
+                    :options="currencyOpts"
+                  />
+                </div>
+
+                <div class="item-field item-field--qty">
+                  <label class="field-label">{{ $t("qty") }}</label>
+                  <div class="qty-control">
+                    <button
+                      class="qty-btn"
+                      :disabled="item.quantity <= 1"
+                      @click="
+                        item.quantity = Math.max(1, (item.quantity || 1) - 1)
+                      "
+                    >
+                      <Icon name="mdi:minus" size="14" />
+                    </button>
+                    <SharedUiFormBaseInput
+                      v-model.number="item.quantity"
+                      type="number"
+                      min="1"
+                      :max="item._maxStock > 0 ? item._maxStock : undefined"
+                      class="qty-input"
+                      @blur="clampQty(idx)"
+                    />
+                    <button
+                      class="qty-btn"
+                      :disabled="
+                        item._maxStock !== null &&
+                        item.quantity >= item._maxStock
+                      "
+                      @click="
+                        item.quantity = Math.min(
+                          item._maxStock > 0 ? item._maxStock : 9999,
+                          (item.quantity || 1) + 1,
+                        )
+                      "
+                    >
+                      <Icon name="mdi:plus" size="14" />
+                    </button>
+                  </div>
+                </div>
+
+                <div class="item-total">
+                  <label class="field-label">{{ $t("lineTotal") }}</label>
+                  <strong>{{ fmtSP(lineTotalSP(item)) }}</strong>
+                </div>
+              </div>
             </div>
+          </TransitionGroup>
 
-            <!-- Row 2: Price · Currency · Qty · Total -->
-            <div class="item-bottom">
-              <div class="item-field">
-                <label class="field-label">{{ $t("price") }}</label>
-                <SharedUiFormBaseInput
-                  v-model.number="item.sell_price_at_sale"
-                  type="number"
-                  min="0"
-                  step="any"
-                />
-              </div>
-
-              <div class="item-field item-field--cur">
-                <label class="field-label">{{ $t("cur") }}</label>
-                <SharedUiFormBaseSelect
-                  v-model="item.currency_at_sale"
-                  :options="currencyOpts"
-                />
-              </div>
-
-              <div class="item-field item-field--qty">
-                <label class="field-label">{{ $t("qty") }}</label>
-                <SharedUiFormBaseInput
-                  v-model.number="item.quantity"
-                  type="number"
-                  min="1"
-                  :max="item._maxStock || undefined"
-                />
-              </div>
-
-              <div class="item-total">
-                <label class="field-label">{{ $t("lineTotal") }}</label>
-                <strong>{{ fmtSP(lineTotalSP(item)) }}</strong>
-              </div>
-            </div>
-          </div>
+          <!-- Add more button inside list -->
+          <button class="add-item-btn" @click="addItem">
+            <Icon name="mdi:plus" size="16" />
+            {{ $t("addItem") }}
+          </button>
         </div>
 
         <!-- Notes -->
@@ -139,45 +219,45 @@
             <h4>{{ $t("orderSummary") }}</h4>
           </div>
 
+          <!-- Item count -->
+          <div v-if="items.length" class="summary-items-count">
+            <Icon name="mdi:cart-outline" size="14" />
+            {{ items.length }} {{ $t("items") }} · {{ totalQty }}
+            {{ $t("units") }}
+          </div>
+
           <!-- Totals -->
           <div class="totals-block">
-            <div class="total-line">
-              <span>{{ $t("subtotal") }}</span>
-              <strong>{{ fmtSP(grandTotalSP) }}</strong>
+            <div
+              v-for="item in items"
+              :key="item._key"
+              class="line-item-summary"
+            >
+              <span class="lis-name">{{
+                item.product_name || $t("product")
+              }}</span>
+              <span class="lis-val">{{ fmtSP(lineTotalSP(item)) }}</span>
             </div>
             <div class="total-line total-line--grand">
               <span>{{ $t("total") }}</span>
-              <strong class="grand-val">{{ fmtDisplay(grandTotalSP) }}</strong>
+              <strong class="grand-val">{{ fmtSP(grandTotalSP) }}</strong>
             </div>
           </div>
 
-          <!-- Payment -->
-          <div class="payment-block">
-            <SharedUiFormBaseInput
-              v-model.number="paidAmount"
-              type="number"
-              :label="$t('paidAmount')"
-              min="0"
-              step="any"
-            />
-            <SharedUiFormBaseSelect
-              v-model="displayCurrency"
-              :options="currencyOpts"
-              :label="$t('paidCurrency')"
-            />
-
-            <!-- Status badge -->
-            <div class="status-row">
-              <span class="status-key">{{ $t("status") }}:</span>
-              <span class="badge" :class="statusClass(previewStatus)">
-                {{ $t("order." + previewStatus) }}
-              </span>
+          <!-- Info box: payment happens after -->
+          <div class="payment-info-box">
+            <Icon name="mdi:information-outline" size="16" />
+            <div class="payment-info-text">
+              <strong>{{ $t("paymentAfterCreate") }}</strong>
+              <span>{{ $t("paymentAfterCreateDesc") }}</span>
             </div>
+          </div>
 
-            <!-- Remaining -->
-            <div v-if="previewStatus !== 'paid'" class="remaining-row">
-              <Icon name="mdi:clock-alert-outline" size="14" />
-              {{ $t("remaining") }}: <strong>{{ fmtSP(remainingSP) }}</strong>
+          <!-- Validation errors -->
+          <div v-if="validationErrors.length" class="validation-errors">
+            <div v-for="err in validationErrors" :key="err" class="val-error">
+              <Icon name="mdi:alert-circle-outline" size="13" />
+              {{ err }}
             </div>
           </div>
 
@@ -186,11 +266,15 @@
             size="lg"
             icon-left="mdi:content-save-outline"
             :loading="saving"
-            :disabled="!items.length"
+            :disabled="!canSave"
             @click="save"
           >
             {{ isEdit ? $t("saveChanges") : $t("createOrder") }}
           </SharedUiButtonBase>
+
+          <div v-if="!items.length" class="save-hint">
+            {{ $t("addItemsFirst") }}
+          </div>
         </div>
       </div>
     </div>
@@ -223,13 +307,13 @@ const isEdit = computed(
   () => !!route.params.id && route.path.includes("/edit"),
 );
 
-// ── Currency ─────────────────────────────────────────────────────────────────
+// ── Currency ──────────────────────────────────────────────────────────────────
 const currencyOpts = [
   { label: "SP (ل.س)", value: "SP" },
   { label: "USD ($)", value: "USD" },
 ];
 
-// ── Customer combobox state ───────────────────────────────────────────────────
+// ── Customer ──────────────────────────────────────────────────────────────────
 const customerSearch = ref("");
 const customerSuggestions = ref([]);
 const customerLoading = ref(false);
@@ -251,7 +335,6 @@ const onCustomerSearch = (val) => {
   }, 250);
 };
 
-// Called when user clicks "Create: <name>"
 const onCreateCustomer = async (name) => {
   const r = await findOrCreateCustomer(name);
   if (r.ok) {
@@ -273,10 +356,12 @@ const productOptions = computed(() =>
 );
 
 // ── Items ─────────────────────────────────────────────────────────────────────
+let _keyCounter = 0;
 const items = ref([]);
 
 const addItem = () =>
   items.value.push({
+    _key: ++_keyCounter,
     product_id: null,
     product_name: "",
     quantity: 1,
@@ -284,6 +369,8 @@ const addItem = () =>
     currency_at_sale: "SP",
     _maxStock: null,
   });
+
+const removeItem = (idx) => items.value.splice(idx, 1);
 
 const onProductSelect = (idx, productId) => {
   const p = allProducts.value.find((x) => x.id === productId);
@@ -293,6 +380,18 @@ const onProductSelect = (idx, productId) => {
   item.sell_price_at_sale = p.sell_price;
   item.currency_at_sale = p.currency;
   item._maxStock = p.stock;
+  // Reset qty to 1, but if out of stock set to 0 so validation catches it
+  item.quantity = p.stock > 0 ? 1 : 0;
+};
+
+// Clamp qty on blur — can't exceed stock, can't be < 1
+const clampQty = (idx) => {
+  const item = items.value[idx];
+  const max = item._maxStock;
+  item.quantity = Math.max(
+    1,
+    Math.min(item.quantity || 1, max > 0 ? max : 9999),
+  );
 };
 
 // ── Totals ────────────────────────────────────────────────────────────────────
@@ -303,44 +402,50 @@ const grandTotalSP = computed(() =>
   items.value.reduce((s, i) => s + lineTotalSP(i), 0),
 );
 
-const fmtDisplay = (sp) =>
-  reportCurrency.value === "USD"
-    ? "$" + (sp / dollarRate.value).toFixed(2)
-    : sp.toLocaleString("en-us", { maximumFractionDigits: 0 }) + " ل.س";
-
-// ── Payment ───────────────────────────────────────────────────────────────────
-const paidAmount = ref(0);
-const displayCurrency = ref("SP");
-const orderNotes = ref("");
-
-const remainingSP = computed(() =>
-  Math.max(
-    0,
-    grandTotalSP.value - toSP(paidAmount.value, displayCurrency.value),
-  ),
+const totalQty = computed(() =>
+  items.value.reduce((s, i) => s + (i.quantity || 0), 0),
 );
 
-const previewStatus = computed(() => {
-  const paidSP = toSP(paidAmount.value, displayCurrency.value);
-  if (paidSP <= 0) return "pending";
-  if (paidSP >= grandTotalSP.value - 0.001) return "paid";
-  return "partly_paid";
+// ── Validation ────────────────────────────────────────────────────────────────
+const validationErrors = computed(() => {
+  const errs = [];
+  if (!items.value.length) return errs;
+
+  const hasNoProduct = items.value.some((i) => !i.product_id);
+  if (hasNoProduct) errs.push($t("selectProductForAllItems"));
+
+  const hasZeroQty = items.value.some((i) => !i.quantity || i.quantity < 1);
+  if (hasZeroQty) errs.push($t("qtyMustBeAtLeastOne"));
+
+  const hasOutOfStock = items.value.some(
+    (i) => i._maxStock !== null && i._maxStock === 0,
+  );
+  if (hasOutOfStock) errs.push($t("removeOutOfStockItems"));
+
+  const hasExceedsStock = items.value.some(
+    (i) => i._maxStock !== null && i._maxStock > 0 && i.quantity > i._maxStock,
+  );
+  if (hasExceedsStock) errs.push($t("someItemsExceedStock"));
+
+  const hasZeroPrice = items.value.some(
+    (i) => i.product_id && i.sell_price_at_sale <= 0,
+  );
+  if (hasZeroPrice) errs.push($t("priceCannotBeZero"));
+
+  return errs;
 });
 
-const statusClass = (s) =>
-  ({
-    pending: "badge-warning",
-    partly_paid: "badge-info",
-    paid: "badge-success",
-  }[s] ?? "");
+const canSave = computed(
+  () => items.value.length > 0 && validationErrors.value.length === 0,
+);
 
 // ── Save ──────────────────────────────────────────────────────────────────────
 const saving = ref(false);
+const orderNotes = ref("");
 
 const save = async () => {
-  if (!items.value.length) return;
+  if (!canSave.value) return;
 
-  // If user typed a name but never clicked a suggestion — auto-create
   if (!selectedCustomer.value && customerSearch.value.trim()) {
     await onCreateCustomer(customerSearch.value.trim());
   }
@@ -351,17 +456,17 @@ const save = async () => {
       id: isEdit.value ? route.params.id : undefined,
       customer_id: selectedCustomer.value?.id ?? null,
       order_date: new Date().toISOString(),
-      paid_amount: paidAmount.value,
-      display_currency: displayCurrency.value,
+      // No paid_amount on create — payment is added after via the detail page
+      paid_amount: 0,
+      display_currency: "SP",
       notes: orderNotes.value,
     },
     items: items.value.map((i) => ({
       product_id: i.product_id,
       product_name:
-        i.product_name || i.product_id
-          ? allProducts.value.find((p) => p.id === i.product_id)?.name ||
-            "Unknown"
-          : "Unknown",
+        i.product_name ||
+        allProducts.value.find((p) => p.id === i.product_id)?.name ||
+        "Unknown",
       quantity: i.quantity,
       sell_price_at_sale: i.sell_price_at_sale,
       currency_at_sale: i.currency_at_sale,
@@ -383,15 +488,13 @@ const loadEdit = async () => {
   const r = await getOrderById(route.params.id);
   if (!r.ok) return;
   const o = r.data;
-  // Restore customer — use both id and name so chip shows correctly
   if (o.customer_id) {
     selectedCustomer.value = { id: o.customer_id, name: o.customer_name ?? "" };
     customerSearch.value = o.customer_name ?? "";
   }
-  paidAmount.value = o.paid_amount;
-  displayCurrency.value = o.display_currency;
   orderNotes.value = o.notes ?? "";
   items.value = (o.items ?? []).map((i) => ({
+    _key: ++_keyCounter,
     product_id: i.product_id,
     product_name: i.product_name,
     quantity: i.quantity,
@@ -410,21 +513,24 @@ onMounted(async () => {
 </script>
 
 <style lang="scss" scoped>
-// ── Layout grid ───────────────────────────────────────────────────────────────
+// ── Layout ────────────────────────────────────────────────────────────────────
 .order-layout {
   display: grid;
   grid-template-columns: 1fr 320px;
   gap: 1.5rem;
   align-items: start;
+
   @media (max-width: 991px) {
     grid-template-columns: 1fr;
   }
 }
+
 .order-main {
   display: flex;
   flex-direction: column;
   gap: 1.25rem;
 }
+
 .order-sidebar {
   position: sticky;
   top: 16px;
@@ -437,11 +543,14 @@ onMounted(async () => {
   border-radius: 16px;
   padding: 1.5rem;
 }
+
 .card-head {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-bottom: 1.25rem;
+  color: var(--text-sub);
+
   h4 {
     font-size: 0.95rem;
     font-weight: 700;
@@ -450,6 +559,7 @@ onMounted(async () => {
     color: var(--text-primary);
   }
 }
+
 .optional-badge {
   font-size: 0.7rem;
   background: var(--bg-elevated);
@@ -458,123 +568,54 @@ onMounted(async () => {
   border-radius: 20px;
 }
 
-.stock-tag {
+.selected-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 0.7rem;
   font-weight: 600;
+  background: rgba(16, 185, 129, 0.1);
   color: #10b981;
-  &.stock-out {
-    color: #ef4444;
+  padding: 2px 8px;
+  border-radius: 20px;
+}
+
+// ── Empty state ───────────────────────────────────────────────────────────────
+.items-empty {
+  background: var(--bg-surface);
+  border: 2px dashed var(--border-color);
+  border-radius: 16px;
+  text-align: center;
+  padding: 2.5rem 2rem;
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  transition: border-color 0.2s;
+
+  &:hover {
+    border-color: var(--primary);
+  }
+
+  p {
+    margin: 0;
+    font-size: 0.9rem;
   }
 }
 
-.del-btn {
-  width: 34px;
-  height: 34px;
-  border: none;
-  background: rgba(239, 68, 68, 0.08);
-  border-radius: 8px;
-  cursor: pointer;
-  color: #ef4444;
+.empty-icon-wrap {
+  width: 72px;
+  height: 72px;
+  border-radius: 20px;
+  background: var(--bg-elevated);
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.15s;
-  &:hover {
-    background: rgba(239, 68, 68, 0.18);
-  }
-}
-
-// Empty state
-.items-empty {
-  text-align: center;
-  padding: 2rem;
-  color: var(--text-muted);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-}
-
-// ── Summary sidebar ───────────────────────────────────────────────────────────
-.summary-card {
-  display: flex;
-  flex-direction: column;
-  gap: 1.25rem;
-}
-
-.totals-block {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding-bottom: 1rem;
-  border-bottom: 1px solid var(--border-color);
-}
-.total-line {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 0.9rem;
-  color: var(--text-sub);
-  &--grand {
-    font-size: 1rem;
-    font-weight: 700;
-    color: var(--text-primary);
-    padding-top: 8px;
-    border-top: 1px solid var(--border-color);
-  }
-}
-.grand-val {
-  font-size: 1.2rem;
-  color: var(--primary);
-}
-
-.payment-block {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.status-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.status-key {
-  font-size: 0.85rem;
   color: var(--text-muted);
 }
-.remaining-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 0.8rem;
-  color: #f59e0b;
-  font-weight: 600;
-}
 
-.save-btn {
-  width: 100%;
-}
-
-// ── Badges ────────────────────────────────────────────────────────────────────
-.badge {
-  padding: 3px 10px;
-  border-radius: 20px;
-  font-size: 0.75rem;
-  font-weight: 600;
-}
-.badge-warning {
-  background: rgba(245, 158, 11, 0.1);
-  color: #f59e0b;
-}
-.badge-info {
-  background: rgba(6, 182, 212, 0.1);
-  color: #06b6d4;
-}
-.badge-success {
-  background: rgba(16, 185, 129, 0.1);
-  color: #10b981;
-}
-
+// ── Items list ────────────────────────────────────────────────────────────────
 .items-list {
   display: flex;
   flex-direction: column;
@@ -582,21 +623,22 @@ onMounted(async () => {
 }
 
 .item-card {
-  background: var(--bg-elevated);
+  background: var(--bg-surface);
   border: 1px solid var(--border-color);
-  border-radius: 12px;
-  padding: 12px 14px;
+  border-radius: 14px;
+  padding: 14px 16px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  transition: border-color 0.15s;
+  gap: 12px;
+  transition: border-color 0.15s, box-shadow 0.15s;
 
   &:hover {
     border-color: var(--primary);
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
   }
 }
 
-// Top row: product select + delete button
+// Top row
 .item-top {
   display: flex;
   align-items: flex-start;
@@ -606,11 +648,62 @@ onMounted(async () => {
     flex: 1;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 6px;
   }
 }
 
-// Bottom row: price, currency, qty, total — all inline, wraps gracefully
+.item-tags {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.stock-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 20px;
+  background: rgba(16, 185, 129, 0.1);
+  color: #10b981;
+
+  &.stock-out {
+    background: rgba(239, 68, 68, 0.1);
+    color: #ef4444;
+  }
+  &.stock-low {
+    background: rgba(245, 158, 11, 0.1);
+    color: #f59e0b;
+  }
+}
+
+.error-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 20px;
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+}
+
+.warn-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 20px;
+  background: rgba(245, 158, 11, 0.1);
+  color: #f59e0b;
+}
+
+// Bottom row
 .item-bottom {
   display: flex;
   align-items: flex-end;
@@ -622,15 +715,68 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  flex: 1 1 90px; // grows but minimum ~90px
+  flex: 1 1 90px;
   min-width: 80px;
 
   &--cur {
-    flex: 0 1 100px; // currency is narrower
+    flex: 0 1 105px;
   }
   &--qty {
-    flex: 0 1 80px; // qty is narrowest
+    flex: 0 1 130px;
   }
+}
+
+.field-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+// Qty stepper
+.qty-control {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-elevated);
+}
+
+.qty-btn {
+  width: 32px;
+  height: 34px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--text-sub);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+  flex-shrink: 0;
+
+  &:hover:not(:disabled) {
+    background: var(--primary-soft);
+    color: var(--primary);
+  }
+
+  &:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+  }
+}
+
+.qty-input {
+  flex: 1;
+  text-align: center;
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  min-width: 0;
 }
 
 .item-total {
@@ -639,6 +785,7 @@ onMounted(async () => {
   gap: 4px;
   flex: 0 0 auto;
   text-align: end;
+  min-width: 80px;
 
   strong {
     font-size: 0.95rem;
@@ -648,33 +795,41 @@ onMounted(async () => {
   }
 }
 
-.field-label {
-  font-size: 0.7rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-muted);
-  margin: 0;
+.input-error {
+  border-color: #ef4444 !important;
 }
 
-.stock-tag {
-  display: inline-flex;
+// Add more button
+.add-item-btn {
+  display: flex;
   align-items: center;
-  gap: 3px;
-  font-size: 0.7rem;
+  gap: 8px;
+  padding: 10px 16px;
+  border: 1.5px dashed var(--border-color);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.85rem;
   font-weight: 600;
-  color: #10b981;
-  &.stock-out {
-    color: #ef4444;
+  cursor: pointer;
+  width: 100%;
+  justify-content: center;
+  transition: all 0.18s;
+
+  &:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+    background: var(--primary-soft);
   }
 }
 
+// Delete button
 .del-btn {
   flex-shrink: 0;
-  width: 32px;
-  height: 32px;
+  width: 34px;
+  height: 34px;
   border: none;
-  background: rgba(239, 68, 68, 0.08);
+  background: rgba(239, 68, 68, 0.07);
   border-radius: 8px;
   cursor: pointer;
   color: #ef4444;
@@ -683,19 +838,162 @@ onMounted(async () => {
   justify-content: center;
   transition: background 0.15s;
   margin-top: 2px;
+
   &:hover {
     background: rgba(239, 68, 68, 0.18);
   }
 }
 
-// Empty state (unchanged)
-.items-empty {
-  text-align: center;
-  padding: 2rem;
-  color: var(--text-muted);
+// ── Summary sidebar ───────────────────────────────────────────────────────────
+.summary-card {
   display: flex;
   flex-direction: column;
+  gap: 1.1rem;
+}
+
+.summary-items-count {
+  display: flex;
   align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  padding: 6px 10px;
+  background: var(--bg-elevated);
+  border-radius: 8px;
+}
+
+.totals-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.line-item-summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.8rem;
+  color: var(--text-sub);
+  gap: 8px;
+}
+
+.lis-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.lis-val {
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  font-size: 0.8rem;
+}
+
+.total-line {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.9rem;
+  color: var(--text-sub);
+
+  &--grand {
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    padding-top: 8px;
+    border-top: 1px solid var(--border-color);
+    margin-top: 4px;
+  }
+}
+
+.grand-val {
+  font-size: 1.25rem;
+  color: var(--primary);
+  font-weight: 800;
+}
+
+// ── Payment info box ──────────────────────────────────────────────────────────
+.payment-info-box {
+  display: flex;
   gap: 10px;
+  align-items: flex-start;
+  padding: 12px 14px;
+  background: rgba(6, 182, 212, 0.06);
+  border: 1px solid rgba(6, 182, 212, 0.2);
+  border-radius: 10px;
+  color: #06b6d4;
+  font-size: 0.78rem;
+  flex-shrink: 0;
+}
+
+.payment-info-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.4;
+
+  strong {
+    font-size: 0.8rem;
+    display: block;
+  }
+
+  span {
+    color: var(--text-muted);
+    font-size: 0.73rem;
+  }
+}
+
+// ── Validation errors ─────────────────────────────────────────────────────────
+.validation-errors {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 12px;
+  background: rgba(239, 68, 68, 0.06);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: 10px;
+}
+
+.val-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.75rem;
+  color: #ef4444;
+  font-weight: 500;
+}
+
+// ── Save ──────────────────────────────────────────────────────────────────────
+.save-btn {
+  width: 100%;
+}
+
+.save-hint {
+  text-align: center;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-top: -4px;
+}
+
+// ── Transition ────────────────────────────────────────────────────────────────
+.item-anim-enter-active {
+  transition: all 0.25s ease;
+}
+.item-anim-leave-active {
+  transition: all 0.2s ease;
+}
+.item-anim-enter-from {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+.item-anim-leave-to {
+  opacity: 0;
+  transform: translateX(12px);
 }
 </style>

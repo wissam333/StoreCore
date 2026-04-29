@@ -1,7 +1,12 @@
 <template>
   <Teleport to="body">
     <Transition name="modal-fade">
-      <div v-if="modelValue" class="p2p-overlay" @click.self="tryClose">
+      <div
+        v-if="modelValue"
+        class="p2p-overlay"
+        @click.self="tryClose"
+        :dir="$i18n.locale === 'ar' ? 'rtl' : 'ltr'"
+      >
         <div class="p2p-modal">
           <!-- Header -->
           <div class="p2p-header">
@@ -807,7 +812,7 @@ onUnmounted(() => {
   justify-content: center;
   z-index: 9999;
   padding: 16px;
-  font-family: "Tajawal", system-ui, sans-serif;
+  font-family: "Tajawal", sans-serif;
 }
 
 .p2p-modal {
@@ -1195,7 +1200,6 @@ onUnmounted(() => {
   font-size: 13px;
   outline: none;
   transition: border-color 0.15s;
-  font-family: monospace;
 }
 .p2p-input:focus {
   border-color: var(--p2p-accent);

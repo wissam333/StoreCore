@@ -60,23 +60,43 @@
       "
     >
       <template #cell-status="{ row }">
-        <span class="badge" :class="statusClass(row.status)">{{
-          $t("order." + row.status)
-        }}</span>
+        <span class="badge" :class="statusClass(row.status)">
+          {{ $t("order." + row.status) }}
+        </span>
       </template>
+
       <template #cell-total_sp="{ row }">
         {{ fmtSP(row.total_sp) }}
       </template>
-      <template #cell-paid_amount="{ row }">
-        {{
-          row.display_currency === "USD"
-            ? "$" + row.paid_amount
-            : row.paid_amount + " ل.س"
-        }}
+
+      <!-- paid: use total_paid_sp (sum of all payments) formatted through fmtSP -->
+      <template #cell-total_paid_sp="{ row }">
+        <span :class="row.total_paid_sp > 0 ? 'paid-amount' : 'zero-amount'">
+          {{ fmtSP(row.total_paid_sp ?? 0) }}
+        </span>
       </template>
+
+      <!-- remaining: total - paid, only show if not fully paid -->
+      <template #cell-remaining="{ row }">
+        <span v-if="row.status !== 'paid'" class="remaining-amount">
+          {{
+            fmtSP(Math.max(0, (row.total_sp ?? 0) - (row.total_paid_sp ?? 0)))
+          }}
+        </span>
+        <span v-else class="fully-paid-badge">
+          <Icon name="mdi:check-circle" size="13" />
+          {{ $t("order.paid") }}
+        </span>
+      </template>
+
       <template #cell-order_date="{ row }">
         {{ new Date(row.order_date).toLocaleDateString() }}
       </template>
+
+      <template #cell-item_count="{ row }">
+        <span class="item-count-badge">{{ row.item_count ?? 0 }}</span>
+      </template>
+
       <template #actions="{ row }">
         <div class="action-buttons">
           <button
@@ -86,7 +106,6 @@
           >
             <Icon name="mdi:eye-outline" />
           </button>
-
           <button
             class="action-btn danger"
             :title="$t('delete')"
@@ -110,15 +129,17 @@
           <SharedUiButtonBase
             variant="outline"
             @click="showDeleteModal = false"
-            >{{ $t("cancel") }}</SharedUiButtonBase
           >
+            {{ $t("cancel") }}
+          </SharedUiButtonBase>
           <SharedUiButtonBase
             variant="error"
             :loading="deleting"
             icon-left="mdi:trash-can-outline"
             @click="doDelete"
-            >{{ $t("delete") }}</SharedUiButtonBase
           >
+            {{ $t("delete") }}
+          </SharedUiButtonBase>
         </div>
       </template>
     </SharedUiDialogAppModal>
@@ -135,7 +156,6 @@ definePageMeta({
   },
 });
 
-// ✅ Top-level
 const { getOrders, deleteOrder } = useStore();
 import { watchDebounced } from "@vueuse/core";
 const { locale, t: $t } = useI18n();
@@ -157,17 +177,19 @@ const toDelete = ref(null);
 const fmtSP = ref((v) => v);
 
 const statusOptions = [
-  { label: "Pending", value: "pending" },
-  { label: "Partly Paid", value: "partly_paid" },
-  { label: "Paid", value: "paid" },
+  { label: $t("order.pending"), value: "pending" },
+  { label: $t("order.partly_paid"), value: "partly_paid" },
+  { label: $t("order.paid"), value: "paid" },
 ];
 
+// ── Columns — replaced "paid_amount" with "total_paid_sp" + added "remaining"
 const cols = [
   { key: "customer_name", label: "customer" },
   { key: "order_date", label: "date" },
-  { key: "item_count", label: "items" },
+  { key: "item_count", label: "items", align: "center" },
   { key: "total_sp", label: "total", align: "end" },
-  { key: "paid_amount", label: "paid", align: "end" },
+  { key: "total_paid_sp", label: "paid", align: "end" },
+  { key: "remaining", label: "remaining", align: "end" },
   { key: "status", label: "status" },
 ];
 
@@ -210,7 +232,9 @@ const doDelete = async () => {
     $toast.success($t("deleted"));
     showDeleteModal.value = false;
     load();
-  } else $toast.error(r.error);
+  } else {
+    $toast.error(r.error);
+  }
   deleting.value = false;
 };
 
@@ -248,6 +272,8 @@ watch(useSyncTick(), () => load());
 .filter-date {
   width: 160px;
 }
+
+// ── Badges ────────────────────────────────────────────────────────────────────
 .badge {
   padding: 3px 10px;
   border-radius: 20px;
@@ -266,6 +292,50 @@ watch(useSyncTick(), () => load());
   background: rgba(16, 185, 129, 0.1);
   color: #10b981;
 }
+.badge-secondary {
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+}
+
+// ── Cell values ───────────────────────────────────────────────────────────────
+.paid-amount {
+  font-weight: 600;
+  color: #10b981;
+}
+
+.zero-amount {
+  color: var(--text-muted);
+  font-size: 0.85em;
+}
+
+.remaining-amount {
+  font-weight: 600;
+  color: #f59e0b;
+}
+
+.fully-paid-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #10b981;
+}
+
+.item-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  background: var(--bg-elevated);
+  border-radius: 6px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--text-sub);
+}
+
+// ── Action buttons ────────────────────────────────────────────────────────────
 .action-buttons {
   display: flex;
   gap: 6px;
@@ -290,5 +360,16 @@ watch(useSyncTick(), () => load());
     background: rgba(239, 68, 68, 0.1);
     color: #ef4444;
   }
+}
+
+// ── Utils ─────────────────────────────────────────────────────────────────────
+.d-flex {
+  display: flex;
+}
+.gap-2 {
+  gap: 8px;
+}
+.justify-content-end {
+  justify-content: flex-end;
 }
 </style>

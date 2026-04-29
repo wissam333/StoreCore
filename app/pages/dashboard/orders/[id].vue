@@ -2,7 +2,7 @@
 <template>
   <div>
     <SharedUiHeaderPage
-      :title="$t('order')"
+      :title="$t('Order')"
       icon="mdi:receipt-text-outline"
       show-back
       back-to="/dashboard/orders"
@@ -440,12 +440,6 @@ const progressClass = computed(() => {
 
 const orderActions = computed(() => [
   {
-    key: "edit",
-    label: $t("edit"),
-    icon: "mdi:pencil-outline",
-    variant: "outline",
-  },
-  {
     key: "delete",
     label: $t("delete"),
     icon: "mdi:trash-can-outline",
@@ -477,13 +471,6 @@ const load = async () => {
     newPayCurrency.value = r.data.display_currency ?? "SP";
   }
   loading.value = false;
-};
-
-// ── Actions ───────────────────────────────────────────────────────────────────
-const handleAction = (action) => {
-  if (action.key === "edit")
-    navigateTo("/dashboard/orders/" + route.params.id + "/edit");
-  if (action.key === "delete") showDeleteModal.value = true;
 };
 
 const doDelete = async () => {

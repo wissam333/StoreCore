@@ -368,7 +368,7 @@ watch(useSyncTick(), () => load());
 // ── Stats grid ────────────────────────────────────────────────────────────────
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
   gap: 14px;
 
   @media (max-width: 1200px) {
@@ -463,7 +463,7 @@ watch(useSyncTick(), () => load());
 }
 
 .stat-card__value {
-  font-size: 1.6rem;
+  font-size: 1.2rem;
   font-weight: 750;
   color: var(--text-primary);
   letter-spacing: -0.03em;

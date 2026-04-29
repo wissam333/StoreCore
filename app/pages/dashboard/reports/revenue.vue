@@ -416,7 +416,7 @@ watch(useSyncTick(), () => load());
 // ── KPI grid ──────────────────────────────────────────────────────────────────
 .kpi-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
   gap: 1rem;
   margin-bottom: 1.5rem;
 }
@@ -516,7 +516,7 @@ watch(useSyncTick(), () => load());
 }
 
 .kpi-value {
-  font-size: 1.15rem;
+  font-size: 1rem;
   font-weight: 800;
   color: var(--text-primary);
   line-height: 1.2;
@@ -587,7 +587,6 @@ watch(useSyncTick(), () => load());
   border-radius: 16px;
   padding: 1.5rem;
   margin-bottom: 1.5rem;
-  overflow: hidden;
   min-width: 0;
 }
 

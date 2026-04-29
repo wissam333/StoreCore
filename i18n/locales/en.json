@@ -77,6 +77,7 @@
   "addPayment": "Add Payment",
   "noItems": "No items in this order",
   "payments": "Payments",
+  "productsSubtitle": "View and manage all products",
   "orderTotal": "Order Total",
   "totalPaid": "Total Paid",
   "payRemaining": "Pay Remaining",
@@ -158,6 +159,7 @@
     "partly_paid": "Partly Paid",
     "paid": "Paid"
   },
+  "Order":"Order",
   "product": "Product",
   "products": "Products",
   "addProduct": "Add Product",
@@ -352,5 +354,17 @@
       "back": "Back",
       "close": "Close"
     }
-  }
+  },
+  "paymentAfterCreate": "Payment recorded after saving",
+  "paymentAfterCreateDesc": "Once the order is created, open it to record one or multiple payments.",
+  "outOfStock": "Out of stock",
+  "cannotAddOutOfStock": "Remove — out of stock",
+  "exceedsStock": "Exceeds available stock",
+  "selectProductForAllItems": "Select a product for all items",
+  "qtyMustBeAtLeastOne": "Quantity must be at least 1",
+  "removeOutOfStockItems": "Remove out-of-stock items",
+  "someItemsExceedStock": "Some quantities exceed available stock",
+  "priceCannotBeZero": "Price cannot be 0 for selected products",
+  "addItemsFirst": "Add at least one item to continue",
+  "units": "units"
 }

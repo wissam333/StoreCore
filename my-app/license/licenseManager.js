@@ -146,14 +146,18 @@ export const activateLicense = async (key, db) => {
       signal: AbortSignal.timeout(12000),
     });
     const json = await res.json().catch(() => ({}));
+
     if (res.ok && json.ok) {
       saveLicense(key.trim());
       persistToSettings(db, key.trim());
       return { ok: true };
     }
+
+    // slots_full gets a clear human message already from the server
     return {
       ok: false,
       error: json.error ?? `Server error (HTTP ${res.status})`,
+      reason: json.reason ?? "unknown",
     };
   } catch (err) {
     return {

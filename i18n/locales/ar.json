@@ -134,6 +134,7 @@
     "partly_paid": "مدفوع جزئياً",
     "paid": "مدفوع"
   },
+  "Order": "الطلب",
   "dailyCollections": "التحصيلات اليومية",
   "product": "المنتج",
   "revenue": "الإيرادات",
@@ -145,6 +146,7 @@
   "markFullyPaid": "تحديد كمدفوع بالكامل",
   "viewPayments": "عرض المدفوعات",
   "addPayment": "إضافة دفعة",
+  "productsSubtitle": "عرض و إدارة جميع المنتجات",
   "noItems": "لا توجد عناصر في هذا الطلب",
   "payments": "المدفوعات",
   "orderTotal": "إجمالي الطلب",
@@ -351,5 +353,17 @@
       "back": "رجوع",
       "close": "إغلاق"
     }
-  }
+  },
+  "paymentAfterCreate": "يتم تسجيل الدفع بعد الحفظ",
+  "paymentAfterCreateDesc": "بعد إنشاء الطلب، افتحه لتسجيل دفعة واحدة أو أكثر.",
+  "outOfStock": "نفذ المخزون",
+  "cannotAddOutOfStock": "إزالة — نفذ المخزون",
+  "exceedsStock": "يتجاوز الكمية المتاحة",
+  "selectProductForAllItems": "اختر منتجاً لجميع العناصر",
+  "qtyMustBeAtLeastOne": "يجب أن تكون الكمية 1 على الأقل",
+  "removeOutOfStockItems": "احذف العناصر التي نفذ مخزونها",
+  "someItemsExceedStock": "بعض الكميات تتجاوز المخزون المتاح",
+  "priceCannotBeZero": "لا يمكن أن يكون السعر 0 للمنتجات المختارة",
+  "addItemsFirst": "أضف عنصراً واحداً على الأقل للمتابعة",
+  "units": "وحدة"
 }

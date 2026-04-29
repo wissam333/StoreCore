@@ -164,8 +164,20 @@ export function registerStoreHandlers(db, ipcMain) {
     else status = "partly_paid";
 
     // paid_amount stored in display_currency for backwards compatibility
-    const paidDisplay =
-      order.display_currency === "USD" ? paidSP / rate : paidSP;
+    let paidDisplay;
+    if (order.display_currency === "USD") {
+      const r = db
+        .prepare(
+          `SELECT
+      COALESCE(SUM(CASE WHEN currency='USD' THEN amount   ELSE 0 END), 0) as usd_sum,
+      COALESCE(SUM(CASE WHEN currency!='USD' THEN amount_sp ELSE 0 END), 0) as sp_sum
+     FROM order_payments WHERE order_id=? AND _deleted=0`,
+        )
+        .get(orderId);
+      paidDisplay = r.usd_sum + r.sp_sum / rate;
+    } else {
+      paidDisplay = paidSP;
+    }
 
     db.prepare(
       `
@@ -1579,10 +1591,11 @@ export function registerStoreHandlers(db, ipcMain) {
   });
 
   // ── applyRemoteRow ────────────────────────────────────────────────────────
-  ipcMain.handle("store:applyRemoteRow", (_, { table, row }) => {
+  ipcMain.handle("store:applyRemoteRow", (_, { table, row, changedFields }) => {
     try {
       if (!ALLOWED_TABLES.has(table))
         return { ok: false, error: `Unknown table: ${table}` };
+
       const normalized = {};
       for (const [k, v] of Object.entries(row)) {
         if (k === "synced_at") continue;
@@ -1590,6 +1603,7 @@ export function registerStoreHandlers(db, ipcMain) {
         else normalized[k] = v;
       }
       if (!("id" in normalized)) return { ok: false, error: "Missing row.id" };
+
       const existing = (() => {
         try {
           return db
@@ -1599,46 +1613,112 @@ export function registerStoreHandlers(db, ipcMain) {
           return null;
         }
       })();
+
+      // ── INSERT: row doesn't exist locally ────────────────────────────────
       if (!existing) {
         const cols = Object.keys(normalized);
         db.prepare("PRAGMA foreign_keys = OFF").run();
         try {
           db.prepare(
-            `INSERT OR REPLACE INTO "${table}" (${cols.map((c) => `"${c}"`).join(", ")}, synced_at) VALUES (${cols.map(() => "?").join(", ")}, datetime('now'))`,
+            `INSERT OR REPLACE INTO "${table}" (${cols.map((c) => `"${c}"`).join(", ")}, synced_at)
+           VALUES (${cols.map(() => "?").join(", ")}, datetime('now'))`,
           ).run(...cols.map((c) => normalized[c]));
         } finally {
           db.prepare("PRAGMA foreign_keys = ON").run();
         }
         return { ok: true };
       }
+
+      // ── Field-level merge for existing rows ──────────────────────────────
+      // Determine which fields to actually update:
+      // If changedFields is provided → only update those fields (field-level merge)
+      // If changedFields is null/empty → fall back to version-based full update
       const remoteVersion = normalized.version ?? 0;
       const localVersion = existing.version ?? 0;
+
       const pending = db
         .prepare(
           `SELECT id FROM sync_queue WHERE row_id=? AND synced_at IS NULL LIMIT 1`,
         )
         .get(normalized.id);
-      if (remoteVersion < localVersion) return { ok: true, skipped: true };
-      if (remoteVersion === localVersion) {
-        if ((normalized.updated_at ?? "") <= (existing.updated_at ?? ""))
+
+      let colsToUpdate;
+
+      if (changedFields && changedFields.length > 0) {
+        // Field-level merge: only update fields the remote peer explicitly changed
+        // BUT skip any field that has a pending local change
+        const localChangedFields = new Set();
+        if (pending) {
+          // Find which specific fields are pending locally for this row
+          const localPending = db
+            .prepare(
+              `SELECT changed_fields FROM sync_queue WHERE row_id=? AND synced_at IS NULL`,
+            )
+            .all(normalized.id);
+          for (const entry of localPending) {
+            if (entry.changed_fields) {
+              for (const f of JSON.parse(entry.changed_fields)) {
+                localChangedFields.add(f);
+              }
+            }
+          }
+        }
+
+        // Keep remote field if: remote changed it AND local didn't also change it
+        // OR if remote version is strictly ahead (remote wins all in that case)
+        if (remoteVersion > localVersion) {
+          // Remote is strictly newer — take all its changed fields
+          colsToUpdate = changedFields.filter(
+            (f) =>
+              f in normalized &&
+              f !== "id" &&
+              f !== "created_at" &&
+              f !== "synced_at",
+          );
+        } else {
+          // Same or ambiguous version — only take non-conflicting fields
+          colsToUpdate = changedFields.filter(
+            (f) =>
+              f in normalized &&
+              f !== "id" &&
+              f !== "created_at" &&
+              f !== "synced_at" &&
+              !localChangedFields.has(f), // skip if locally modified too
+          );
+        }
+
+        // Always advance version to the max of the two
+        const newVersion = Math.max(remoteVersion, localVersion);
+        if (!colsToUpdate.includes("version")) colsToUpdate.push("version");
+        normalized.version = newVersion;
+      } else {
+        // No changedFields info — use original version-based logic
+        if (remoteVersion < localVersion) return { ok: true, skipped: true };
+        if (remoteVersion === localVersion) {
+          if ((normalized.updated_at ?? "") <= (existing.updated_at ?? ""))
+            return { ok: true, skipped: true };
+          if (pending) return { ok: true, skipped: true };
+        }
+        if (pending && remoteVersion === localVersion + 1)
           return { ok: true, skipped: true };
-        if (pending) return { ok: true, skipped: true };
+
+        const skipCols = new Set(["id", "synced_at", "created_at"]);
+        colsToUpdate = Object.keys(normalized).filter((k) => !skipCols.has(k));
       }
-      if (pending && remoteVersion === localVersion + 1)
-        return { ok: true, skipped: true };
-      const skipCols = new Set(["id", "synced_at", "created_at"]);
-      const updateCols = Object.keys(normalized).filter(
-        (k) => !skipCols.has(k),
-      );
-      if (updateCols.length === 0) return { ok: true };
+
+      if (colsToUpdate.length === 0) return { ok: true, skipped: true };
+
       db.prepare("PRAGMA foreign_keys = OFF").run();
       try {
         db.prepare(
-          `UPDATE "${table}" SET ${updateCols.map((c) => `"${c}" = ?`).join(", ")}, synced_at = datetime('now') WHERE id = ?`,
-        ).run(...updateCols.map((c) => normalized[c]), normalized.id);
+          `UPDATE "${table}"
+         SET ${colsToUpdate.map((c) => `"${c}" = ?`).join(", ")}, synced_at = datetime('now')
+         WHERE id = ?`,
+        ).run(...colsToUpdate.map((c) => normalized[c]), normalized.id);
       } finally {
         db.prepare("PRAGMA foreign_keys = ON").run();
       }
+
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };

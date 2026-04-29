@@ -8,7 +8,7 @@
     />
 
     <div class="settings-grid">
-      <div class="settings-card">
+      <!-- <div class="settings-card">
         <div class="card-title">{{ $t("storeInfo") }}</div>
         <div class="form-col">
           <SharedUiFormBaseInput
@@ -27,7 +27,7 @@
             icon-left="mdi:phone-outline"
           />
         </div>
-      </div>
+      </div> -->
 
       <div class="settings-card">
         <div class="card-title">{{ $t("currencySettings") }}</div>

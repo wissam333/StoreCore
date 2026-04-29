@@ -165,8 +165,22 @@ export const useMobileStore = () => {
     else if (paidSP >= order.total_sp - 0.01) status = "paid";
     else status = "partly_paid";
 
-    const paidDisplay =
-      order.display_currency === "USD" ? paidSP / rate : paidSP;
+    let paidDisplay;
+    if (order.display_currency === "USD") {
+      const r = (
+        await db.query(
+          `SELECT
+        COALESCE(SUM(CASE WHEN currency='USD'  THEN amount    ELSE 0 END), 0) as usd_sum,
+        COALESCE(SUM(CASE WHEN currency!='USD' THEN amount_sp ELSE 0 END), 0) as sp_sum
+       FROM order_payments WHERE order_id=? AND _deleted=0`,
+          [orderId],
+        )
+      ).values?.[0];
+      paidDisplay = (r?.usd_sum ?? 0) + (r?.sp_sum ?? 0) / rate;
+    } else {
+      paidDisplay = paidSP;
+    }
+
     await db.run(
       `UPDATE orders SET paid_amount=?, status=?, version=version+1, updated_at=datetime('now') WHERE id=?`,
       [paidDisplay, status, orderId],
@@ -671,24 +685,41 @@ export const useMobileStore = () => {
         where += " AND date(o.order_date)<=?";
         params.push(dateTo);
       }
+
+      // Use LEFT JOINs + GROUP BY — avoids correlated subqueries that
+      // break on Capacitor SQLite (driver returns COUNT=1 for all rows).
       const data =
         (
           await db.query(
             `
-        SELECT o.*, c.name as customer_name, c.phone as customer_phone,
-          (SELECT COUNT(*) FROM order_items WHERE order_id=o.id AND _deleted=0) as item_count,
-          (SELECT COALESCE(SUM(amount_sp),0) FROM order_payments WHERE order_id=o.id AND _deleted=0) as total_paid_sp
-        FROM orders o LEFT JOIN customers c ON o.customer_id=c.id
-        WHERE ${where} ORDER BY o.order_date DESC LIMIT ? OFFSET ?`,
+          SELECT
+            o.*,
+            c.name  AS customer_name,
+            c.phone AS customer_phone,
+            COUNT(DISTINCT CASE WHEN oi._deleted=0 THEN oi.id END) AS item_count,
+            COALESCE(SUM(CASE WHEN op._deleted=0 THEN op.amount_sp END), 0) AS total_paid_sp
+          FROM orders o
+          LEFT JOIN customers      c  ON c.id  = o.customer_id
+          LEFT JOIN order_items    oi ON oi.order_id = o.id
+          LEFT JOIN order_payments op ON op.order_id = o.id
+          WHERE ${where}
+          GROUP BY o.id
+          ORDER BY o.order_date DESC
+          LIMIT ? OFFSET ?`,
             [...params, limit, offset],
           )
         ).values ?? [];
+
       const total = (
         await db.query(
-          `SELECT COUNT(*) as n FROM orders o LEFT JOIN customers c ON o.customer_id=c.id WHERE ${where}`,
+          `SELECT COUNT(DISTINCT o.id) as n
+           FROM orders o
+           LEFT JOIN customers c ON c.id = o.customer_id
+           WHERE ${where}`,
           params,
         )
       ).values[0].n;
+
       return { ok: true, data, total };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -1612,7 +1643,8 @@ export const useMobileStore = () => {
     }
   };
 
-  const applyRemoteRow = async ({ table, row }) => {
+  // Replace the applyRemoteRow function in useMobileStore.js:
+  const applyRemoteRow = async ({ table, row, changedFields }) => {
     try {
       const db = await getMobileDb();
       const ALLOWED = new Set([
@@ -1627,6 +1659,7 @@ export const useMobileStore = () => {
       ]);
       if (!ALLOWED.has(table))
         return { ok: false, error: `Unknown table: ${table}` };
+
       const normalized = {};
       for (const [k, v] of Object.entries(row)) {
         if (k === "synced_at") continue;
@@ -1634,12 +1667,12 @@ export const useMobileStore = () => {
         else normalized[k] = v;
       }
       if (!normalized.id) return { ok: false, error: "Missing row.id" };
+
       const existing = (
-        await db.query(
-          `SELECT version, updated_at FROM "${table}" WHERE id=?`,
-          [normalized.id],
-        )
+        await db.query(`SELECT * FROM "${table}" WHERE id=?`, [normalized.id])
       ).values?.[0];
+
+      // ── INSERT ───────────────────────────────────────────────────────────
       if (!existing) {
         normalized.synced_at = new Date().toISOString();
         const cols = Object.keys(normalized);
@@ -1648,7 +1681,8 @@ export const useMobileStore = () => {
           await db.run(
             `INSERT OR IGNORE INTO "${table}" (${cols
               .map((c) => `"${c}"`)
-              .join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`,
+              .join(", ")})
+           VALUES (${cols.map(() => "?").join(", ")})`,
             cols.map((c) => normalized[c]),
           );
         } finally {
@@ -1656,31 +1690,81 @@ export const useMobileStore = () => {
         }
         return { ok: true };
       }
+
       const remoteVersion = normalized.version ?? 0;
       const localVersion = existing.version ?? 0;
-      if (remoteVersion < localVersion) return { ok: true, skipped: true };
-      if (remoteVersion === localVersion) {
-        const pending = await db.query(
-          `SELECT id FROM sync_queue WHERE row_id=? AND synced_at IS NULL LIMIT 1`,
-          [normalized.id],
-        );
-        if ((normalized.updated_at ?? "") <= (existing.updated_at ?? "")) {
-          if (pending.values?.length > 0) return { ok: true, skipped: true };
+
+      const pendingRows =
+        (
+          await db.query(
+            `SELECT changed_fields FROM sync_queue WHERE row_id=? AND synced_at IS NULL`,
+            [normalized.id],
+          )
+        ).values ?? [];
+      const pending = pendingRows.length > 0;
+
+      let colsToUpdate;
+
+      if (changedFields && changedFields.length > 0) {
+        // Collect locally pending fields for this row
+        const localChangedFields = new Set();
+        if (pending) {
+          for (const entry of pendingRows) {
+            if (entry.changed_fields) {
+              for (const f of JSON.parse(entry.changed_fields)) {
+                localChangedFields.add(f);
+              }
+            }
+          }
         }
+
+        if (remoteVersion > localVersion) {
+          // Remote strictly newer — take all its changed fields
+          colsToUpdate = changedFields.filter(
+            (f) =>
+              f in normalized &&
+              f !== "id" &&
+              f !== "created_at" &&
+              f !== "synced_at",
+          );
+        } else {
+          // Merge: only take fields not also changed locally
+          colsToUpdate = changedFields.filter(
+            (f) =>
+              f in normalized &&
+              f !== "id" &&
+              f !== "created_at" &&
+              f !== "synced_at" &&
+              !localChangedFields.has(f),
+          );
+        }
+
+        const newVersion = Math.max(remoteVersion, localVersion);
+        if (!colsToUpdate.includes("version")) colsToUpdate.push("version");
+        normalized.version = newVersion;
+      } else {
+        // Fallback: version-based full update (no changedFields info)
+        if (remoteVersion < localVersion) return { ok: true, skipped: true };
+        if (remoteVersion === localVersion) {
+          if ((normalized.updated_at ?? "") <= (existing.updated_at ?? ""))
+            return { ok: true, skipped: true };
+          if (pending) return { ok: true, skipped: true };
+        }
+
+        const skipCols = new Set(["id", "synced_at", "created_at"]);
+        colsToUpdate = Object.keys(normalized).filter((k) => !skipCols.has(k));
       }
-      const skipCols = new Set(["id", "synced_at", "created_at"]);
-      const updateCols = Object.keys(normalized).filter(
-        (k) => !skipCols.has(k),
-      );
-      if (updateCols.length === 0) return { ok: true };
+
+      if (colsToUpdate.length === 0) return { ok: true, skipped: true };
+
       await db.run("PRAGMA foreign_keys = OFF");
       try {
         await db.run(
-          `UPDATE "${table}" SET ${updateCols
-            .map((c) => `"${c}" = ?`)
-            .join(", ")}, synced_at=? WHERE id=?`,
+          `UPDATE "${table}"
+         SET ${colsToUpdate.map((c) => `"${c}" = ?`).join(", ")}, synced_at=?
+         WHERE id=?`,
           [
-            ...updateCols.map((c) => normalized[c]),
+            ...colsToUpdate.map((c) => normalized[c]),
             new Date().toISOString(),
             normalized.id,
           ],
@@ -1688,6 +1772,7 @@ export const useMobileStore = () => {
       } finally {
         await db.run("PRAGMA foreign_keys = ON");
       }
+
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };
