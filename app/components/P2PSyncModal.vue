@@ -283,24 +283,6 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from "vue";
 import { useP2PSync } from "~/composables/useP2PSync";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Capacitor platform detection
-//
-// Returns true ONLY when running inside a real Capacitor WebView on Android.
-// Returns false on Electron, browser, iOS — so fallback logic fires correctly.
-// ─────────────────────────────────────────────────────────────────────────────
-const isCapacitorAndroid = () => {
-  try {
-    return (
-      typeof window !== "undefined" &&
-      window.Capacitor?.isNativePlatform?.() === true &&
-      window.Capacitor?.getPlatform?.() === "android"
-    );
-  } catch {
-    return false;
-  }
-};
-
 const props = defineProps({ modelValue: Boolean });
 const emit = defineEmits(["update:modelValue", "synced"]);
 
@@ -331,11 +313,6 @@ const canvasEl = ref(null);
 // ── Debug log ─────────────────────────────────────────────────────────────────
 const debugLogs = ref([]);
 const MAX_LOGS = 12;
-const addLog = (text, type = "info") => {
-  debugLogs.value.push({ text, type });
-  if (debugLogs.value.length > MAX_LOGS)
-    debugLogs.value.splice(0, debugLogs.value.length - MAX_LOGS);
-};
 
 let _origLog = null,
   _origError = null;
@@ -345,12 +322,20 @@ const hookConsole = () => {
   console.log = (...a) => {
     _origLog(...a);
     const m = a.join(" ");
-    if (m.includes("[P2P]")) addLog(m, "info");
+    if (m.includes("[P2P]")) {
+      debugLogs.value.push({ text: m, type: "info" });
+      if (debugLogs.value.length > MAX_LOGS)
+        debugLogs.value.splice(0, debugLogs.value.length - MAX_LOGS);
+    }
   };
   console.error = (...a) => {
     _origError(...a);
     const m = a.join(" ");
-    if (m.includes("[P2P]")) addLog(m, "error");
+    if (m.includes("[P2P]")) {
+      debugLogs.value.push({ text: m, type: "error" });
+      if (debugLogs.value.length > MAX_LOGS)
+        debugLogs.value.splice(0, debugLogs.value.length - MAX_LOGS);
+    }
   };
 };
 const unhookConsole = () => {
@@ -364,13 +349,14 @@ const unhookConsole = () => {
   }
 };
 
-// ── Web scan internals (desktop/Electron fallback) ────────────────────────────
+// ── Scan internals ────────────────────────────────────────────────────────────
 let _qrInstance = null;
 let _videoStream = null;
 let _scanRaf = null;
 let _scanActive = false;
 let _lastScanTime = 0;
-const SCAN_INTERVAL_MS = 100;
+let _barcodeDetector = null;
+const SCAN_INTERVAL_MS = 200;
 
 const progressPct = computed(() =>
   progress.value.total > 0
@@ -378,7 +364,7 @@ const progressPct = computed(() =>
     : 0,
 );
 
-// ── jsQR (web fallback only) ──────────────────────────────────────────────────
+// ── jsQR loader ───────────────────────────────────────────────────────────────
 const JSQR_CDN = "https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js";
 const loadScript = (src) =>
   new Promise((resolve, reject) => {
@@ -397,9 +383,14 @@ const loadScript = (src) =>
     document.head.appendChild(s);
   });
 
-// Pre-load jsQR on non-Android builds only
 onMounted(() => {
-  if (!isCapacitorAndroid()) loadScript(JSQR_CDN).catch(() => {});
+  // Pre-load jsQR and init BarcodeDetector if available
+  loadScript(JSQR_CDN).catch(() => {});
+  if ("BarcodeDetector" in window) {
+    try {
+      _barcodeDetector = new window.BarcodeDetector({ formats: ["qr_code"] });
+    } catch {}
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -447,130 +438,53 @@ const connectManual = () => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GUEST — startScan()
-//
-// On Android (Capacitor) → native MLKit scanner
-// On Electron / browser  → getUserMedia + jsQR (unchanged from before)
+// GUEST — startScan() — always uses WebView camera (works on Android + desktop)
 // ─────────────────────────────────────────────────────────────────────────────
 const startScan = async () => {
   if (scanLoading.value) return;
   scanError.value = "";
   scanLoading.value = true;
-
-  if (isCapacitorAndroid()) {
-    await startNativeScan();
-  } else {
-    await startWebScan();
-  }
-
+  await startWebScan();
   scanLoading.value = false;
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// NATIVE SCAN — @capacitor-mlkit/barcode-scanning
-//
-// ► Install (one time):
-//     npm install @capacitor-mlkit/barcode-scanning
-//     npx cap sync android
-//
-// ► Does NOT need any extra gradle changes — MLKit is bundled in the .aar
-//
-// ► Does NOT need CAMERA permission entry in AndroidManifest.xml —
-//   the plugin adds it automatically via its own manifest merge
-//
-// ► Does NOT break on AGP 8.7 — the plugin's minSdk is 22, compileSdk 34
-//   which is fully compatible with your setup
-//
-// ► The native Activity runs outside the WebView entirely, so none of the
-//   Android 13-15 WebView file-picker / getUserMedia restrictions apply
-// ─────────────────────────────────────────────────────────────────────────────
-const startNativeScan = async () => {
-  try {
-    // Lazy dynamic import — only resolves on Android Capacitor builds.
-    // On Electron/web this throws and we fall back to web scan below.
-    const mlkit = await import("@capacitor-mlkit/barcode-scanning").catch(
-      () => null,
-    );
-
-    if (!mlkit?.BarcodeScanner) {
-      console.warn("[P2P] MLKit plugin not found, falling back to web scan");
-      await startWebScan();
-      return;
-    }   
-
-    const { BarcodeScanner, BarcodeFormat } = mlkit;
-
-    // Check camera permission
-    const { camera } = await BarcodeScanner.checkPermissions();
-
-    if (camera === "denied") {
-      scanError.value =
-        "Camera permission denied. Enable it in device Settings → Apps.";
-      return;
-    }
-
-    if (camera !== "granted") {
-      const result = await BarcodeScanner.requestPermissions();
-      if (result.camera !== "granted") {
-        scanError.value = "Camera access is required to scan the QR code.";
-        return;
-      }
-    }
-
-    // Register listener BEFORE startScan so we never miss the first frame
-    await BarcodeScanner.addListener("barcodeScanned", async (event) => {
-      const value = event?.barcode?.rawValue;
-      if (value) {
-        // Clean up immediately so the scanner closes
-        await BarcodeScanner.removeAllListeners();
-        await BarcodeScanner.stopScan();
-        handleScannedId(value);
-      }
-    });
-
-    // Opens the native fullscreen scanner UI
-    await BarcodeScanner.startScan({
-      formats: [BarcodeFormat.QrCode],
-    });
-  } catch (e) {
-    console.error("[P2P] Native scan error:", e);
-    // If the plugin errored mid-flight, attempt web fallback
-    scanError.value = `Scanner error: ${
-      e?.message ?? "Unknown"
-    }. Try typing the ID manually.`;
-  }
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// WEB SCAN — getUserMedia + jsQR (Electron / desktop browser fallback)
-// ─────────────────────────────────────────────────────────────────────────────
 const startWebScan = async () => {
   try {
     if (!navigator.mediaDevices?.getUserMedia) {
-      scanError.value =
-        "Camera not available in this environment. Please type the ID manually.";
+      scanError.value = "Camera not available. Please type the ID manually.";
       return;
     }
+
+    // Request highest possible resolution for better QR detection
     _videoStream = await navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: { ideal: "environment" },
-        width: { ideal: 1920 },
-        height: { ideal: 1080 },
+        width: { ideal: 3840 },
+        height: { ideal: 2160 },
       },
     });
+
     guestStep.value = "scan";
     await nextTick();
+
     if (videoEl.value) {
       videoEl.value.srcObject = _videoStream;
       await videoEl.value.play().catch(() => {});
     }
-    await loadScript(JSQR_CDN);
+
+    // Make sure jsQR is loaded as fallback
+    await loadScript(JSQR_CDN).catch(() => {});
+
     _scanActive = true;
     scheduleScan();
   } catch (e) {
     console.warn("[P2P] Web scan error:", e);
-    scanError.value =
-      "Could not open camera. Please type the ID manually above.";
+    if (e.name === "NotAllowedError") {
+      scanError.value =
+        "Camera permission denied. Please allow camera access and try again.";
+    } else {
+      scanError.value = "Could not open camera. Please type the ID manually.";
+    }
   }
 };
 
@@ -612,30 +526,38 @@ const scanFrame = async (timestamp) => {
     return;
   }
 
-  const W = video.videoWidth,
-    H = video.videoHeight;
+  const W = video.videoWidth;
+  const H = video.videoHeight;
   canvas.width = W;
   canvas.height = H;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
 
   try {
-    if ("BarcodeDetector" in window) {
-      const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
-      const codes = await detector.detect(video);
+    // ── Strategy 1: BarcodeDetector API (built into Android WebView, fastest) ──
+    if (_barcodeDetector) {
+      const codes = await _barcodeDetector.detect(video);
       if (codes.length > 0) {
         handleScannedId(codes[0].rawValue);
         return;
       }
-    } else if (window.jsQR) {
+    }
+
+    // ── Strategy 2: jsQR with enhanced image processing ──
+    if (window.jsQR) {
       ctx.drawImage(video, 0, 0, W, H);
-      // Pixel-level greyscale (avoids CSS filter WebView bugs)
-      const id = ctx.getImageData(0, 0, W, H);
-      const d = id.data;
+      const imageData = ctx.getImageData(0, 0, W, H);
+      const d = imageData.data;
+
+      // Convert to greyscale + boost contrast
       for (let i = 0; i < d.length; i += 4) {
-        const g = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+        let g = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+        // Contrast boost: push darks darker, lights lighter
+        g = g < 128 ? g * 0.7 : 128 + (g - 128) * 1.3;
+        g = Math.max(0, Math.min(255, g));
         d[i] = d[i + 1] = d[i + 2] = g;
       }
-      ctx.putImageData(id, 0, 0);
+      ctx.putImageData(imageData, 0, 0);
+
       const code = window.jsQR(ctx.getImageData(0, 0, W, H).data, W, H, {
         inversionAttempts: "attemptBoth",
       });
@@ -665,28 +587,9 @@ const handleScannedId = (id) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Cleanup helper — stops native scanner if running
-// ─────────────────────────────────────────────────────────────────────────────
-const stopNativeScanIfRunning = async () => {
-  if (!isCapacitorAndroid()) return;
-  try {
-    const mlkit = await import("@capacitor-mlkit/barcode-scanning").catch(
-      () => null,
-    );
-    if (mlkit?.BarcodeScanner) {
-      await mlkit.BarcodeScanner.removeAllListeners();
-      await mlkit.BarcodeScanner.stopScan();
-    }
-  } catch {
-    /* ignore */
-  }
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Navigation
 // ─────────────────────────────────────────────────────────────────────────────
 const goBack = async () => {
-  await stopNativeScanIfRunning();
   stopWebScan();
   unhookConsole();
   reset();
@@ -705,7 +608,6 @@ const tryClose = () => {
 
 const handleClose = async () => {
   if (status.value === "done") emit("synced");
-  await stopNativeScanIfRunning();
   stopWebScan();
   unhookConsole();
   reset();
@@ -719,8 +621,7 @@ const handleClose = async () => {
   emit("update:modelValue", false);
 };
 
-onUnmounted(async () => {
-  await stopNativeScanIfRunning();
+onUnmounted(() => {
   stopWebScan();
   unhookConsole();
   reset();
