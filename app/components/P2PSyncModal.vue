@@ -467,12 +467,11 @@ const startWebScan = async () => {
       return;
     }
 
-    // Request highest possible resolution for better QR detection
     _videoStream = await navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: { ideal: "environment" },
-        width: { ideal: 3840 },
-        height: { ideal: 2160 },
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
       },
     });
 
@@ -482,15 +481,15 @@ const startWebScan = async () => {
     if (videoEl.value) {
       videoEl.value.srcObject = _videoStream;
       await videoEl.value.play().catch(() => {});
+      // Wait for video to fully stabilize on Android
+      await new Promise((r) => setTimeout(r, 1500));
     }
 
-    // Make sure jsQR is loaded as fallback
     await loadScript(JSQR_CDN).catch(() => {});
 
     _scanActive = true;
     scheduleScan();
   } catch (e) {
-    console.warn("[P2P] Web scan error:", e);
     if (e.name === "NotAllowedError") {
       scanError.value =
         "Camera permission denied. Please allow camera access and try again.";
@@ -531,7 +530,7 @@ const scanFrame = async (timestamp) => {
     !video ||
     !canvas ||
     !_videoStream ||
-    video.readyState < 2 ||
+    video.readyState < 4 ||
     video.videoWidth === 0
   ) {
     scheduleScan();
@@ -540,35 +539,32 @@ const scanFrame = async (timestamp) => {
 
   const W = video.videoWidth;
   const H = video.videoHeight;
-  canvas.width = W;
-  canvas.height = H;
+
+  // Crop center square (where the QR frame is shown to the user)
+  const size = Math.min(W, H) * 0.7;
+  const sx = (W - size) / 2;
+  const sy = (H - size) / 2;
+
+  canvas.width = size;
+  canvas.height = size;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
 
   try {
-    // ── Strategy 1: BarcodeDetector ──
+    // Draw only the center crop
+    ctx.drawImage(video, sx, sy, size, size, 0, 0, size, size);
+
+    // Try BarcodeDetector first (native, most reliable on Android)
     if (_barcodeDetector) {
-      const codes = await _barcodeDetector.detect(video);
-      debugLogs.value.push({
-        text: `BarcodeDetector: ${codes.length} codes found`,
-        type: "info",
-      });
-      if (debugLogs.value.length > MAX_LOGS) debugLogs.value.shift();
+      const codes = await _barcodeDetector.detect(canvas);
       if (codes.length > 0) {
         handleScannedId(codes[0].rawValue);
         return;
       }
-    } else {
-      debugLogs.value.push({
-        text: `BarcodeDetector: NOT available`,
-        type: "error",
-      });
-      if (debugLogs.value.length > MAX_LOGS) debugLogs.value.shift();
     }
 
-    // ── Strategy 2: jsQR ──
+    // jsQR fallback
     if (window.jsQR) {
-      ctx.drawImage(video, 0, 0, W, H);
-      const imageData = ctx.getImageData(0, 0, W, H);
+      const imageData = ctx.getImageData(0, 0, size, size);
       const d = imageData.data;
       for (let i = 0; i < d.length; i += 4) {
         let g = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
@@ -577,25 +573,19 @@ const scanFrame = async (timestamp) => {
         d[i] = d[i + 1] = d[i + 2] = g;
       }
       ctx.putImageData(imageData, 0, 0);
-      const code = window.jsQR(ctx.getImageData(0, 0, W, H).data, W, H, {
-        inversionAttempts: "attemptBoth",
-      });
-      debugLogs.value.push({
-        text: `jsQR: ${code?.data ?? "null"} | ${W}x${H}`,
-        type: code?.data ? "info" : "error",
-      });
-      if (debugLogs.value.length > MAX_LOGS) debugLogs.value.shift();
+      const code = window.jsQR(
+        ctx.getImageData(0, 0, size, size).data,
+        size,
+        size,
+        { inversionAttempts: "attemptBoth" },
+      );
       if (code?.data) {
         handleScannedId(code.data);
         return;
       }
-    } else {
-      debugLogs.value.push({ text: `jsQR: NOT loaded`, type: "error" });
-      if (debugLogs.value.length > MAX_LOGS) debugLogs.value.shift();
     }
-  } catch (e) {
-    debugLogs.value.push({ text: `ERROR: ${e.message}`, type: "error" });
-    if (debugLogs.value.length > MAX_LOGS) debugLogs.value.shift();
+  } catch {
+    /* ignore per-frame errors */
   }
 
   scheduleScan();
