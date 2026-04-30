@@ -198,6 +198,18 @@
                 <button class="p2p-cancel-scan" @click="stopWebScan">
                   {{ $t("p2p.guest.cancelScan") }}
                 </button>
+
+                <div v-if="debugLogs.length" class="p2p-debug">
+                  <div class="p2p-debug-title">Scan log</div>
+                  <div
+                    v-for="(line, i) in debugLogs"
+                    :key="i"
+                    class="p2p-debug-line"
+                    :class="line.type"
+                  >
+                    {{ line.text }}
+                  </div>
+                </div>
               </div>
 
               <!-- Step: syncing / done / error -->
@@ -536,13 +548,21 @@ const scanFrame = async (timestamp) => {
     // ── Strategy 1: BarcodeDetector ──
     if (_barcodeDetector) {
       const codes = await _barcodeDetector.detect(video);
-      console.log("[SCAN] BarcodeDetector found:", codes.length, "codes");
+      debugLogs.value.push({
+        text: `BarcodeDetector: ${codes.length} codes found`,
+        type: "info",
+      });
+      if (debugLogs.value.length > MAX_LOGS) debugLogs.value.shift();
       if (codes.length > 0) {
         handleScannedId(codes[0].rawValue);
         return;
       }
     } else {
-      console.log("[SCAN] BarcodeDetector not available, using jsQR");
+      debugLogs.value.push({
+        text: `BarcodeDetector: NOT available`,
+        type: "error",
+      });
+      if (debugLogs.value.length > MAX_LOGS) debugLogs.value.shift();
     }
 
     // ── Strategy 2: jsQR ──
@@ -560,23 +580,22 @@ const scanFrame = async (timestamp) => {
       const code = window.jsQR(ctx.getImageData(0, 0, W, H).data, W, H, {
         inversionAttempts: "attemptBoth",
       });
-      console.log(
-        "[SCAN] jsQR result:",
-        code?.data ?? "null",
-        "frame size:",
-        W,
-        "x",
-        H,
-      );
+      debugLogs.value.push({
+        text: `jsQR: ${code?.data ?? "null"} | ${W}x${H}`,
+        type: code?.data ? "info" : "error",
+      });
+      if (debugLogs.value.length > MAX_LOGS) debugLogs.value.shift();
       if (code?.data) {
         handleScannedId(code.data);
         return;
       }
     } else {
-      console.log("[SCAN] jsQR not loaded");
+      debugLogs.value.push({ text: `jsQR: NOT loaded`, type: "error" });
+      if (debugLogs.value.length > MAX_LOGS) debugLogs.value.shift();
     }
   } catch (e) {
-    console.log("[SCAN] error:", e.message);
+    debugLogs.value.push({ text: `ERROR: ${e.message}`, type: "error" });
+    if (debugLogs.value.length > MAX_LOGS) debugLogs.value.shift();
   }
 
   scheduleScan();
