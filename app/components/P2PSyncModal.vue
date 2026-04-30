@@ -426,11 +426,11 @@ watch([() => status.value, qrEl], async ([s, el]) => {
     if (!qrEl.value) return;
     _qrInstance = new window.QRCode(qrEl.value, {
       text: peerId.value,
-      width: 220,
-      height: 220,
+      width: 160,
+      height: 160,
       colorDark: "#0f172a",
       colorLight: "#f8fafc",
-      correctLevel: window.QRCode.CorrectLevel.H,
+      correctLevel: window.QRCode.CorrectLevel.M, // was H, now M
     });
   } catch (e) {
     console.warn("[P2P] QR generation failed:", e);
