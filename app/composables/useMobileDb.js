@@ -1,10 +1,7 @@
 // store-app/composables/useMobileDb.js
 //
-// sql.js (SQLite WASM) + @capacitor/preferences for persistence.
-// Zero native plugins. No MainActivity changes. No cap sync needed.
-//
-// Preferences stores the DB as a base64 string under key "sqlitedb".
-// sql.js runs SQLite entirely in JS — same execute/run/query API as before.
+// sql.js bundled locally — works fully offline in Capacitor WebView.
+// No CDN dependency. No internet required to open the app.
 
 let _db = null;
 let _initPromise = null;
@@ -13,7 +10,6 @@ let _SQL = null;
 
 const PREF_KEY = "sqlitedb";
 
-// ── Preferences helpers (already working in your app) ─────────────────────────
 const prefGet = async (key) => {
   const { Preferences } = await import("@capacitor/preferences");
   const r = await Preferences.get({ key });
@@ -25,40 +21,14 @@ const prefSet = async (key, value) => {
   await Preferences.set({ key, value });
 };
 
-// ── Load sql.js WASM from CDN ─────────────────────────────────────────────────
-const loadSQL = () => {
-  if (_SQL) return Promise.resolve(_SQL);
-  return new Promise((resolve, reject) => {
-    if (window.initSqlJs) {
-      window
-        .initSqlJs({
-          locateFile: (f) =>
-            `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/${f}`,
-        })
-        .then((S) => {
-          _SQL = S;
-          resolve(S);
-        })
-        .catch(reject);
-      return;
-    }
-    const s = document.createElement("script");
-    s.src = "https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-wasm.js";
-    s.onload = () =>
-      window
-        .initSqlJs({
-          locateFile: (f) =>
-            `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/${f}`,
-        })
-        .then((S) => {
-          _SQL = S;
-          resolve(S);
-        })
-        .catch(reject);
-    s.onerror = () =>
-      reject(new Error("sql.js failed to load — check internet connection"));
-    document.head.appendChild(s);
+// ── Load sql.js from LOCAL bundle — fully offline ─────────────────────────────
+const loadSQL = async () => {
+  if (_SQL) return _SQL;
+  const initSqlJs = (await import("sql.js")).default;
+  _SQL = await initSqlJs({
+    locateFile: () => "/sql-wasm.wasm", // served from public/ folder
   });
+  return _SQL;
 };
 
 // ── Save DB bytes → base64 → Preferences (debounced) ─────────────────────────
@@ -75,7 +45,7 @@ const scheduleSave = (rawDb) => {
   }, 600);
 };
 
-// ── Wrapper — identical API to @capacitor-community/sqlite ────────────────────
+// ── Wrapper ───────────────────────────────────────────────────────────────────
 const wrap = (rawDb) => ({
   execute: async (sql) => {
     rawDb.run(sql);
@@ -107,7 +77,6 @@ export const getMobileDb = async () => {
     try {
       const SQL = await loadSQL();
 
-      // Load saved DB if it exists
       const saved = await prefGet(PREF_KEY);
       let rawDb;
       if (saved) {
@@ -120,7 +89,6 @@ export const getMobileDb = async () => {
       }
 
       rawDb.run("PRAGMA foreign_keys = ON;");
-
       _db = wrap(rawDb);
       return _db;
     } catch (e) {
@@ -141,7 +109,6 @@ export const resetMobileDb = () => {
   _initPromise = null;
 };
 
-// Call before app goes to background to force an immediate save
 export const flushMobileDb = async () => {
   if (!_db) return;
   if (_saveTimer) {

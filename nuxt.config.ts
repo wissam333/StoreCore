@@ -10,6 +10,9 @@ export default defineNuxtConfig({
     "@nuxtjs/i18n",
     "@vee-validate/nuxt",
   ],
+  nitro: {
+    publicAssets: [{ dir: "public" }],
+  },
   ssr: false,
   router: {
     options: {
