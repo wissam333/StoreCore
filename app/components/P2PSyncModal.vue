@@ -533,41 +533,50 @@ const scanFrame = async (timestamp) => {
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
 
   try {
-    // ── Strategy 1: BarcodeDetector API (built into Android WebView, fastest) ──
+    // ── Strategy 1: BarcodeDetector ──
     if (_barcodeDetector) {
       const codes = await _barcodeDetector.detect(video);
+      console.log("[SCAN] BarcodeDetector found:", codes.length, "codes");
       if (codes.length > 0) {
         handleScannedId(codes[0].rawValue);
         return;
       }
+    } else {
+      console.log("[SCAN] BarcodeDetector not available, using jsQR");
     }
 
-    // ── Strategy 2: jsQR with enhanced image processing ──
+    // ── Strategy 2: jsQR ──
     if (window.jsQR) {
       ctx.drawImage(video, 0, 0, W, H);
       const imageData = ctx.getImageData(0, 0, W, H);
       const d = imageData.data;
-
-      // Convert to greyscale + boost contrast
       for (let i = 0; i < d.length; i += 4) {
         let g = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
-        // Contrast boost: push darks darker, lights lighter
         g = g < 128 ? g * 0.7 : 128 + (g - 128) * 1.3;
         g = Math.max(0, Math.min(255, g));
         d[i] = d[i + 1] = d[i + 2] = g;
       }
       ctx.putImageData(imageData, 0, 0);
-
       const code = window.jsQR(ctx.getImageData(0, 0, W, H).data, W, H, {
         inversionAttempts: "attemptBoth",
       });
+      console.log(
+        "[SCAN] jsQR result:",
+        code?.data ?? "null",
+        "frame size:",
+        W,
+        "x",
+        H,
+      );
       if (code?.data) {
         handleScannedId(code.data);
         return;
       }
+    } else {
+      console.log("[SCAN] jsQR not loaded");
     }
-  } catch {
-    /* ignore per-frame errors */
+  } catch (e) {
+    console.log("[SCAN] error:", e.message);
   }
 
   scheduleScan();
