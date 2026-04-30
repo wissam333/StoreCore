@@ -152,6 +152,18 @@ const verify = async () => {
 
   if (!key || !key.trim()) return { ok: false, reason: "no_license" };
 
+  // ── Grace-first: if we verified recently, open the app immediately ──────
+  // This means NO network call on startup when within the grace window.
+  // A background re-verify will happen from app.vue's runBackgroundVerify().
+  const grace = await isWithinGrace();
+  if (grace) {
+    console.log(
+      "[mobile-license] within grace period, skipping network verify",
+    );
+    return { ok: true, offline: true };
+  }
+
+  // Outside grace — we must hit the network
   let machine_id;
   try {
     machine_id = await getDeviceId();
@@ -159,13 +171,15 @@ const verify = async () => {
     machine_id = "unknown";
   }
 
+  // Use a short timeout (10s) for the foreground verify attempt.
+  // If the server is cold-starting (Render free tier), it's fine —
+  // the background verify in app.vue uses a separate call with more patience.
   try {
     const res = await fetch(`${LICENSE_SERVER}/license/verify`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key: key.trim(), machine_id, platform: "mobile" }),
-      // 100s timeout — long enough to survive a Render cold start (50-90s)
-      signal: AbortSignal.timeout(100_000),
+      signal: AbortSignal.timeout(10_000), // 10s — fail fast
     });
 
     if (res.ok) {
@@ -178,7 +192,6 @@ const verify = async () => {
       return { ok: false, reason: "invalid", error: json.error };
     }
 
-    // 4xx — invalid key, wrong device, not activated, expired
     const errJson = await res.json().catch(() => ({}));
     const reason = errJson?.reason ?? "invalid";
     const errorMsg = errJson?.error ?? `HTTP ${res.status}`;
@@ -186,9 +199,8 @@ const verify = async () => {
     await clearStoredLicense();
     return { ok: false, reason, error: errorMsg };
   } catch (err) {
+    // Network failed or timed out — treat as offline, deny since grace expired
     console.warn("[mobile-license] verify: network error:", err?.message);
-    const grace = await isWithinGrace();
-    if (grace) return { ok: true, offline: true };
     return { ok: false, reason: "offline_grace_expired" };
   }
 };

@@ -27,6 +27,7 @@
     "@vee-validate/yup": "^4.13.2",
     "@vueuse/core": "^14.2.1",
     "@vueuse/nuxt": "^14.1.0",
+    "@zxing/library": "^0.23.0",
     "better-sqlite3": "^12.9.0",
     "bootstrap": "^5.3.3",
     "buffer": "6.0.3",

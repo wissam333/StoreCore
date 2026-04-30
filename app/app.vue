@@ -121,14 +121,45 @@ const initDb = async () => {
 // The user experience: app opens in ~2s instead of ~90s.
 const runBackgroundVerify = async () => {
   try {
-    const { verify } = useMobileLicense();
-    const result = await verify();
+    // Background verify gets the long timeout for Render cold starts
+    const key = await prefGet("license_key"); // reuse your getStoredKey()
+    if (!key) return;
 
-    // Only act on hard rejections (wrong device, invalid key, expired).
-    // Network failures are already handled by grace period inside verify().
-    if (!result.ok && result.reason !== "offline_grace_expired") {
-      console.warn("[app] Background verify failed:", result.reason);
-      // Reset DB and force license screen
+    const machine_id = await (async () => {
+      try {
+        const { useMobileLicense } = await import(
+          "~/composables/useMobileLicense"
+        );
+        return await useMobileLicense().getMachineId();
+      } catch {
+        return "unknown";
+      }
+    })();
+
+    const res = await fetch(`${LICENSE_SERVER}/license/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: key.trim(), machine_id, platform: "mobile" }),
+      signal: AbortSignal.timeout(100_000), // 100s only in background
+    });
+
+    if (res.ok) {
+      const json = await res.json();
+      if (json.ok) {
+        const { Preferences } = await import("@capacitor/preferences");
+        await Preferences.set({
+          key: "last_verified_at",
+          value: new Date().toISOString(),
+        });
+        return;
+      }
+    }
+
+    // Hard rejection from server
+    const errJson = await res.json().catch(() => ({}));
+    const reason = errJson?.reason ?? "invalid";
+    if (reason !== "offline_grace_expired") {
+      console.warn("[app] Background verify failed:", reason);
       try {
         const { resetMobileDb } = await import("~/composables/useMobileDb");
         resetMobileDb();
@@ -136,8 +167,8 @@ const runBackgroundVerify = async () => {
       phase.value = "license";
     }
   } catch (err) {
-    // Never crash the app over a background check failure
-    console.warn("[app] Background verify threw:", err?.message ?? err);
+    // Network failure in background — silently ignore, grace period covers it
+    console.warn("[app] Background verify network error:", err?.message ?? err);
   }
 };
 
@@ -175,40 +206,27 @@ const init = async () => {
       return;
     }
 
-    // env === 'native' — enforce license
-    try {
-      const { resetMobileDb } = await import("~/composables/useMobileDb");
-      resetMobileDb();
-    } catch {}
-
-    // ── Fast path: check for a stored key WITHOUT hitting the network ────────
-    //
-    // Old approach: await verify() → blocks for up to 100s on cold start.
-    // New approach:
-    //   • Read the key from Preferences (instant, local).
-    //   • If no key → show license screen immediately (unchanged).
-    //   • If key exists → open the DB and show the app immediately,
-    //     then verify in the background. If the background check fails
-    //     with a hard error, we push back to the license screen.
-    //
-    loadingMsg.value = "Opening database…";
-
+    // env === 'native'
     const storedKey = await getStoredKey();
 
     if (!storedKey) {
-      // No key at all — must activate first
+      // No key — show license screen, reset DB only now
+      try {
+        const { resetMobileDb } = await import("~/composables/useMobileDb");
+        resetMobileDb();
+      } catch {}
       phase.value = "license";
       loadingMsg.value = "";
       return;
     }
 
-    // Key exists locally → open the app now, verify quietly in background
+    // Key exists → open app immediately, verify in background
+    loadingMsg.value = "Opening database…";
     await initDb();
     phase.value = "app";
     loadingMsg.value = "";
 
-    // Fire-and-forget background verification
-    runBackgroundVerify();
+    runBackgroundVerify(); // fire-and-forget
   } catch (err) {
     error.value = err?.message || "Failed to initialize. Tap to retry.";
     phase.value = "error";
