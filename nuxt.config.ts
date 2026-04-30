@@ -11,7 +11,13 @@ export default defineNuxtConfig({
     "@vee-validate/nuxt",
   ],
   nitro: {
-    publicAssets: [{ dir: "public" }],
+    publicAssets: [
+      {
+        baseURL: "/",
+        dir: "public",
+        maxAge: 0,
+      },
+    ],
   },
   ssr: false,
   router: {
@@ -62,11 +68,7 @@ export default defineNuxtConfig({
     format: ["webp"],
     quality: 80,
   },
-  vite: {
-    build: {
-      target: "esnext",
-    },
-  },
+
   app: {
     baseURL: "./",
     head: {
@@ -95,6 +97,16 @@ export default defineNuxtConfig({
     },
   },
   vite: {
+    build: {
+      target: "esnext",
+    },
+    assetsInclude: ["**/*.wasm"],
+    server: {
+      headers: {
+        "Cross-Origin-Embedder-Policy": "require-corp",
+        "Cross-Origin-Opener-Policy": "same-origin",
+      },
+    },
     plugins: [
       nodePolyfills({
         protocolImports: true,
