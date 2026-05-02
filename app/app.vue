@@ -216,19 +216,7 @@ const init = async () => {
   }
 };
 
-onMounted(async () => {
-  // ── SQLite web/native initializer (required by @capacitor-community/sqlite) ──
-  const { defineCustomElements } = await import("jeep-sqlite/loader");
-  defineCustomElements(window);
-
-  // For native: the element must exist in DOM before any SQLite call
-  if (!document.querySelector("jeep-sqlite")) {
-    const jeep = document.createElement("jeep-sqlite");
-    document.body.appendChild(jeep);
-    await customElements.whenDefined("jeep-sqlite");
-  }
-
-  // ── Your existing code, unchanged ────────────────────────────────────────
+onMounted(() => {
   init();
 
   document.addEventListener("pause", async () => {
