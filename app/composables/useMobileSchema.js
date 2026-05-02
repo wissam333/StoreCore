@@ -14,8 +14,20 @@ const exec = async (db, sql) => {
   await db.execute(sql.trim());
 };
 
+const migrateFromPreferences = async (db) => {
+  try {
+    const { Preferences } = await import("@capacitor/preferences");
+    const r = await Preferences.get({ key: "sqlitedb" });
+    if (!r?.value) return; // nothing to migrate
+
+    await Preferences.remove({ key: "sqlitedb" });
+    console.log("[schema] Cleared legacy sql.js preferences data");
+  } catch {}
+};
+
 export const initMobileSchema = async () => {
   const db = await getMobileDb();
+  await migrateFromPreferences(db);
 
   // ── Tables ─────────────────────────────────────────────────────────────────
   await exec(
