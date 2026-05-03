@@ -356,6 +356,7 @@ export function registerStoreHandlers(db, ipcMain) {
       {
         search = "",
         categoryId,
+        currency,
         limit = 50,
         offset = 0,
         activeOnly = false,
@@ -372,6 +373,10 @@ export function registerStoreHandlers(db, ipcMain) {
         if (categoryId) {
           where += " AND p.category_id=?";
           params.push(categoryId);
+        }
+        if (currency) {
+          where += " AND p.currency=?";
+          params.push(currency);
         }
         if (activeOnly) {
           where += " AND p.is_active=1";
@@ -1115,12 +1120,19 @@ export function registerStoreHandlers(db, ipcMain) {
         const total = db
           .prepare(`SELECT COUNT(*) as n FROM dues d WHERE ${where}`)
           .get(...params).n;
+
         const totalUnpaidSp = db
           .prepare(
-            `SELECT COALESCE(SUM(amount_sp),0) as n FROM dues d WHERE d._deleted=0 AND d.paid=0${customerId ? " AND d.customer_id=?" : ""}`,
+            `SELECT COALESCE(SUM(amount_sp),0) as n FROM dues d WHERE d._deleted=0 AND d.paid=0 AND d.currency='SP'${customerId ? " AND d.customer_id=?" : ""}`,
           )
           .get(...(customerId ? [customerId] : [])).n;
-        return { ok: true, data, total, totalUnpaidSp };
+
+        const totalUnpaidUsd = db
+          .prepare(
+            `SELECT COALESCE(SUM(amount),0) as n FROM dues d WHERE d._deleted=0 AND d.paid=0 AND d.currency='USD'${customerId ? " AND d.customer_id=?" : ""}`,
+          )
+          .get(...(customerId ? [customerId] : [])).n;
+        return { ok: true, data, total, totalUnpaidSp, totalUnpaidUsd };
       } catch (err) {
         return { ok: false, error: err.message };
       }

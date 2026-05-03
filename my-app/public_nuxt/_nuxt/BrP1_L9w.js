@@ -1,0 +1,1 @@
+import{a as o,c as e,b as a,o as t,f as c}from"#entry";const r={},l={class:"splash"};function n(_,s){return t(),e("div",l,[...s[0]||(s[0]=[a("img",{src:c,alt:"logo",class:"splash-logo"},null,-1)])])}const f=o(r,[["render",n],["__scopeId","data-v-35594f17"]]);export{f as default};

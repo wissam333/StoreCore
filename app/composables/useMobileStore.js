@@ -366,6 +366,7 @@ export const useMobileStore = () => {
   const getProducts = async ({
     search = "",
     categoryId,
+    currency, 
     limit = 50,
     offset = 0,
     activeOnly = false,
@@ -382,6 +383,10 @@ export const useMobileStore = () => {
       if (categoryId) {
         where += " AND p.category_id=?";
         params.push(categoryId);
+      }
+      if (currency) {
+        where += " AND p.currency=?";
+        params.push(currency);
       }
       if (activeOnly) {
         where += " AND p.is_active=1";
@@ -1197,10 +1202,15 @@ export const useMobileStore = () => {
       ).values[0].n;
       const totalUnpaidSp = (
         await db.query(
-          `SELECT COALESCE(SUM(amount_sp),0) as n FROM dues WHERE _deleted=0 AND paid=0`,
+          `SELECT COALESCE(SUM(amount_sp),0) as n FROM dues WHERE _deleted=0 AND paid=0 AND currency='SP'`,
         )
       ).values[0].n;
-      return { ok: true, data, total, totalUnpaidSp };
+      const totalUnpaidUsd = (
+        await db.query(
+          `SELECT COALESCE(SUM(amount),0) as n FROM dues WHERE _deleted=0 AND paid=0 AND currency='USD'`,
+        )
+      ).values[0].n;
+      return { ok: true, data, total, totalUnpaidSp, totalUnpaidUsd };
     } catch (err) {
       return { ok: false, error: err.message };
     }

@@ -202,6 +202,7 @@ const load = async () => {
   const r = await getProducts({
     search: search.value,
     categoryId: filterCategory.value || undefined,
+    currency: filterCurrency.value || undefined, // ← add this
     limit: 20,
     offset: (page.value - 1) * 20,
   });

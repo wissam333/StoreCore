@@ -177,8 +177,8 @@
 <script setup>
 definePageMeta({
   searchMeta: {
-    label: "Customer Profile",
-    labelAr: "ملف العميل",
+    label: "Customer Detail",
+    labelAr: "تفاصيل العميل",
     icon: "mdi:account-outline",
     group: "Main",
   },

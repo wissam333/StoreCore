@@ -64,12 +64,20 @@
       </template>
 
       <template #cell-total_sp="{ row }">
-        {{ fmtOrder(row.total_sp) }}
+        {{ fmtOrder(row, row.total_sp) }}
       </template>
 
       <template #cell-total_paid_sp="{ row }">
         <span :class="row.total_paid_sp > 0 ? 'paid-amount' : 'zero-amount'">
-          {{ fmtOrder(row.total_paid_sp ?? 0) }}
+          {{
+            fmtTx(
+              row.display_currency === "USD"
+                ? row.total_paid_sp / (row.total_sp / (row.total_usd || 1))
+                : row.total_paid_sp ?? 0,
+              row.display_currency ?? "SP",
+              row.total_paid_sp ?? 0,
+            )
+          }}
         </span>
       </template>
 
@@ -77,6 +85,7 @@
         <span v-if="row.status !== 'paid'" class="remaining-amount">
           {{
             fmtOrder(
+              row,
               Math.max(0, (row.total_sp ?? 0) - (row.total_paid_sp ?? 0)),
             )
           }}
@@ -197,7 +206,15 @@ const statusClass = (s) =>
   }[s] ?? "badge-secondary");
 
 // order totals are always stored in SP
-const fmtOrder = (sp) => fmtTx(sp ?? 0, "SP", sp ?? 0);
+const fmtOrder = (row, spValue) => {
+  if (row.display_currency === "USD" && row.total_sp > 0) {
+    // Convert any SP amount using the frozen rate from this order
+    const frozenRate = row.total_sp / row.total_usd;
+    const usdValue = spValue / frozenRate;
+    return fmtTx(usdValue, "USD", spValue ?? 0);
+  }
+  return fmtTx(spValue ?? 0, "SP", spValue ?? 0);
+};
 
 const load = async () => {
   loading.value = true;

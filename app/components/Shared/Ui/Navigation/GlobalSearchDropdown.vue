@@ -27,7 +27,7 @@
             <div class="search-item-text">
               <span
                 class="search-item-label"
-                v-html="highlight(item.label, query)"
+                v-html="highlight(displayLabel(item), query)"
               />
               <span class="search-item-path">{{ item.to }}</span>
             </div>
@@ -43,19 +43,24 @@
   </Transition>
 </template>
 
-<script setup lang="ts">
-const props = defineProps<{
-  show: boolean;
-  query: string;
-  results: any[];
-}>();
+<script setup>
+const props = defineProps({
+  show: { type: Boolean, required: true },
+  query: { type: String, required: true },
+  results: { type: Array, default: () => [] },
+});
 
 const emit = defineEmits(["select"]);
 
+const { locale } = useI18n();
 const highlighted = ref("");
 
+const displayLabel = (item) => {
+  return locale.value === "ar" && item.labelAr ? item.labelAr : item.label;
+};
+
 const grouped = computed(() => {
-  const map: Record<string, any[]> = {};
+  const map = {};
   for (const item of props.results) {
     if (!map[item.group]) map[item.group] = [];
     map[item.group].push(item);
@@ -63,9 +68,10 @@ const grouped = computed(() => {
   return Object.entries(map).map(([name, items]) => ({ name, items }));
 });
 
-const highlight = (text: string, query: string) => {
-  if (!query) return text;
-  const regex = new RegExp(`(${query})`, "gi");
+const highlight = (text, query) => {
+  if (!query || !text) return text;
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(`(${escaped})`, "gi");
   return text.replace(regex, "<mark>$1</mark>");
 };
 </script>
@@ -85,8 +91,6 @@ const highlight = (text: string, query: string) => {
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.14);
   z-index: 2000;
   padding: 6px;
-
-  // scrollbar
   scrollbar-width: thin;
   scrollbar-color: var(--border-color) transparent;
 }
@@ -181,12 +185,9 @@ const highlight = (text: string, query: string) => {
   }
 }
 
-// Transition
 .search-drop-enter-active,
 .search-drop-leave-active {
-  transition:
-    opacity 0.18s ease,
-    transform 0.18s ease;
+  transition: opacity 0.18s ease, transform 0.18s ease;
 }
 .search-drop-enter-from,
 .search-drop-leave-to {

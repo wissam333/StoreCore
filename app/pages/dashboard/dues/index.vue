@@ -12,11 +12,42 @@
 
     <!-- Summary strip -->
     <div class="dues-summary">
-      <div class="sum-chip danger">
+      <div v-if="totalUnpaidUsd > 0" class="sum-chip danger">
         <Icon name="mdi:alert-circle-outline" size="18" />
         <div>
+          <span class="sum-chip-label">{{ $t("totalUnpaid") }} (USD)</span>
+          <span class="sum-chip-val"
+            >${{
+              totalUnpaidUsd.toLocaleString("en-US", {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })
+            }}</span
+          >
+        </div>
+      </div>
+      <div v-if="totalUnpaidSp > 0" class="sum-chip danger">
+        <Icon name="mdi:alert-circle-outline" size="18" />
+        <div>
+          <span class="sum-chip-label">{{ $t("totalUnpaid") }} (SP)</span>
+          <span class="sum-chip-val"
+            >{{
+              totalUnpaidSp.toLocaleString("en-US", {
+                maximumFractionDigits: 0,
+              })
+            }}
+            ل.س</span
+          >
+        </div>
+      </div>
+      <div
+        v-if="totalUnpaidUsd === 0 && totalUnpaidSp === 0"
+        class="sum-chip danger"
+      >
+        <Icon name="mdi:check-circle-outline" size="18" />
+        <div>
           <span class="sum-chip-label">{{ $t("totalUnpaid") }}</span>
-          <span class="sum-chip-val">{{ fmtUnpaid(totalUnpaidSp) }}</span>
+          <span class="sum-chip-val">—</span>
         </div>
       </div>
     </div>
@@ -230,9 +261,6 @@ const { fmtTx, loadSettings } = useCurrency();
 // Each due row has amount + currency + amount_sp — use all three for correctness
 const fmtDue = (row) => fmtTx(row.amount, row.currency, row.amount_sp);
 
-// The unpaid total is a running SP aggregate — fmtTx('SP','SP') is correct
-const fmtUnpaid = (sp) => fmtTx(sp ?? 0, "SP", sp ?? 0);
-
 // ── Table state ───────────────────────────────────────────────────────────────
 const search = ref("");
 const filterPaid = ref("");
@@ -241,6 +269,7 @@ const loading = ref(false);
 const dues = ref([]);
 const total = ref(0);
 const totalUnpaidSp = ref(0);
+const totalUnpaidUsd = ref(0);
 
 // ── Modal state ───────────────────────────────────────────────────────────────
 const showModal = ref(false);
@@ -418,11 +447,11 @@ const load = async () => {
     limit: 20,
     offset: (page.value - 1) * 20,
   });
-
   if (r.ok) {
     dues.value = r.data;
     total.value = r.total;
     totalUnpaidSp.value = r.totalUnpaidSp;
+    totalUnpaidUsd.value = r.totalUnpaidUsd;
   }
   loading.value = false;
 };
@@ -447,6 +476,9 @@ watch(useSyncTick(), () => load());
 <style lang="scss" scoped>
 .dues-summary {
   margin-bottom: 1.5rem;
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 .sum-chip {
   display: inline-flex;

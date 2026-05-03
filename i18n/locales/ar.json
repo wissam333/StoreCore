@@ -365,5 +365,16 @@
   "someItemsExceedStock": "بعض الكميات تتجاوز المخزون المتاح",
   "priceCannotBeZero": "لا يمكن أن يكون السعر 0 للمنتجات المختارة",
   "addItemsFirst": "أضف عنصراً واحداً على الأقل للمتابعة",
-  "units": "وحدة"
+  "units": "وحدة",
+  "Theme": "المظهر",
+  "Mode": "الوضع",
+  "Color": "اللون",
+  "Dark": "داكن",
+  "Light": "فاتح",
+  "appearance": "المظهر",
+  "registerReferee": "تسجيل كحكم",
+  "lightMode": "الوضع الفاتح",
+  "auto": "تلقائي",
+  "prices": "الأسعار",
+  "stock": "المخزن"
 }

@@ -142,10 +142,16 @@
             empty-text="noItems"
           >
             <template #cell-sell_price_at_sale="{ row }">
-              {{ row.sell_price_at_sale }} {{ row.currency_at_sale }}
+              {{ fmtTx(row.sell_price_at_sale, row.currency_at_sale, null) }}
             </template>
             <template #cell-line_total_sp="{ row }">
-              {{ fmtOrder(row.line_total_sp) }}
+              {{
+                fmtTx(
+                  row.sell_price_at_sale * row.quantity,
+                  row.currency_at_sale,
+                  row.line_total_sp,
+                )
+              }}
             </template>
           </SharedUiTableDataTable>
 
@@ -425,7 +431,18 @@ const itemCols = [
 // ── Display helpers ───────────────────────────────────────────────────────────
 
 // Order totals and line totals are always stored in SP
-const fmtOrder = (sp) => fmtTx(sp ?? 0, "SP", sp ?? 0);
+const fmtOrder = (spValue) => {
+  if (!order.value) return "";
+  if (order.value.display_currency === "USD") {
+    // Use frozen total_usd ratio to convert any SP amount to USD
+    const rate =
+      order.value.total_sp > 0
+        ? order.value.total_usd / order.value.total_sp
+        : 1 / (dollarRate.value ?? 15000);
+    return fmtTx(spValue * rate, "USD", spValue ?? 0);
+  }
+  return fmtTx(spValue ?? 0, "SP", spValue ?? 0);
+};
 
 // Each payment has its own amount + currency + amount_sp — use all three
 const fmtPayment = (p) => fmtTx(p.amount, p.currency, p.amount_sp);
@@ -467,6 +484,12 @@ const progressClass = computed(() => {
 
 const orderActions = computed(() => [
   {
+    key: "edit",
+    label: $t("edit"),
+    icon: "mdi:pencil-outline",
+    variant: "outline",
+  },
+  {
     key: "delete",
     label: $t("delete"),
     icon: "mdi:trash-can-outline",
@@ -476,6 +499,9 @@ const orderActions = computed(() => [
 
 const handleAction = (action) => {
   if (action.key === "delete") showDeleteModal.value = true;
+  if (action.key === "edit") {
+    navigateTo(`/dashboard/orders/${route.params.id}/edit`);
+  }
 };
 
 const statusClass = (s) =>
