@@ -488,12 +488,27 @@ export function registerStoreHandlers(db, ipcMain) {
         const like = `%${search}%`;
         const data = db
           .prepare(
-            `SELECT * FROM customers WHERE _deleted=0 AND (name LIKE ? OR phone LIKE ?) ORDER BY name ASC LIMIT ? OFFSET ?`,
+            `
+          SELECT
+            c.*,
+            COALESCE(SUM(CASE WHEN op._deleted=0 THEN op.amount_sp END), 0) AS total_spent,
+            COUNT(DISTINCT CASE WHEN o._deleted=0 THEN o.id END)            AS total_orders,
+            MAX(CASE WHEN o._deleted=0 THEN o.order_date END)               AS last_order
+          FROM customers c
+          LEFT JOIN orders o         ON o.customer_id = c.id
+          LEFT JOIN order_payments op ON op.order_id  = o.id
+          WHERE c._deleted=0
+            AND (c.name LIKE ? OR c.phone LIKE ?)
+          GROUP BY c.id
+          ORDER BY c.name ASC
+          LIMIT ? OFFSET ?
+          `,
           )
           .all(like, like, limit, offset);
         const total = db
           .prepare(
-            `SELECT COUNT(*) as n FROM customers WHERE _deleted=0 AND (name LIKE ? OR phone LIKE ?)`,
+            `SELECT COUNT(*) as n FROM customers
+           WHERE _deleted=0 AND (name LIKE ? OR phone LIKE ?)`,
           )
           .get(like, like).n;
         return { ok: true, data, total };
@@ -823,8 +838,10 @@ export function registerStoreHandlers(db, ipcMain) {
         if (order.customer_id) {
           const custBefore = freshRow("customers", order.customer_id);
           db.prepare(
-            `UPDATE customers SET total_orders=(SELECT COUNT(*) FROM orders WHERE customer_id=? AND _deleted=0 AND status='paid'), total_spent=(SELECT COALESCE(SUM(total_sp),0) FROM orders WHERE customer_id=? AND _deleted=0 AND status='paid'), last_order=datetime('now'), version=version+1, updated_at=datetime('now') WHERE id=?`,
-          ).run(order.customer_id, order.customer_id, order.customer_id);
+            `UPDATE customers
+     SET last_order=datetime('now'), version=version+1, updated_at=datetime('now')
+     WHERE id=?`,
+          ).run(order.customer_id);
           const freshCust = freshRow("customers", order.customer_id);
           if (freshCust)
             enqueue(

@@ -48,20 +48,22 @@
 
           <div class="info-item">
             <span class="info-label">{{ $t("total") }}</span>
-            <span class="info-value strong">{{ fmtSP(order.total_sp) }}</span>
+            <span class="info-value strong">{{
+              fmtOrder(order.total_sp)
+            }}</span>
           </div>
 
           <div class="info-item">
             <span class="info-label">{{ $t("collected") }}</span>
             <span class="info-value strong collected">
-              {{ fmtSP(totalPaidSP) }}
+              {{ fmtOrder(totalPaidSP) }}
             </span>
           </div>
 
-          <div class="info-item" v-if="remainingSP > 0.01">
+          <div v-if="remainingSP > 0.01" class="info-item">
             <span class="info-label">{{ $t("remaining") }}</span>
             <span class="info-value strong remaining">
-              {{ fmtSP(remainingSP) }}
+              {{ fmtOrder(remainingSP) }}
             </span>
           </div>
 
@@ -143,13 +145,13 @@
               {{ row.sell_price_at_sale }} {{ row.currency_at_sale }}
             </template>
             <template #cell-line_total_sp="{ row }">
-              {{ fmtSP(row.line_total_sp) }}
+              {{ fmtOrder(row.line_total_sp) }}
             </template>
           </SharedUiTableDataTable>
 
           <div class="items-total-row">
             <span>{{ $t("grandTotal") }}</span>
-            <strong>{{ fmtSP(order.total_sp) }}</strong>
+            <strong>{{ fmtOrder(order.total_sp) }}</strong>
           </div>
         </template>
       </div>
@@ -165,18 +167,18 @@
       <div class="payment-summary-strip">
         <div class="summary-item">
           <span class="summary-label">{{ $t("orderTotal") }}</span>
-          <strong>{{ fmtSP(order?.total_sp ?? 0) }}</strong>
+          <strong>{{ fmtOrder(order?.total_sp ?? 0) }}</strong>
         </div>
         <div class="summary-divider"></div>
         <div class="summary-item">
           <span class="summary-label">{{ $t("totalPaid") }}</span>
-          <strong class="text-success">{{ fmtSP(totalPaidSP) }}</strong>
+          <strong class="text-success">{{ fmtOrder(totalPaidSP) }}</strong>
         </div>
         <div class="summary-divider"></div>
         <div class="summary-item">
           <span class="summary-label">{{ $t("remaining") }}</span>
           <strong :class="remainingSP > 0.01 ? 'text-warning' : 'text-success'">
-            {{ fmtSP(Math.max(0, remainingSP)) }}
+            {{ fmtOrder(Math.max(0, remainingSP)) }}
           </strong>
         </div>
       </div>
@@ -218,7 +220,7 @@
             :loading="addingPayment"
             @click="doAddRemainingAsPayment"
           >
-            {{ $t("payRemaining") }} ({{ fmtSP(remainingSP) }})
+            {{ $t("payRemaining") }} ({{ fmtOrder(remainingSP) }})
           </SharedUiButtonBase>
           <SharedUiButtonBase
             size="sm"
@@ -253,12 +255,14 @@
             <div class="payment-index">#{{ idx + 1 }}</div>
             <div class="payment-info">
               <div class="payment-amount">
+                <!-- Always show the payment in its original currency first -->
                 <strong>{{ p.amount }} {{ p.currency }}</strong>
+                <!-- Show the equivalent only when it differs from source -->
                 <span
                   v-if="p.currency !== reportCurrency"
                   class="payment-equiv"
                 >
-                  ≈ {{ fmtSP(p.amount_sp) }}
+                  ≈ {{ fmtPayment(p) }}
                 </span>
               </div>
               <div class="payment-meta">
@@ -381,7 +385,15 @@ const {
 const route = useRoute();
 const { locale, t: $t } = useI18n();
 const { $toast } = useNuxtApp();
-const currency = useCurrency();
+const {
+  fmtTx,
+  dollarRate,
+  reportCurrency: reportCurrencyRef,
+  loadSettings,
+} = useCurrency();
+
+// reportCurrency as a plain string for the template comparison
+const reportCurrency = computed(() => reportCurrencyRef.value);
 
 // ── State ─────────────────────────────────────────────────────────────────────
 const loading = ref(true);
@@ -397,8 +409,6 @@ const newPayNote = ref("");
 const showDeletePaymentModal = ref(false);
 const deletingPayment = ref(false);
 const paymentToDelete = ref(null);
-const fmtSP = ref((v) => v);
-const reportCurrency = ref("SP");
 
 const currencyOptions = [
   { label: "SP (ل.س)", value: "SP" },
@@ -411,6 +421,23 @@ const itemCols = [
   { key: "sell_price_at_sale", label: "unitPrice", align: "end" },
   { key: "line_total_sp", label: "total", align: "end" },
 ];
+
+// ── Display helpers ───────────────────────────────────────────────────────────
+
+// Order totals and line totals are always stored in SP
+const fmtOrder = (sp) => fmtTx(sp ?? 0, "SP", sp ?? 0);
+
+// Each payment has its own amount + currency + amount_sp — use all three
+const fmtPayment = (p) => fmtTx(p.amount, p.currency, p.amount_sp);
+
+// Placeholder text for the payment input: shows remaining in the chosen
+// payment currency so the user knows how much to type
+const fmtRaw = (remainingSp) => {
+  if (newPayCurrency.value === "USD") {
+    return (remainingSp / (dollarRate.value ?? 15000)).toFixed(2);
+  }
+  return Math.round(remainingSp).toLocaleString();
+};
 
 // ── Computed ──────────────────────────────────────────────────────────────────
 const totalPaidSP = computed(
@@ -447,20 +474,16 @@ const orderActions = computed(() => [
   },
 ]);
 
+const handleAction = (action) => {
+  if (action.key === "delete") showDeleteModal.value = true;
+};
+
 const statusClass = (s) =>
   ({
     pending: "badge-warning",
     partly_paid: "badge-info",
     paid: "badge-success",
   }[s] ?? "badge-secondary");
-
-// Format a raw SP amount without currency conversion (for placeholder display)
-const fmtRaw = (sp) => {
-  const r = currency.reportCurrency?.value;
-  if (r === "USD")
-    return (sp / (currency.dollarRate?.value ?? 15000)).toFixed(2);
-  return Math.round(sp).toLocaleString();
-};
 
 // ── Load ──────────────────────────────────────────────────────────────────────
 const load = async () => {
@@ -510,8 +533,9 @@ const doAddPayment = async () => {
 const doAddRemainingAsPayment = async () => {
   if (remainingSP.value <= 0.01) return;
   addingPayment.value = true;
-  // Convert remaining SP to display currency
-  const rate = currency.dollarRate?.value ?? 15000;
+  // Convert the remaining SP balance into the chosen payment currency
+  // for the amount field — this is correct, it's what gets stored
+  const rate = dollarRate.value ?? 15000;
   const amt =
     newPayCurrency.value === "USD"
       ? remainingSP.value / rate
@@ -564,9 +588,7 @@ const doDeletePayment = async () => {
 };
 
 onMounted(async () => {
-  await currency.loadSettings();
-  fmtSP.value = currency.fmtSP;
-  reportCurrency.value = currency.reportCurrency?.value ?? "SP";
+  await loadSettings();
   await load();
 });
 
@@ -579,15 +601,12 @@ watch(useSyncTick(), () => load());
   flex-direction: column;
   gap: 1.25rem;
 }
-
-// ── Card ──────────────────────────────────────────────────────────────────────
 .detail-card {
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
   border-radius: 16px;
   padding: 1.5rem;
 }
-
 .card-head {
   display: flex;
   align-items: center;
@@ -595,14 +614,12 @@ watch(useSyncTick(), () => load());
   margin-bottom: 1.25rem;
   color: var(--text-sub);
 }
-
 .detail-section-title {
   font-size: 0.95rem;
   font-weight: 700;
   color: var(--text-primary);
   flex: 1;
 }
-
 .item-count-badge {
   font-size: 0.7rem;
   font-weight: 700;
@@ -611,25 +628,20 @@ watch(useSyncTick(), () => load());
   padding: 2px 8px;
   border-radius: 20px;
 }
-
-// ── Info grid ─────────────────────────────────────────────────────────────────
 .info-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: 1rem;
   margin-bottom: 1.25rem;
 }
-
 .info-item {
   display: flex;
   flex-direction: column;
   gap: 4px;
-
   &--full {
     grid-column: 1 / -1;
   }
 }
-
 .info-label {
   font-size: 0.72rem;
   color: var(--text-muted);
@@ -637,38 +649,30 @@ watch(useSyncTick(), () => load());
   letter-spacing: 0.5px;
   font-weight: 600;
 }
-
 .info-value {
   font-size: 0.9rem;
   color: var(--text-primary);
-
   &.strong {
     font-weight: 700;
     font-size: 1.05rem;
     color: var(--primary);
   }
-
   &.collected {
     color: #10b981;
   }
-
   &.remaining {
     color: #f59e0b;
   }
 }
-
 .info-link {
   color: var(--primary);
   text-decoration: none;
   font-weight: 600;
   font-size: 0.9rem;
 }
-
-// ── Progress bar ──────────────────────────────────────────────────────────────
 .payment-progress {
   margin-bottom: 1.25rem;
 }
-
 .progress-labels {
   display: flex;
   justify-content: space-between;
@@ -676,24 +680,20 @@ watch(useSyncTick(), () => load());
   color: var(--text-muted);
   margin-bottom: 6px;
 }
-
 .progress-pct {
   font-weight: 700;
   color: var(--text-primary);
 }
-
 .progress-track {
   height: 8px;
   background: var(--bg-elevated);
   border-radius: 20px;
   overflow: hidden;
 }
-
 .progress-fill {
   height: 100%;
   border-radius: 20px;
   transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
-
   &.fill-paid {
     background: linear-gradient(90deg, #10b981, #34d399);
   }
@@ -705,8 +705,6 @@ watch(useSyncTick(), () => load());
     width: 4px !important;
   }
 }
-
-// ── Action buttons ────────────────────────────────────────────────────────────
 .order-actions-row {
   display: flex;
   gap: 10px;
@@ -714,7 +712,6 @@ watch(useSyncTick(), () => load());
   padding-top: 1rem;
   border-top: 1px solid var(--border-color);
 }
-
 .payment-count-badge {
   display: inline-flex;
   align-items: center;
@@ -728,8 +725,6 @@ watch(useSyncTick(), () => load());
   border-radius: 50%;
   margin-inline-start: 4px;
 }
-
-// ── Items ─────────────────────────────────────────────────────────────────────
 .items-empty {
   display: flex;
   flex-direction: column;
@@ -739,7 +734,6 @@ watch(useSyncTick(), () => load());
   color: var(--text-muted);
   text-align: center;
 }
-
 .items-total-row {
   display: flex;
   justify-content: flex-end;
@@ -750,8 +744,6 @@ watch(useSyncTick(), () => load());
   font-weight: 700;
   color: var(--primary);
 }
-
-// ── Payment summary strip ─────────────────────────────────────────────────────
 .payment-summary-strip {
   display: flex;
   gap: 0;
@@ -761,7 +753,6 @@ watch(useSyncTick(), () => load());
   overflow: hidden;
   margin-bottom: 1.25rem;
 }
-
 .summary-item {
   flex: 1;
   display: flex;
@@ -771,13 +762,11 @@ watch(useSyncTick(), () => load());
   padding: 12px 10px;
   text-align: center;
 }
-
 .summary-divider {
   width: 1px;
   background: var(--border-color);
   margin: 10px 0;
 }
-
 .summary-label {
   font-size: 0.68rem;
   text-transform: uppercase;
@@ -785,8 +774,6 @@ watch(useSyncTick(), () => load());
   color: var(--text-muted);
   font-weight: 600;
 }
-
-// ── Add payment form ──────────────────────────────────────────────────────────
 .add-payment-form {
   background: var(--bg-elevated);
   border: 1px solid var(--border-color);
@@ -794,7 +781,6 @@ watch(useSyncTick(), () => load());
   padding: 1rem;
   margin-bottom: 1.25rem;
 }
-
 .form-section-title {
   display: flex;
   align-items: center;
@@ -806,7 +792,6 @@ watch(useSyncTick(), () => load());
   letter-spacing: 0.04em;
   margin-bottom: 10px;
 }
-
 .add-payment-row {
   display: flex;
   gap: 10px;
@@ -814,7 +799,6 @@ watch(useSyncTick(), () => load());
   align-items: flex-end;
   margin-bottom: 10px;
 }
-
 .pay-input {
   flex: 1 1 100px;
 }
@@ -824,19 +808,15 @@ watch(useSyncTick(), () => load());
 .pay-note {
   flex: 2 1 140px;
 }
-
 .add-payment-actions {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
 }
-
-// ── Payments list ─────────────────────────────────────────────────────────────
 .payments-list-section {
   margin-top: 0.5rem;
 }
-
 .payments-empty {
   display: flex;
   flex-direction: column;
@@ -846,13 +826,11 @@ watch(useSyncTick(), () => load());
   color: var(--text-muted);
   text-align: center;
 }
-
 .payments-list {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
-
 .payment-row {
   display: flex;
   align-items: center;
@@ -862,40 +840,33 @@ watch(useSyncTick(), () => load());
   border: 1px solid var(--border-color);
   border-radius: 10px;
   transition: border-color 0.15s;
-
   &:hover {
     border-color: var(--primary);
   }
 }
-
 .payment-index {
   font-size: 0.7rem;
   font-weight: 700;
   color: var(--text-muted);
   min-width: 24px;
 }
-
 .payment-info {
   flex: 1;
   min-width: 0;
 }
-
 .payment-amount {
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: 0.9rem;
-
   strong {
     color: var(--text-primary);
   }
 }
-
 .payment-equiv {
   font-size: 0.75rem;
   color: var(--text-muted);
 }
-
 .payment-meta {
   display: flex;
   gap: 6px;
@@ -903,18 +874,15 @@ watch(useSyncTick(), () => load());
   font-size: 0.72rem;
   color: var(--text-muted);
 }
-
 .payment-date {
   white-space: nowrap;
 }
-
 .payment-note {
   font-style: italic;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
 .payment-del-btn {
   width: 28px;
   height: 28px;
@@ -928,12 +896,10 @@ watch(useSyncTick(), () => load());
   justify-content: center;
   transition: background 0.15s;
   flex-shrink: 0;
-
   &:hover {
     background: rgba(239, 68, 68, 0.18);
   }
 }
-
 .delete-confirm-detail {
   margin-top: 10px;
   padding: 8px 12px;
@@ -942,8 +908,6 @@ watch(useSyncTick(), () => load());
   font-size: 0.85rem;
   color: var(--text-primary);
 }
-
-// ── Badges ────────────────────────────────────────────────────────────────────
 .badge {
   padding: 3px 10px;
   border-radius: 20px;
@@ -966,32 +930,25 @@ watch(useSyncTick(), () => load());
 .ms-auto {
   margin-inline-start: auto;
 }
-
-// ── Text colors ───────────────────────────────────────────────────────────────
 .text-success {
   color: #10b981 !important;
 }
 .text-warning {
   color: #f59e0b !important;
 }
-
-// ── Utils ─────────────────────────────────────────────────────────────────────
 .loading-center {
   display: flex;
   justify-content: center;
   padding: 4rem;
 }
-
 .spin {
   animation: spin 1s linear infinite;
 }
-
 @keyframes spin {
   to {
     transform: rotate(360deg);
   }
 }
-
 .d-flex {
   display: flex;
 }

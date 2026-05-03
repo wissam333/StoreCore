@@ -16,7 +16,7 @@
         <Icon name="mdi:alert-circle-outline" size="18" />
         <div>
           <span class="sum-chip-label">{{ $t("totalUnpaid") }}</span>
-          <span class="sum-chip-val">{{ fmtSP(totalUnpaidSp) }}</span>
+          <span class="sum-chip-val">{{ fmtUnpaid(totalUnpaidSp) }}</span>
         </div>
       </div>
     </div>
@@ -53,8 +53,9 @@
         }
       "
     >
+      <!-- Amount: show in source currency, with report-currency equivalent -->
       <template #cell-amount="{ row }">
-        {{ row.amount }} {{ row.currency }}
+        {{ fmtDue(row) }}
       </template>
 
       <template #cell-customer_name="{ row }">
@@ -67,6 +68,7 @@
         </NuxtLink>
         <span v-else>{{ row.customer_name ?? "—" }}</span>
       </template>
+
       <template #cell-paid="{ row }">
         <span
           class="badge"
@@ -75,11 +77,13 @@
           {{ row.paid ? $t("paid") : $t("unpaid") }}
         </span>
       </template>
+
       <template #cell-due_date="{ row }">
         <span :class="isOverdue(row) ? 'overdue' : ''">
           {{ row.due_date ? new Date(row.due_date).toLocaleDateString() : "—" }}
         </span>
       </template>
+
       <template #actions="{ row }">
         <div class="action-buttons">
           <button
@@ -115,7 +119,6 @@
       max-width="500px"
     >
       <div class="modal-form">
-        <!-- ✅ Use the shared Combobox component -->
         <SharedUiFormCombobox
           v-model="selectedCustomer"
           v-model:search="customerSearch"
@@ -220,9 +223,15 @@ const {
 
 const { locale, t: $t } = useI18n();
 const { $toast } = useNuxtApp();
+const { fmtTx, loadSettings } = useCurrency();
 
-// ✅ Destructure fmtSP directly — it's a stable function from the singleton
-const { fmtSP, loadSettings } = useCurrency();
+// ── Display helpers ───────────────────────────────────────────────────────────
+
+// Each due row has amount + currency + amount_sp — use all three for correctness
+const fmtDue = (row) => fmtTx(row.amount, row.currency, row.amount_sp);
+
+// The unpaid total is a running SP aggregate — fmtTx('SP','SP') is correct
+const fmtUnpaid = (sp) => fmtTx(sp ?? 0, "SP", sp ?? 0);
 
 // ── Table state ───────────────────────────────────────────────────────────────
 const search = ref("");
@@ -241,7 +250,7 @@ const showDeleteModal = ref(false);
 const deleting = ref(false);
 const toDelete = ref(null);
 
-// ── Customer combobox — exact same pattern as orders/new.vue ──────────────────
+// ── Customer combobox ─────────────────────────────────────────────────────────
 const customerSearch = ref("");
 const customerSuggestions = ref([]);
 const customerLoading = ref(false);
@@ -275,7 +284,6 @@ const onCreateCustomer = async (name) => {
   }
 };
 
-// Keep form.customer_id in sync when combobox selection changes
 watch(selectedCustomer, (c) => {
   form.customer_id = c?.id ?? null;
 });

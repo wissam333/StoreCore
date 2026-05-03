@@ -169,7 +169,7 @@ const cols = [
   { key: "name", label: "name", sortable: true },
   { key: "phone", label: "phone" },
   { key: "total_orders", label: "orders" },
-  { key: "total_spent", label: "totalSpent", align: "end" },
+  { key: "total_spent", label: "totalSpent" },
   { key: "last_order", label: "lastOrder" },
 ];
 
