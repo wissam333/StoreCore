@@ -184,10 +184,10 @@ const currencyOptions = [
 ];
 
 const cols = [
-  { key: "name", label: "product", sortable: true },
+  { key: "name", label: "product" },
   { key: "category_name", label: "category" },
   { key: "prices", label: "prices" },
-  { key: "stock", label: "stock", align: "center" },
+  { key: "stock", label: "stock" },
   { key: "is_active", label: "status" },
 ];
 

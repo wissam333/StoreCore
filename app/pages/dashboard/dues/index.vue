@@ -310,9 +310,9 @@ const paidOptions = computed(() => [
 
 // ── Table columns ─────────────────────────────────────────────────────────────
 const cols = [
-  { key: "customer_name", label: "customer", sortable: true },
+  { key: "customer_name", label: "customer" },
   { key: "description", label: "description" },
-  { key: "amount", label: "amount", align: "end" },
+  { key: "amount", label: "amount" },
   { key: "due_date", label: "dueDate" },
   { key: "paid", label: "status" },
 ];

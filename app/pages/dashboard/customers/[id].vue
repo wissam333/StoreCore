@@ -205,14 +205,14 @@ const tabs = [
 ];
 
 const orderCols = [
-  { key: "order_date", label: "date", sortable: true },
-  { key: "total_sp", label: "total", align: "end" },
+  { key: "order_date", label: "date" },
+  { key: "total_sp", label: "total" },
   { key: "status", label: "status" },
 ];
 
 const dueCols = [
   { key: "description", label: "description" },
-  { key: "amount", label: "amount", align: "end" },
+  { key: "amount", label: "amount" },
   { key: "due_date", label: "dueDate" },
   { key: "paid", label: "status" },
 ];

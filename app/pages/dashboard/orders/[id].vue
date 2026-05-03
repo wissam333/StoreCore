@@ -418,8 +418,8 @@ const currencyOptions = [
 const itemCols = [
   { key: "product_name", label: "product" },
   { key: "quantity", label: "qty" },
-  { key: "sell_price_at_sale", label: "unitPrice", align: "end" },
-  { key: "line_total_sp", label: "total", align: "end" },
+  { key: "sell_price_at_sale", label: "unitPrice" },
+  { key: "line_total_sp", label: "total" },
 ];
 
 // ── Display helpers ───────────────────────────────────────────────────────────

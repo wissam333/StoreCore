@@ -182,10 +182,10 @@ const statusOptions = [
 const cols = [
   { key: "customer_name", label: "customer" },
   { key: "order_date", label: "date" },
-  { key: "item_count", label: "items", align: "center" },
-  { key: "total_sp", label: "total", align: "end" },
-  { key: "total_paid_sp", label: "paid", align: "end" },
-  { key: "remaining", label: "remaining", align: "end" },
+  { key: "item_count", label: "items" },
+  { key: "total_sp", label: "total" },
+  { key: "total_paid_sp", label: "paid" },
+  { key: "remaining", label: "remaining" },
   { key: "status", label: "status" },
 ];
 
