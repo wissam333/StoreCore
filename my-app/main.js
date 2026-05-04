@@ -13,9 +13,7 @@ import {
   getMachineId,
 } from "./license/licenseManager.js";
 import fs from "fs";
-import http from "http";
 import { createRequire } from "module";
-import { networkInterfaces } from "os";
 const require = createRequire(import.meta.url);
 
 // ── File logger ───────────────────────────────────────────────────────────────
@@ -32,6 +30,25 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 if (require("electron-squirrel-startup")) app.quit();
+
+// run on startup
+// if (process.platform === "win32") {
+//   const command = process.argv[1];
+//   if (command === "--squirrel-install" || command === "--squirrel-updated") {
+//     app.setLoginItemSettings({
+//       openAtLogin: true,
+//       path: path.join(path.dirname(process.execPath), "..", "Update.exe"),
+//       args: [
+//         "--processStart",
+//         `"${path.basename(process.execPath)}"`,
+//         "--process-start-args",
+//         '"--autostart"',
+//       ],
+//     });
+//   } else if (command === "--squirrel-uninstall") {
+//     app.setLoginItemSettings({ openAtLogin: false });
+//   }
+// }
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -120,109 +137,26 @@ const db = getDb();
 initSchema(db);
 registerStoreHandlers(db, ipcMain);
 
-// ── P2P WebSocket Server ──────────────────────────────────────────────────────
-// Uses Node's built-in 'ws' module — no PeerJS, no port conflicts.
-// The OS picks a free port automatically (port 0).
-import { WebSocketServer } from "ws";
-
-const PREFERRED_PORTS = [9000, 9001, 9002, 9003, 9010];
-
-const getLocalIp = () => {
-  const nets = networkInterfaces();
-  for (const name of Object.keys(nets)) {
-    for (const net of nets[name]) {
-      if (net.family === "IPv4" && !net.internal) return net.address;
-    }
-  }
-  return "127.0.0.1";
-};
-
-let _wss = null;
-let _wssPort = null;
-let _wssReady = false;
-let _wssError = null;
-let _wssCallbacks = [];
-
-const startWssOnce = () => {
-  if (_wss) return; // already started
-  try {
-    _wss = new WebSocketServer({ port: 0 }); // port 0 = OS picks free port
-    _wss.on("listening", () => {
-      _wssPort = _wss.address().port;
-      _wssReady = true;
-      log(`[WSS] Listening on port ${_wssPort}`);
-      _wssCallbacks.forEach((cb) =>
-        cb({ ok: true, ip: getLocalIp(), port: _wssPort }),
-      );
-      _wssCallbacks = [];
-    });
-    _wss.on("error", (err) => {
-      _wssError = err.message;
-      log(`[WSS] Error: ${err.message}`);
-      _wssCallbacks.forEach((cb) => cb({ ok: false, error: err.message }));
-      _wssCallbacks = [];
-    });
-    // Route incoming connections to the renderer via IPC
-    _wss.on("connection", (ws) => {
-      log("[WSS] Guest connected");
-      ws.on("message", (data) => {
-        mainWindow?.webContents.send("p2p:message", data.toString());
-      });
-      ws.on("close", () => {
-        log("[WSS] Guest disconnected");
-        mainWindow?.webContents.send("p2p:guest-disconnected");
-        _hostSocket = null;
-      });
-      _hostSocket = ws;
-      mainWindow?.webContents.send("p2p:guest-connected");
-    });
-  } catch (err) {
-    _wssError = err.message;
-    log(`[WSS] Failed to start: ${err.message}`);
-  }
-};
-
-let _hostSocket = null; // the connected guest socket (host side)
-
-ipcMain.handle("p2p:start-server", () => {
-  if (_wssReady) return { ok: true, ip: getLocalIp(), port: _wssPort };
-  if (_wssError) return { ok: false, error: _wssError };
-  return new Promise((resolve) => {
-    _wssCallbacks.push(resolve);
-    setTimeout(() => resolve({ ok: false, error: "Timeout" }), 10_000);
-  });
-});
-
-ipcMain.handle("p2p:stop-server", () => ({ ok: true })); // server is app-lifetime
-
-// Host sends a message to the connected guest
-ipcMain.handle("p2p:send", (_, msg) => {
-  if (_hostSocket?.readyState === 1) {
-    // 1 = OPEN
-    _hostSocket.send(msg);
-    return { ok: true };
-  }
-  return { ok: false, error: "No guest connected" };
-});
-
-app.on("before-quit", () => {
-  _wss?.close();
-  log("[WSS] Closed on app quit");
-});
-
 // ── License IPC ───────────────────────────────────────────────────────────────
+
+// KEY FIX: activate handler now checks that the key was actually written to
+// disk before returning ok:true. If storage fails, we return ok:false with a
+// diagnostic error so the license page shows it — the user keeps the input
+// field and can try again. We never call onActivated() unless save confirmed.
 ipcMain.handle("license:activate", async (_, key) => {
   log("[license:activate] key:", key?.slice(0, 8) + "...");
 
   const result = await activateLicense(key, db);
   log("[license:activate] server result:", JSON.stringify(result));
 
-  if (!result.ok) return result;
+  if (!result.ok) return result; // server rejected — pass error straight through
 
+  // Confirm the key landed on disk
   const saved = getSavedKey();
   log("[license:activate] getSavedKey after save:", saved ? "OK ✓" : "NULL ✗");
 
   if (!saved) {
+    // Run storage diagnostics so we can see the cause in app.log
     const userData = app.getPath("userData");
     const storePath = path.join(userData, "license.json");
     let diag = `userData=${userData}`;
@@ -237,12 +171,15 @@ ipcMain.handle("license:activate", async (_, key) => {
 
     return {
       ok: false,
+      // Tell the user what happened without a dead-end.
+      // The input field stays open so they can retry.
       error:
         "Your license was accepted by the server but could not be saved on this PC. " +
         `Check app.log at: ${getLogFile()}`,
     };
   }
 
+  // Key is on disk — safe to proceed
   return { ok: true };
 });
 
@@ -256,6 +193,8 @@ ipcMain.handle("license:getKey", () => {
 
 ipcMain.handle("license:getMachineId", () => getMachineId());
 
+// This is only sent after activate() confirmed ok:true AND key is on disk.
+// So we can open the main window unconditionally here.
 ipcMain.on("license:activated", async () => {
   log("[main] license:activated — opening main window");
   if (licenseWindow && !licenseWindow.isDestroyed()) {
@@ -271,7 +210,7 @@ ipcMain.on("app:quit", () => app.quit());
 app.whenReady().then(async () => {
   log("[1] app ready — userData:", app.getPath("userData"));
   registerProtocol();
-  startWssOnce();
+
   let license;
   try {
     license = await verifyLicense();

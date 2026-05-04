@@ -82,18 +82,8 @@ contextBridge.exposeInMainWorld("license", {
 
 contextBridge.exposeInMainWorld("electronAPI", {
   nativeFetch: (url) => ipcRenderer.invoke("native-fetch", url),
-  // P2P — new WebSocket-based API
   p2pStartServer: () => ipcRenderer.invoke("p2p:start-server"),
   p2pStopServer: () => ipcRenderer.invoke("p2p:stop-server"),
-  p2pSend: (msg) => ipcRenderer.invoke("p2p:send", msg), // host sends to guest
-  p2pOnMessage: (cb) => ipcRenderer.on("p2p:message", (_, d) => cb(d)),
-  p2pOnGuestConnected: (cb) => ipcRenderer.on("p2p:guest-connected", cb),
-  p2pOnGuestDisconnected: (cb) => ipcRenderer.on("p2p:guest-disconnected", cb),
-  p2pRemoveAllListeners: () => {
-    ipcRenderer.removeAllListeners("p2p:message");
-    ipcRenderer.removeAllListeners("p2p:guest-connected");
-    ipcRenderer.removeAllListeners("p2p:guest-disconnected");
-  },
 });
 
 contextBridge.exposeInMainWorld("__ELECTRON__", true);
