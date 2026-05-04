@@ -13,7 +13,7 @@ import {
   getMachineId,
 } from "./license/licenseManager.js";
 import fs from "fs";
-import http from "http"; // ← NEW: needed to create our own HTTP server
+import http from "http";
 import { createRequire } from "module";
 import { networkInterfaces } from "os";
 const require = createRequire(import.meta.url);
@@ -120,76 +120,109 @@ const db = getDb();
 initSchema(db);
 registerStoreHandlers(db, ipcMain);
 
-// ── P2P PeerJS Server (on-demand) ─────────────────────────────────────────────
+// ── P2P PeerJS Server ─────────────────────────────────────────────────────────
 //
-// FIX: PeerServer() from the "peer" package returns an Express middleware,
-// NOT a real http.Server — so it has no .close() method. The correct approach
-// is to create our own http.Server and pass it to PeerServer via { server }.
-// We keep a reference to peerHttpServer so we can call .close() on it properly.
+// WHY THIS APPROACH:
+//   PeerServer() returns an Express middleware — NOT an http.Server.
+//   Calling .close() on it crashes with "is not a function".
+//   Fix: create our own http.Server and pass it via { server } option.
 //
-let peerHttpServer = null; // The real http.Server — this is what we .close()
-let peerServerApp = null; // The PeerServer instance (for logging/events only)
+// WHY REF-COUNTING:
+//   Both host AND guest call startLocalServer() in useP2PSync.js.
+//   Without ref-counting, the second caller gets EADDRINUSE because
+//   port 9000 is already taken by the first caller's server.
+//   With ref-counting: first start() creates the server, second start()
+//   just increments the counter. Each stop() decrements; server only
+//   actually closes when the counter reaches 0.
+//
+let peerHttpServer = null; // real http.Server — the one we .close()
+let peerServerApp = null; // PeerServer instance (used for events only)
+let peerRefCount = 0; // how many callers currently hold the server open
 
 const getLocalIp = () => {
   const nets = networkInterfaces();
   for (const name of Object.keys(nets)) {
     for (const net of nets[name]) {
-      if (net.family === "IPv4" && !net.internal) {
-        return net.address; // e.g. 192.168.1.5
-      }
+      if (net.family === "IPv4" && !net.internal) return net.address;
     }
   }
   return "127.0.0.1";
 };
 
-ipcMain.handle("p2p:start-server", () => {
-  return new Promise((resolve, reject) => {
-    // Already running — just return the current IP
-    if (peerHttpServer && peerHttpServer.listening) {
-      log("[PeerServer] Already running, IP:", getLocalIp());
-      resolve({ ok: true, ip: getLocalIp() });
+// Destroy a stale server that exists but is not listening.
+// Safe to call when peerHttpServer is null.
+const forceStopServer = () =>
+  new Promise((resolve) => {
+    if (!peerHttpServer) {
+      resolve();
       return;
     }
+    const old = peerHttpServer;
+    peerHttpServer = null;
+    peerServerApp = null;
+    peerRefCount = 0;
+    // closeAllConnections() flushes keep-alive sockets so .close() doesn't hang.
+    // It was added in Node 18.2 — safe to call conditionally.
+    old.closeAllConnections?.();
+    old.close(() => {
+      log("[PeerServer] Stale instance force-stopped");
+      resolve();
+    });
+  });
 
+ipcMain.handle("p2p:start-server", async () => {
+  // ── Case 1: server already running ────────────────────────────────────────
+  if (peerHttpServer?.listening) {
+    peerRefCount++;
+    const ip = getLocalIp();
+    log(`[PeerServer] Reusing server (refs=${peerRefCount}), IP: ${ip}`);
+    return { ok: true, ip };
+  }
+
+  // ── Case 2: stale object (crashed or race condition) ───────────────────────
+  if (peerHttpServer) {
+    log("[PeerServer] Stale server found — force-stopping before restart");
+    await forceStopServer();
+  }
+
+  // ── Case 3: fresh start ────────────────────────────────────────────────────
+  return new Promise((resolve, reject) => {
     try {
       const { PeerServer } = require("peer");
 
-      // Create our own http.Server FIRST so we control its lifecycle
+      // Create the real HTTP server FIRST — this is what we'll .close() later
       peerHttpServer = http.createServer();
 
-      // Attach PeerServer to our http.Server via the `server` option.
-      // This is the only pattern where .close() works correctly.
-      peerServerApp = PeerServer({
-        server: peerHttpServer,
-        path: "/myapp",
-      });
+      // Attach PeerServer to it via the `server` option (not `port`)
+      peerServerApp = PeerServer({ server: peerHttpServer, path: "/myapp" });
 
-      peerServerApp.on("connection", (client) => {
-        log("[PeerServer] Client connected:", client.getId());
-      });
+      peerServerApp.on("connection", (c) =>
+        log("[PeerServer] connected:", c.getId()),
+      );
+      peerServerApp.on("disconnect", (c) =>
+        log("[PeerServer] disconnected:", c.getId()),
+      );
 
-      peerServerApp.on("disconnect", (client) => {
-        log("[PeerServer] Client disconnected:", client.getId());
-      });
-
-      // Handle errors on the HTTP server itself
       peerHttpServer.on("error", (err) => {
         log("[PeerServer] HTTP error:", err.message);
         peerHttpServer = null;
         peerServerApp = null;
+        peerRefCount = 0;
         reject({ ok: false, error: err.message });
       });
 
       // listen() callback fires only when the port is actually bound —
-      // no more setTimeout guesswork
+      // no more setTimeout guessing
       peerHttpServer.listen(9000, () => {
+        peerRefCount = 1;
         const ip = getLocalIp();
-        log("[PeerServer] Started on port 9000, IP:", ip);
+        log(`[PeerServer] Started on :9000, IP: ${ip}`);
         resolve({ ok: true, ip });
       });
     } catch (e) {
       peerHttpServer = null;
       peerServerApp = null;
+      peerRefCount = 0;
       log("[PeerServer] Failed to start:", e.message);
       reject({ ok: false, error: e.message });
     }
@@ -198,22 +231,32 @@ ipcMain.handle("p2p:start-server", () => {
 
 ipcMain.handle("p2p:stop-server", () => {
   return new Promise((resolve) => {
-    // Nothing running — nothing to do
     if (!peerHttpServer) {
-      log("[PeerServer] Stop called but server was not running");
+      log("[PeerServer] stop-server called — nothing running");
+      peerRefCount = 0;
       resolve({ ok: true });
       return;
     }
 
-    // .close() on the real http.Server — this is what was missing before
-    peerHttpServer.close((err) => {
-      if (err) {
-        log("[PeerServer] Stop error:", err.message);
-      } else {
-        log("[PeerServer] Stopped cleanly");
-      }
-      peerHttpServer = null;
-      peerServerApp = null;
+    // Decrement — clamp to 0 so a rogue extra stop() can't go negative
+    peerRefCount = Math.max(0, peerRefCount - 1);
+    log(`[PeerServer] stop requested (refs now=${peerRefCount})`);
+
+    if (peerRefCount > 0) {
+      // Another caller still needs the server — leave it running
+      resolve({ ok: true });
+      return;
+    }
+
+    // Last caller — actually shut down
+    const old = peerHttpServer;
+    peerHttpServer = null;
+    peerServerApp = null;
+
+    old.closeAllConnections?.(); // flush keep-alive sockets
+    old.close((err) => {
+      if (err) log("[PeerServer] stop error:", err.message);
+      else log("[PeerServer] stopped cleanly");
       resolve({ ok: true });
     });
   });
