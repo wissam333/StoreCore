@@ -381,11 +381,9 @@ const onProductSelect = (idx, productId) => {
   item.sell_price_at_sale = p.sell_price;
   item.currency_at_sale = p.currency;
   item._maxStock = p.stock;
-  // Reset qty to 1, but if out of stock set to 0 so validation catches it
   item.quantity = p.stock > 0 ? 1 : 0;
 };
 
-// Clamp qty on blur — can't exceed stock, can't be < 1
 const clampQty = (idx) => {
   const item = items.value[idx];
   const max = item._maxStock;
@@ -418,34 +416,32 @@ const totalQty = computed(() =>
 const validationErrors = computed(() => {
   const errs = [];
   if (!items.value.length) return errs;
-
-  const hasNoProduct = items.value.some((i) => !i.product_id);
-  if (hasNoProduct) errs.push($t("selectProductForAllItems"));
-
-  const hasZeroQty = items.value.some((i) => !i.quantity || i.quantity < 1);
-  if (hasZeroQty) errs.push($t("qtyMustBeAtLeastOne"));
-
-  const hasOutOfStock = items.value.some(
-    (i) => i._maxStock !== null && i._maxStock === 0,
-  );
-  if (hasOutOfStock) errs.push($t("removeOutOfStockItems"));
-
-  const hasExceedsStock = items.value.some(
-    (i) => i._maxStock !== null && i._maxStock > 0 && i.quantity > i._maxStock,
-  );
-  if (hasExceedsStock) errs.push($t("someItemsExceedStock"));
-
-  const hasZeroPrice = items.value.some(
-    (i) => i.product_id && i.sell_price_at_sale <= 0,
-  );
-  if (hasZeroPrice) errs.push($t("priceCannotBeZero"));
-
+  if (items.value.some((i) => !i.product_id))
+    errs.push($t("selectProductForAllItems"));
+  if (items.value.some((i) => !i.quantity || i.quantity < 1))
+    errs.push($t("qtyMustBeAtLeastOne"));
+  if (items.value.some((i) => i._maxStock !== null && i._maxStock === 0))
+    errs.push($t("removeOutOfStockItems"));
+  if (
+    items.value.some(
+      (i) =>
+        i._maxStock !== null && i._maxStock > 0 && i.quantity > i._maxStock,
+    )
+  )
+    errs.push($t("someItemsExceedStock"));
+  if (items.value.some((i) => i.product_id && i.sell_price_at_sale <= 0))
+    errs.push($t("priceCannotBeZero"));
   return errs;
 });
 
 const canSave = computed(
   () => items.value.length > 0 && validationErrors.value.length === 0,
 );
+
+// ── Original order data (preserved for edit) ──────────────────────────────────
+// We keep the original order_date and display_currency so editing items
+// never accidentally resets them.
+const originalOrder = ref(null);
 
 // ── Save ──────────────────────────────────────────────────────────────────────
 const saving = ref(false);
@@ -459,16 +455,27 @@ const save = async () => {
   }
 
   saving.value = true;
+
+  // For edits: preserve the original order_date and display_currency.
+  // Never reset paid_amount here — saveOrder in store.js recalculates
+  // it correctly from existing payments in order_payments table.
+  const orderDate = isEdit.value
+    ? originalOrder.value?.order_date ?? new Date().toISOString()
+    : new Date().toISOString();
+
+  // display_currency: on edit keep the original; on create derive from items
+  const displayCurrency = isEdit.value
+    ? originalOrder.value?.display_currency ?? "SP"
+    : items.value.every((i) => i.currency_at_sale === "USD")
+    ? "USD"
+    : "SP";
+
   const r = await saveOrder({
     order: {
       id: isEdit.value ? route.params.id : undefined,
       customer_id: selectedCustomer.value?.id ?? null,
-      order_date: new Date().toISOString(),
-      // No paid_amount on create — payment is added after via the detail page
-      paid_amount: 0,
-      display_currency: items.value.every((i) => i.currency_at_sale === "USD")
-        ? "USD"
-        : "SP",
+      order_date: orderDate,
+      display_currency: displayCurrency,
       notes: orderNotes.value,
     },
     items: items.value.map((i) => ({
@@ -498,6 +505,13 @@ const loadEdit = async () => {
   const r = await getOrderById(route.params.id);
   if (!r.ok) return;
   const o = r.data;
+
+  // Store original order fields so save() can preserve them
+  originalOrder.value = {
+    order_date: o.order_date,
+    display_currency: o.display_currency,
+  };
+
   if (o.customer_id) {
     selectedCustomer.value = { id: o.customer_id, name: o.customer_name ?? "" };
     customerSearch.value = o.customer_name ?? "";

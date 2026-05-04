@@ -222,77 +222,6 @@ export function registerStoreHandlers(db, ipcMain) {
     return "partly_paid";
   };
 
-  // ── STATS ─────────────────────────────────────────────────────────────────
-  ipcMain.handle("store:getStats", () => {
-    try {
-      const today = new Date().toISOString().slice(0, 10);
-      const firstOfMonth = today.slice(0, 7) + "-01";
-      const rate = getDollarRate();
-      const reportCurrency =
-        db
-          .prepare(`SELECT value FROM settings WHERE key='report_currency'`)
-          .get()?.value ?? "SP";
-
-      const totalProducts = db
-        .prepare(
-          `SELECT COUNT(*) as n FROM products WHERE _deleted=0 AND is_active=1`,
-        )
-        .get().n;
-      const totalCustomers = db
-        .prepare(`SELECT COUNT(*) as n FROM customers WHERE _deleted=0`)
-        .get().n;
-      const lowStock = db
-        .prepare(
-          `SELECT COUNT(*) as n FROM products WHERE _deleted=0 AND stock <= min_stock AND min_stock > 0`,
-        )
-        .get().n;
-      const todayOrders = db
-        .prepare(
-          `SELECT COUNT(*) as n FROM orders WHERE date(order_date)=? AND _deleted=0`,
-        )
-        .get(today).n;
-
-      // Revenue = total actual collected payments this month
-      const monthCollectedSP = db
-        .prepare(
-          `
-        SELECT COALESCE(SUM(op.amount_sp), 0) as n
-        FROM order_payments op
-        JOIN orders o ON op.order_id = o.id
-        WHERE op._deleted=0 AND o._deleted=0
-          AND date(op.paid_at) >= ?
-      `,
-        )
-        .get(firstOfMonth).n;
-
-      const unpaidDues = db
-        .prepare(`SELECT COUNT(*) as n FROM dues WHERE paid=0 AND _deleted=0`)
-        .get().n;
-      const unpaidDuesAmount = db
-        .prepare(
-          `SELECT COALESCE(SUM(amount_sp),0) as n FROM dues WHERE paid=0 AND _deleted=0`,
-        )
-        .get().n;
-
-      const divisor = reportCurrency === "USD" ? rate : 1;
-      return {
-        ok: true,
-        data: {
-          totalProducts,
-          totalCustomers,
-          lowStock,
-          todayOrders,
-          monthRevenue: monthCollectedSP / divisor,
-          reportCurrency,
-          unpaidDues,
-          unpaidDuesAmount: unpaidDuesAmount / divisor,
-        },
-      };
-    } catch (err) {
-      return { ok: false, error: err.message };
-    }
-  });
-
   // ── CATEGORIES ────────────────────────────────────────────────────────────
   ipcMain.handle("store:getCategories", () => {
     try {
@@ -491,17 +420,19 @@ export function registerStoreHandlers(db, ipcMain) {
     (_, { search = "", limit = 50, offset = 0 } = {}) => {
       try {
         const like = `%${search}%`;
+        // Sum payments split by currency so USD payments use frozen amount
         const data = db
           .prepare(
             `
           SELECT
             c.*,
-            COALESCE(SUM(CASE WHEN op._deleted=0 THEN op.amount_sp END), 0) AS total_spent,
-            COUNT(DISTINCT CASE WHEN o._deleted=0 THEN o.id END)            AS total_orders,
-            MAX(CASE WHEN o._deleted=0 THEN o.order_date END)               AS last_order
+            COALESCE(SUM(CASE WHEN op._deleted=0 AND op.currency='USD'  THEN op.amount   ELSE 0 END), 0) AS spent_usd,
+            COALESCE(SUM(CASE WHEN op._deleted=0 AND op.currency!='USD' THEN op.amount_sp ELSE 0 END), 0) AS spent_sp,
+            COUNT(DISTINCT CASE WHEN o._deleted=0 THEN o.id END)                                          AS total_orders,
+            MAX(CASE WHEN o._deleted=0 THEN o.order_date END)                                             AS last_order
           FROM customers c
-          LEFT JOIN orders o         ON o.customer_id = c.id
-          LEFT JOIN order_payments op ON op.order_id  = o.id
+          LEFT JOIN orders o          ON o.customer_id = c.id
+          LEFT JOIN order_payments op ON op.order_id   = o.id
           WHERE c._deleted=0
             AND (c.name LIKE ? OR c.phone LIKE ?)
           GROUP BY c.id
@@ -523,10 +454,25 @@ export function registerStoreHandlers(db, ipcMain) {
     },
   );
 
+  // Replace store:getCustomerById
   ipcMain.handle("store:getCustomerById", (_, id) => {
     try {
       const customer = db
-        .prepare(`SELECT * FROM customers WHERE id=? AND _deleted=0`)
+        .prepare(
+          `
+        SELECT
+          c.*,
+          COALESCE(SUM(CASE WHEN op._deleted=0 AND op.currency='USD'  THEN op.amount   ELSE 0 END), 0) AS spent_usd,
+          COALESCE(SUM(CASE WHEN op._deleted=0 AND op.currency!='USD' THEN op.amount_sp ELSE 0 END), 0) AS spent_sp,
+          COUNT(DISTINCT CASE WHEN o._deleted=0 THEN o.id END)                                          AS total_orders,
+          MAX(CASE WHEN o._deleted=0 THEN o.order_date END)                                             AS last_order
+        FROM customers c
+        LEFT JOIN orders o          ON o.customer_id = c.id
+        LEFT JOIN order_payments op ON op.order_id   = o.id
+        WHERE c._deleted=0 AND c.id=?
+        GROUP BY c.id
+        `,
+        )
         .get(id);
       if (!customer) return { ok: false, error: "Not found" };
       const orders = db
@@ -1306,111 +1252,200 @@ export function registerStoreHandlers(db, ipcMain) {
         db
           .prepare(`SELECT value FROM settings WHERE key='report_currency'`)
           .get()?.value ?? "SP";
-      const divisor = reportCurrency === "USD" ? rate : 1;
 
-      // Daily: collected payments per day
+      // ── Helper: convert a frozen (amount, currency) pair to report currency ──
+      // USD items: use frozen amount directly (never touches current rate)
+      // SP items:  convert via current rate only when report=USD
+      // This is the core fix — prevents rate drift from corrupting historical USD values
+      const toReport = (amountUsd, amountSp) => {
+        if (reportCurrency === "USD") {
+          // amountUsd is already frozen in USD — use it directly
+          // amountSp is SP-only, must convert via current rate
+          return amountUsd + amountSp / rate;
+        }
+        // report = SP: frozen USD converted to SP at current rate, SP stays as-is
+        return amountUsd * rate + amountSp;
+      };
+
+      // ── Daily collections ────────────────────────────────────────────────────
+      // Split by source currency so USD payments are never re-derived
       const daily = db
         .prepare(
           `
-        SELECT date(op.paid_at) as day,
-          COALESCE(SUM(op.amount_sp), 0)  as collected_sp,
-          COUNT(DISTINCT op.order_id)      as payment_count
+        SELECT
+          date(op.paid_at) as day,
+          COALESCE(SUM(CASE WHEN op.currency = 'USD' THEN op.amount   ELSE 0 END), 0) as collected_usd,
+          COALESCE(SUM(CASE WHEN op.currency != 'USD' THEN op.amount_sp ELSE 0 END), 0) as collected_sp_only,
+          COUNT(DISTINCT op.order_id) as payment_count
         FROM order_payments op
         JOIN orders o ON op.order_id = o.id
-        WHERE op._deleted=0 AND o._deleted=0
+        WHERE op._deleted = 0 AND o._deleted = 0
           AND date(op.paid_at) BETWEEN ? AND ?
         GROUP BY day ORDER BY day
       `,
         )
         .all(f, t)
         .map((row) => ({
-          ...row,
-          collected: row.collected_sp / divisor,
+          day: row.day,
+          payment_count: row.payment_count,
+          collected: toReport(row.collected_usd, row.collected_sp_only),
+          // keep raw for internal use
+          _collected_usd: row.collected_usd,
+          _collected_sp_only: row.collected_sp_only,
         }));
 
-      // By status
+      // ── By status ────────────────────────────────────────────────────────────
+      // order_items tell us the true currency; use them to get accurate order value
       const byStatus = db
         .prepare(
           `
-        SELECT status, COUNT(*) as count, SUM(total_sp) as total_sp
-        FROM orders WHERE _deleted=0 AND date(order_date) BETWEEN ? AND ?
-        GROUP BY status
+        SELECT
+          o.status,
+          COUNT(*) as count,
+          COALESCE(SUM(CASE WHEN oi.currency_at_sale = 'USD'
+            THEN oi.sell_price_at_sale * oi.quantity
+            ELSE 0 END), 0) as total_usd_items,
+          COALESCE(SUM(CASE WHEN oi.currency_at_sale != 'USD'
+            THEN oi.line_total_sp
+            ELSE 0 END), 0) as total_sp_items,
+          -- keep total_sp for the status bar chart amount display (uses current rate)
+          SUM(o.total_sp) as total_sp
+        FROM orders o
+        LEFT JOIN order_items oi ON oi.order_id = o.id AND oi._deleted = 0
+        WHERE o._deleted = 0 AND date(o.order_date) BETWEEN ? AND ?
+        GROUP BY o.status
       `,
         )
         .all(f, t);
 
-      // Top products by revenue
+      // ── Top products ─────────────────────────────────────────────────────────
+      // Revenue: use frozen sell price per currency — never divides SP by current rate for USD items
+      // Cost: buy_price has no frozen rate, so we use current rate (acceptable approximation)
       const topProducts = db
         .prepare(
           `
-        SELECT oi.product_name,
-          SUM(oi.quantity)        as qty,
-          SUM(oi.line_total_sp)   as revenue_sp,
+        SELECT
+          oi.product_name,
+          SUM(oi.quantity) as qty,
+          -- Revenue split by source currency
+          COALESCE(SUM(CASE WHEN oi.currency_at_sale = 'USD'
+            THEN oi.sell_price_at_sale * oi.quantity ELSE 0 END), 0) as revenue_usd,
+          COALESCE(SUM(CASE WHEN oi.currency_at_sale != 'USD'
+            THEN oi.line_total_sp ELSE 0 END), 0) as revenue_sp_only,
+          -- Cost always uses current rate (no frozen buy-price rate stored)
           COALESCE(SUM(oi.quantity * p.buy_price *
-            CASE WHEN p.currency='USD' THEN ? ELSE 1 END), 0) as cost_sp
+            CASE WHEN p.currency = 'USD' THEN ? ELSE 1 END), 0) as cost_sp
         FROM order_items oi
-        JOIN orders o ON oi.order_id=o.id
-        LEFT JOIN products p ON oi.product_id=p.id
-        WHERE oi._deleted=0 AND o._deleted=0
+        JOIN orders o ON oi.order_id = o.id
+        LEFT JOIN products p ON oi.product_id = p.id
+        WHERE oi._deleted = 0 AND o._deleted = 0
           AND date(o.order_date) BETWEEN ? AND ?
-        GROUP BY oi.product_name ORDER BY qty DESC LIMIT 10
+        GROUP BY oi.product_name
+        ORDER BY qty DESC
+        LIMIT 10
       `,
         )
         .all(rate, f, t)
-        .map((row) => ({
-          ...row,
-          revenue: row.revenue_sp / divisor,
-          cost: row.cost_sp / divisor,
-          profit: (row.revenue_sp - row.cost_sp) / divisor,
-        }));
+        .map((row) => {
+          const revenue = toReport(row.revenue_usd, row.revenue_sp_only);
+          const cost =
+            reportCurrency === "USD" ? row.cost_sp / rate : row.cost_sp;
+          return {
+            product_name: row.product_name,
+            qty: row.qty,
+            revenue,
+            cost,
+            profit: revenue - cost,
+          };
+        });
 
-      // Grand totals
-      const totals = db
+      // ── Grand totals: order value (what was sold) ─────────────────────────────
+      // Use order_items for accurate frozen-currency order value
+      const orderValueRow = db
         .prepare(
           `
         SELECT
-          COALESCE(SUM(total_sp), 0)  as order_value_sp,
-          COUNT(*)                    as orders,
-          COALESCE(SUM(CASE WHEN status='paid'        THEN total_sp ELSE 0 END), 0) as fully_paid_sp,
-          COALESCE(SUM(CASE WHEN status='partly_paid' THEN total_sp ELSE 0 END), 0) as partly_paid_sp,
-          COALESCE(SUM(CASE WHEN status='pending'     THEN total_sp ELSE 0 END), 0) as pending_sp
-        FROM orders WHERE _deleted=0 AND date(order_date) BETWEEN ? AND ?
+          COALESCE(SUM(CASE WHEN oi.currency_at_sale = 'USD'
+            THEN oi.sell_price_at_sale * oi.quantity ELSE 0 END), 0) as ov_usd,
+          COALESCE(SUM(CASE WHEN oi.currency_at_sale != 'USD'
+            THEN oi.line_total_sp ELSE 0 END), 0) as ov_sp_only,
+          COUNT(DISTINCT o.id) as orders
+        FROM orders o
+        LEFT JOIN order_items oi ON oi.order_id = o.id AND oi._deleted = 0
+        WHERE o._deleted = 0 AND date(o.order_date) BETWEEN ? AND ?
       `,
         )
         .get(f, t);
 
-      // Total actually collected (from payments table — cross-period accurate)
-      const collectedSP = db
+      // Status breakdown totals for the status breakdown cards
+      const statusTotals = db
         .prepare(
           `
-        SELECT COALESCE(SUM(op.amount_sp), 0) as n
+        SELECT
+          COALESCE(SUM(CASE WHEN o.status = 'paid'
+            AND oi.currency_at_sale = 'USD' THEN oi.sell_price_at_sale * oi.quantity ELSE 0 END), 0) as paid_usd,
+          COALESCE(SUM(CASE WHEN o.status = 'paid'
+            AND oi.currency_at_sale != 'USD' THEN oi.line_total_sp ELSE 0 END), 0) as paid_sp,
+          COALESCE(SUM(CASE WHEN o.status = 'partly_paid'
+            AND oi.currency_at_sale = 'USD' THEN oi.sell_price_at_sale * oi.quantity ELSE 0 END), 0) as partly_usd,
+          COALESCE(SUM(CASE WHEN o.status = 'partly_paid'
+            AND oi.currency_at_sale != 'USD' THEN oi.line_total_sp ELSE 0 END), 0) as partly_sp,
+          COALESCE(SUM(CASE WHEN o.status = 'pending'
+            AND oi.currency_at_sale = 'USD' THEN oi.sell_price_at_sale * oi.quantity ELSE 0 END), 0) as pending_usd,
+          COALESCE(SUM(CASE WHEN o.status = 'pending'
+            AND oi.currency_at_sale != 'USD' THEN oi.line_total_sp ELSE 0 END), 0) as pending_sp
+        FROM orders o
+        LEFT JOIN order_items oi ON oi.order_id = o.id AND oi._deleted = 0
+        WHERE o._deleted = 0 AND date(o.order_date) BETWEEN ? AND ?
+      `,
+        )
+        .get(f, t);
+
+      // ── Total actually collected ──────────────────────────────────────────────
+      // Split by payment currency — USD payments use frozen amount, SP payments use amount_sp
+      const collectedRow = db
+        .prepare(
+          `
+        SELECT
+          COALESCE(SUM(CASE WHEN op.currency = 'USD' THEN op.amount   ELSE 0 END), 0) as collected_usd,
+          COALESCE(SUM(CASE WHEN op.currency != 'USD' THEN op.amount_sp ELSE 0 END), 0) as collected_sp_only
         FROM order_payments op
-        JOIN orders o ON op.order_id=o.id
-        WHERE op._deleted=0 AND o._deleted=0
+        JOIN orders o ON op.order_id = o.id
+        WHERE op._deleted = 0 AND o._deleted = 0
           AND date(op.paid_at) BETWEEN ? AND ?
       `,
         )
-        .get(f, t).n;
+        .get(f, t);
 
-      // Total cost of goods sold
-      const costSP = db
+      // ── Cost of goods sold ────────────────────────────────────────────────────
+      // buy_price has no frozen rate — current rate is the best we can do
+      const costRow = db
         .prepare(
           `
-        SELECT COALESCE(SUM(
-          oi.quantity * p.buy_price *
-          CASE WHEN p.currency='USD' THEN ? ELSE 1 END
-        ), 0) as n
+        SELECT
+          COALESCE(SUM(CASE WHEN p.currency = 'USD'
+            THEN oi.quantity * p.buy_price ELSE 0 END), 0) as cost_usd,
+          COALESCE(SUM(CASE WHEN p.currency != 'USD'
+            THEN oi.quantity * p.buy_price ELSE 0 END), 0) as cost_sp_only
         FROM order_items oi
-        JOIN orders o ON oi.order_id=o.id
-        LEFT JOIN products p ON oi.product_id=p.id
-        WHERE oi._deleted=0 AND o._deleted=0
+        JOIN orders o ON oi.order_id = o.id
+        LEFT JOIN products p ON oi.product_id = p.id
+        WHERE oi._deleted = 0 AND o._deleted = 0
           AND date(o.order_date) BETWEEN ? AND ?
       `,
         )
-        .get(rate, f, t).n;
+        .get(f, t);
 
-      // Outstanding (unpaid portion of all orders in range)
-      const outstandingSP = totals.order_value_sp - collectedSP;
+      const orderValue = toReport(
+        orderValueRow.ov_usd,
+        orderValueRow.ov_sp_only,
+      );
+      const collected = toReport(
+        collectedRow.collected_usd,
+        collectedRow.collected_sp_only,
+      );
+      const cost = toReport(costRow.cost_usd, costRow.cost_sp_only);
+      const outstanding = Math.max(0, orderValue - collected);
 
       return {
         ok: true,
@@ -1420,15 +1455,21 @@ export function registerStoreHandlers(db, ipcMain) {
           topProducts,
           reportCurrency,
           totals: {
-            orderValue: totals.order_value_sp / divisor,
-            orders: totals.orders,
-            collected: collectedSP / divisor,
-            outstanding: Math.max(0, outstandingSP) / divisor,
-            cost: costSP / divisor,
-            profit: (collectedSP - costSP) / divisor,
-            fullyPaid: totals.fully_paid_sp / divisor,
-            partlyPaid: totals.partly_paid_sp / divisor,
-            pending: totals.pending_sp / divisor,
+            orderValue,
+            orders: orderValueRow.orders,
+            collected,
+            outstanding,
+            cost,
+            profit: collected - cost,
+            fullyPaid: toReport(statusTotals.paid_usd, statusTotals.paid_sp),
+            partlyPaid: toReport(
+              statusTotals.partly_usd,
+              statusTotals.partly_sp,
+            ),
+            pending: toReport(
+              statusTotals.pending_usd,
+              statusTotals.pending_sp,
+            ),
           },
         },
       };
@@ -1446,27 +1487,148 @@ export function registerStoreHandlers(db, ipcMain) {
         db
           .prepare(`SELECT value FROM settings WHERE key='report_currency'`)
           .get()?.value ?? "SP";
-      const divisor = reportCurrency === "USD" ? rate : 1;
+
+      const toReport = (amountUsd, amountSp) => {
+        if (reportCurrency === "USD") return amountUsd + amountSp / rate;
+        return amountUsd * rate + amountSp;
+      };
+
+      // Split dues by their source currency — USD dues use frozen amount
       const summary = db
         .prepare(
-          `SELECT COUNT(*) as total_dues, COALESCE(SUM(CASE WHEN paid=0 THEN amount_sp ELSE 0 END),0) as unpaid_sp, COALESCE(SUM(CASE WHEN paid=1 THEN amount_sp ELSE 0 END),0) as paid_sp, COUNT(CASE WHEN paid=0 THEN 1 END) as unpaid_count, COUNT(CASE WHEN paid=1 THEN 1 END) as paid_count FROM dues WHERE _deleted=0 AND date(created_at) BETWEEN ? AND ?`,
+          `
+        SELECT
+          COALESCE(SUM(CASE WHEN paid = 0 AND currency = 'USD' THEN amount   ELSE 0 END), 0) as unpaid_usd,
+          COALESCE(SUM(CASE WHEN paid = 0 AND currency != 'USD' THEN amount_sp ELSE 0 END), 0) as unpaid_sp,
+          COALESCE(SUM(CASE WHEN paid = 1 AND currency = 'USD' THEN amount   ELSE 0 END), 0) as paid_usd,
+          COALESCE(SUM(CASE WHEN paid = 1 AND currency != 'USD' THEN amount_sp ELSE 0 END), 0) as paid_sp,
+          COUNT(CASE WHEN paid = 0 THEN 1 END) as unpaid_count,
+          COUNT(CASE WHEN paid = 1 THEN 1 END) as paid_count
+        FROM dues
+        WHERE _deleted = 0 AND date(created_at) BETWEEN ? AND ?
+      `,
         )
         .get(f, t);
+
+      // Top debtors: use frozen currency per due
       const topDebtors = db
         .prepare(
-          `SELECT c.name, c.phone, COALESCE(SUM(d.amount_sp),0) as total_sp FROM dues d JOIN customers c ON d.customer_id=c.id WHERE d._deleted=0 AND d.paid=0 GROUP BY d.customer_id ORDER BY total_sp DESC LIMIT 10`,
+          `
+        SELECT
+          c.name,
+          c.phone,
+          COALESCE(SUM(CASE WHEN d.currency = 'USD' THEN d.amount   ELSE 0 END), 0) as total_usd,
+          COALESCE(SUM(CASE WHEN d.currency != 'USD' THEN d.amount_sp ELSE 0 END), 0) as total_sp_only
+        FROM dues d
+        JOIN customers c ON d.customer_id = c.id
+        WHERE d._deleted = 0 AND d.paid = 0
+        GROUP BY d.customer_id
+        ORDER BY (total_usd * ? + total_sp_only) DESC
+        LIMIT 10
+      `,
         )
-        .all()
-        .map((r) => ({ ...r, total: r.total_sp / divisor }));
+        .all(rate)
+        .map((r) => ({
+          name: r.name,
+          phone: r.phone,
+          total: toReport(r.total_usd, r.total_sp_only),
+        }));
+
       return {
         ok: true,
         data: {
           reportCurrency,
-          unpaid: summary.unpaid_sp / divisor,
-          paid: summary.paid_sp / divisor,
+          unpaid: toReport(summary.unpaid_usd, summary.unpaid_sp),
+          paid: toReport(summary.paid_usd, summary.paid_sp),
           unpaidCount: summary.unpaid_count,
           paidCount: summary.paid_count,
           topDebtors,
+        },
+      };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // ── Stats ──────────────────────
+  ipcMain.handle("store:getStats", () => {
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const firstOfMonth = today.slice(0, 7) + "-01";
+      const rate = getDollarRate();
+      const reportCurrency =
+        db
+          .prepare(`SELECT value FROM settings WHERE key='report_currency'`)
+          .get()?.value ?? "SP";
+
+      const toReport = (amountUsd, amountSp) => {
+        if (reportCurrency === "USD") return amountUsd + amountSp / rate;
+        return amountUsd * rate + amountSp;
+      };
+
+      const totalProducts = db
+        .prepare(
+          `SELECT COUNT(*) as n FROM products WHERE _deleted=0 AND is_active=1`,
+        )
+        .get().n;
+      const totalCustomers = db
+        .prepare(`SELECT COUNT(*) as n FROM customers WHERE _deleted=0`)
+        .get().n;
+      const lowStock = db
+        .prepare(
+          `SELECT COUNT(*) as n FROM products WHERE _deleted=0 AND stock <= min_stock AND min_stock > 0`,
+        )
+        .get().n;
+      const todayOrders = db
+        .prepare(
+          `SELECT COUNT(*) as n FROM orders WHERE date(order_date)=? AND _deleted=0`,
+        )
+        .get(today).n;
+
+      // Month revenue: split by payment currency — USD payments use frozen amount
+      const monthCollected = db
+        .prepare(
+          `
+        SELECT
+          COALESCE(SUM(CASE WHEN op.currency = 'USD' THEN op.amount   ELSE 0 END), 0) as usd_sum,
+          COALESCE(SUM(CASE WHEN op.currency != 'USD' THEN op.amount_sp ELSE 0 END), 0) as sp_sum
+        FROM order_payments op
+        JOIN orders o ON op.order_id = o.id
+        WHERE op._deleted = 0 AND o._deleted = 0
+          AND date(op.paid_at) >= ?
+      `,
+        )
+        .get(firstOfMonth);
+
+      // Unpaid dues: split by currency
+      const unpaidDues = db
+        .prepare(`SELECT COUNT(*) as n FROM dues WHERE paid=0 AND _deleted=0`)
+        .get().n;
+      const unpaidDuesRow = db
+        .prepare(
+          `
+        SELECT
+          COALESCE(SUM(CASE WHEN currency = 'USD' THEN amount   ELSE 0 END), 0) as usd_sum,
+          COALESCE(SUM(CASE WHEN currency != 'USD' THEN amount_sp ELSE 0 END), 0) as sp_sum
+        FROM dues WHERE paid=0 AND _deleted=0
+      `,
+        )
+        .get();
+
+      return {
+        ok: true,
+        data: {
+          totalProducts,
+          totalCustomers,
+          lowStock,
+          todayOrders,
+          monthRevenue: toReport(monthCollected.usd_sum, monthCollected.sp_sum),
+          reportCurrency,
+          unpaidDues,
+          unpaidDuesAmount: toReport(
+            unpaidDuesRow.usd_sum,
+            unpaidDuesRow.sp_sum,
+          ),
         },
       };
     } catch (err) {

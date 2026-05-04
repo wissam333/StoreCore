@@ -1,4 +1,4 @@
-const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["./C0o599Qe.js","./DUdCWPzD.js","./entry.AvIMpSwr.css","./CC5hy8mN.js"])))=>i.map(i=>d[i]);
+const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["./C0o599Qe.js","./nqjkumNT.js","./entry.9VHxcgW3.css","./CC5hy8mN.js"])))=>i.map(i=>d[i]);
 import{_ as L}from"#entry";import{getMobileDb as d}from"./CJiXDk3D.js";const E=async(T,t)=>{await T.execute(t.trim())},n=async T=>{try{const{Preferences:t}=await L(async()=>{const{Preferences:i}=await import("./C0o599Qe.js");return{Preferences:i}},__vite__mapDeps([0,1,2,3]),import.meta.url);if(!(await t.get({key:"sqlitedb"}))?.value)return;await t.remove({key:"sqlitedb"}),console.log("[schema] Cleared legacy sql.js preferences data")}catch{}},o=async()=>{const T=await d();await n(),await E(T,`
     CREATE TABLE IF NOT EXISTS categories (
       id          TEXT    PRIMARY KEY,

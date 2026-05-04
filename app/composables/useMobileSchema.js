@@ -290,14 +290,4 @@ export const initMobileSchema = async () => {
       [generateUuid(), "Admin", "admin", "admin", "admin", 1],
     );
   }
-
-  // ── Seed default category if empty ────────────────────────────────────────
-  const catResult = await db.query(`SELECT COUNT(*) as n FROM categories`);
-  if ((catResult.values?.[0]?.n ?? 0) === 0) {
-    const { generateUuid } = await import("./useUuid");
-    await db.run(`INSERT INTO categories (id, name) VALUES (?, ?)`, [
-      generateUuid(),
-      "General",
-    ]);
-  }
 };
