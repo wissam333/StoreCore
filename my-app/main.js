@@ -120,24 +120,12 @@ const db = getDb();
 initSchema(db);
 registerStoreHandlers(db, ipcMain);
 
-// ── P2P PeerJS Server ─────────────────────────────────────────────────────────
-//
-// WHY THIS APPROACH:
-//   PeerServer() returns an Express middleware — NOT an http.Server.
-//   Calling .close() on it crashes with "is not a function".
-//   Fix: create our own http.Server and pass it via { server } option.
-//
-// WHY REF-COUNTING:
-//   Both host AND guest call startLocalServer() in useP2PSync.js.
-//   Without ref-counting, the second caller gets EADDRINUSE because
-//   port 9000 is already taken by the first caller's server.
-//   With ref-counting: first start() creates the server, second start()
-//   just increments the counter. Each stop() decrements; server only
-//   actually closes when the counter reaches 0.
-//
-let peerHttpServer = null; // real http.Server — the one we .close()
-let peerServerApp = null; // PeerServer instance (used for events only)
-let peerRefCount = 0; // how many callers currently hold the server open
+// ── P2P WebSocket Server ──────────────────────────────────────────────────────
+// Uses Node's built-in 'ws' module — no PeerJS, no port conflicts.
+// The OS picks a free port automatically (port 0).
+import { WebSocketServer } from "ws";
+
+const PREFERRED_PORTS = [9000, 9001, 9002, 9003, 9010];
 
 const getLocalIp = () => {
   const nets = networkInterfaces();
@@ -149,117 +137,77 @@ const getLocalIp = () => {
   return "127.0.0.1";
 };
 
-// Destroy a stale server that exists but is not listening.
-// Safe to call when peerHttpServer is null.
-const forceStopServer = () =>
-  new Promise((resolve) => {
-    if (!peerHttpServer) {
-      resolve();
-      return;
-    }
-    const old = peerHttpServer;
-    peerHttpServer = null;
-    peerServerApp = null;
-    peerRefCount = 0;
-    // closeAllConnections() flushes keep-alive sockets so .close() doesn't hang.
-    // It was added in Node 18.2 — safe to call conditionally.
-    old.closeAllConnections?.();
-    old.close(() => {
-      log("[PeerServer] Stale instance force-stopped");
-      resolve();
+let _wss = null;
+let _wssPort = null;
+let _wssReady = false;
+let _wssError = null;
+let _wssCallbacks = [];
+
+const startWssOnce = () => {
+  if (_wss) return; // already started
+  try {
+    _wss = new WebSocketServer({ port: 0 }); // port 0 = OS picks free port
+    _wss.on("listening", () => {
+      _wssPort = _wss.address().port;
+      _wssReady = true;
+      log(`[WSS] Listening on port ${_wssPort}`);
+      _wssCallbacks.forEach((cb) =>
+        cb({ ok: true, ip: getLocalIp(), port: _wssPort }),
+      );
+      _wssCallbacks = [];
     });
-  });
-
-ipcMain.handle("p2p:start-server", async () => {
-  // ── Case 1: server already running ────────────────────────────────────────
-  if (peerHttpServer?.listening) {
-    peerRefCount++;
-    const ip = getLocalIp();
-    log(`[PeerServer] Reusing server (refs=${peerRefCount}), IP: ${ip}`);
-    return { ok: true, ip };
-  }
-
-  // ── Case 2: stale object (crashed or race condition) ───────────────────────
-  if (peerHttpServer) {
-    log("[PeerServer] Stale server found — force-stopping before restart");
-    await forceStopServer();
-  }
-
-  // ── Case 3: fresh start ────────────────────────────────────────────────────
-  return new Promise((resolve, reject) => {
-    try {
-      const { PeerServer } = require("peer");
-
-      // Create the real HTTP server FIRST — this is what we'll .close() later
-      peerHttpServer = http.createServer();
-
-      // Attach PeerServer to it via the `server` option (not `port`)
-      peerServerApp = PeerServer({ server: peerHttpServer, path: "/myapp" });
-
-      peerServerApp.on("connection", (c) =>
-        log("[PeerServer] connected:", c.getId()),
-      );
-      peerServerApp.on("disconnect", (c) =>
-        log("[PeerServer] disconnected:", c.getId()),
-      );
-
-      peerHttpServer.on("error", (err) => {
-        log("[PeerServer] HTTP error:", err.message);
-        peerHttpServer = null;
-        peerServerApp = null;
-        peerRefCount = 0;
-        reject({ ok: false, error: err.message });
+    _wss.on("error", (err) => {
+      _wssError = err.message;
+      log(`[WSS] Error: ${err.message}`);
+      _wssCallbacks.forEach((cb) => cb({ ok: false, error: err.message }));
+      _wssCallbacks = [];
+    });
+    // Route incoming connections to the renderer via IPC
+    _wss.on("connection", (ws) => {
+      log("[WSS] Guest connected");
+      ws.on("message", (data) => {
+        mainWindow?.webContents.send("p2p:message", data.toString());
       });
-
-      // listen() callback fires only when the port is actually bound —
-      // no more setTimeout guessing
-      peerHttpServer.listen(9000, () => {
-        peerRefCount = 1;
-        const ip = getLocalIp();
-        log(`[PeerServer] Started on :9000, IP: ${ip}`);
-        resolve({ ok: true, ip });
+      ws.on("close", () => {
+        log("[WSS] Guest disconnected");
+        mainWindow?.webContents.send("p2p:guest-disconnected");
+        _hostSocket = null;
       });
-    } catch (e) {
-      peerHttpServer = null;
-      peerServerApp = null;
-      peerRefCount = 0;
-      log("[PeerServer] Failed to start:", e.message);
-      reject({ ok: false, error: e.message });
-    }
+      _hostSocket = ws;
+      mainWindow?.webContents.send("p2p:guest-connected");
+    });
+  } catch (err) {
+    _wssError = err.message;
+    log(`[WSS] Failed to start: ${err.message}`);
+  }
+};
+
+let _hostSocket = null; // the connected guest socket (host side)
+
+ipcMain.handle("p2p:start-server", () => {
+  if (_wssReady) return { ok: true, ip: getLocalIp(), port: _wssPort };
+  if (_wssError) return { ok: false, error: _wssError };
+  return new Promise((resolve) => {
+    _wssCallbacks.push(resolve);
+    setTimeout(() => resolve({ ok: false, error: "Timeout" }), 10_000);
   });
 });
 
-ipcMain.handle("p2p:stop-server", () => {
-  return new Promise((resolve) => {
-    if (!peerHttpServer) {
-      log("[PeerServer] stop-server called — nothing running");
-      peerRefCount = 0;
-      resolve({ ok: true });
-      return;
-    }
+ipcMain.handle("p2p:stop-server", () => ({ ok: true })); // server is app-lifetime
 
-    // Decrement — clamp to 0 so a rogue extra stop() can't go negative
-    peerRefCount = Math.max(0, peerRefCount - 1);
-    log(`[PeerServer] stop requested (refs now=${peerRefCount})`);
+// Host sends a message to the connected guest
+ipcMain.handle("p2p:send", (_, msg) => {
+  if (_hostSocket?.readyState === 1) {
+    // 1 = OPEN
+    _hostSocket.send(msg);
+    return { ok: true };
+  }
+  return { ok: false, error: "No guest connected" };
+});
 
-    if (peerRefCount > 0) {
-      // Another caller still needs the server — leave it running
-      resolve({ ok: true });
-      return;
-    }
-
-    // Last caller — actually shut down
-    const old = peerHttpServer;
-    peerHttpServer = null;
-    peerServerApp = null;
-
-    old.closeAllConnections?.(); // flush keep-alive sockets
-    old.close((err) => {
-      if (err) log("[PeerServer] stop error:", err.message);
-      else log("[PeerServer] stopped cleanly");
-      resolve({ ok: true });
-    });
-  });
+app.on("before-quit", () => {
+  _wss?.close();
+  log("[WSS] Closed on app quit");
 });
 
 // ── License IPC ───────────────────────────────────────────────────────────────
@@ -323,7 +271,7 @@ ipcMain.on("app:quit", () => app.quit());
 app.whenReady().then(async () => {
   log("[1] app ready — userData:", app.getPath("userData"));
   registerProtocol();
-
+  startWssOnce();
   let license;
   try {
     license = await verifyLicense();
