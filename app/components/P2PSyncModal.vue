@@ -398,16 +398,19 @@ const chooseMode = async (m) => {
 
 let _qrInstance = null;
 
-watch([() => status.value, qrEl], async ([s, el]) => {
-  if (s !== "ready" || !el) return;
-  await nextTick();
+watch(status, async (s) => {
+  if (s !== "ready") return;
+  let attempts = 0;
+  while (!qrEl.value && attempts++ < 20) {
+    await nextTick();
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  if (!qrEl.value) return;
   try {
     if (_qrInstance) {
       _qrInstance.clear();
       _qrInstance = null;
     }
-    await new Promise((r) => setTimeout(r, 100));
-    if (!qrEl.value) return;
     _qrInstance = makeQrCode(qrEl.value, peerId.value);
   } catch (e) {
     console.warn("[P2P] QR generation failed:", e);
