@@ -112,10 +112,11 @@ definePageMeta({
   searchMeta: {
     label: "Products Categories",
     labelAr: "فئات المنتجات",
-    icon: "mdi:package-variant-closed",
+    icon: "mdi:shape-outline",
     group: "Main",
   },
 });
+
 const { locale } = useI18n();
 const { t: $t } = useI18n();
 const { $toast } = useNuxtApp();

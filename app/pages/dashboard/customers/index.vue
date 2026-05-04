@@ -39,7 +39,7 @@
       "
     >
       <template #cell-total_spent="{ row }">
-        {{ fmtSP(row.total_spent) }}
+        {{ fmtSpent(row) }}
       </template>
       <template #cell-last_order="{ row }">
         {{
@@ -143,12 +143,11 @@ definePageMeta({
   },
 });
 
-// ✅ Top-level
 const { getCustomers, saveCustomer, deleteCustomer } = useStore();
 import { watchDebounced } from "@vueuse/core";
 const { locale, t: $t } = useI18n();
 const { $toast } = useNuxtApp();
-const currency = useCurrency();
+const { fmt, dollarRate, reportCurrency, loadSettings } = useCurrency();
 
 const search = ref("");
 const page = ref(1);
@@ -161,7 +160,6 @@ const showDeleteModal = ref(false);
 const deleting = ref(false);
 const toDelete = ref(null);
 const editTarget = ref(null);
-const fmtSP = ref((v) => v);
 
 const form = reactive({ name: "", phone: "", address: "", notes: "" });
 
@@ -169,9 +167,19 @@ const cols = [
   { key: "name", label: "name", sortable: true },
   { key: "phone", label: "phone" },
   { key: "total_orders", label: "orders" },
-  { key: "total_spent", label: "totalSpent", align: "end" },
+  { key: "total_spent", label: "totalSpent" },
   { key: "last_order", label: "lastOrder" },
 ];
+
+// Convert spent_usd + spent_sp using frozen USD + current rate for SP-only portion
+const fmtSpent = (row) => {
+  const usd = row.spent_usd ?? 0;
+  const sp = row.spent_sp ?? 0;
+  if (reportCurrency.value === "USD") {
+    return fmt(usd + sp / dollarRate.value, "USD");
+  }
+  return fmt(usd * dollarRate.value + sp, "SP");
+};
 
 const load = async () => {
   loading.value = true;
@@ -242,8 +250,7 @@ watchDebounced(
 );
 
 onMounted(async () => {
-  await currency.loadSettings();
-  fmtSP.value = currency.fmtSP;
+  await loadSettings();
   await load();
 });
 

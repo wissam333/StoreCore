@@ -12,7 +12,6 @@
       @action-click="navigateTo('/dashboard/orders/new')"
     />
 
-    <!-- Filters -->
     <div class="filters-row">
       <SharedUiFormBaseInput
         v-model="search"
@@ -42,7 +41,6 @@
       />
     </div>
 
-    <!-- Table -->
     <SharedUiTableDataTable
       :columns="cols"
       :data="orders"
@@ -66,21 +64,22 @@
       </template>
 
       <template #cell-total_sp="{ row }">
-        {{ fmtSP(row.total_sp) }}
+        {{ fmtOrder(row, row.total_sp) }}
       </template>
 
-      <!-- paid: use total_paid_sp (sum of all payments) formatted through fmtSP -->
       <template #cell-total_paid_sp="{ row }">
         <span :class="row.total_paid_sp > 0 ? 'paid-amount' : 'zero-amount'">
-          {{ fmtSP(row.total_paid_sp ?? 0) }}
+          {{ fmtOrder(row, row.total_paid_sp ?? 0) }}
         </span>
       </template>
 
-      <!-- remaining: total - paid, only show if not fully paid -->
       <template #cell-remaining="{ row }">
         <span v-if="row.status !== 'paid'" class="remaining-amount">
           {{
-            fmtSP(Math.max(0, (row.total_sp ?? 0) - (row.total_paid_sp ?? 0)))
+            fmtOrder(
+              row,
+              Math.max(0, (row.total_sp ?? 0) - (row.total_paid_sp ?? 0)),
+            )
           }}
         </span>
         <span v-else class="fully-paid-badge">
@@ -117,7 +116,6 @@
       </template>
     </SharedUiTableDataTable>
 
-    <!-- Delete confirm -->
     <SharedUiDialogAppModal
       v-model="showDeleteModal"
       :title="$t('deleteOrder')"
@@ -156,11 +154,12 @@ definePageMeta({
   },
 });
 
-const { getOrders, deleteOrder } = useStore();
 import { watchDebounced } from "@vueuse/core";
+
+const { getOrders, deleteOrder } = useStore();
 const { locale, t: $t } = useI18n();
 const { $toast } = useNuxtApp();
-const currency = useCurrency();
+const { fmtTx, loadSettings } = useCurrency();
 
 const search = ref("");
 const filterStatus = ref("");
@@ -174,7 +173,6 @@ const total = ref(0);
 const showDeleteModal = ref(false);
 const deleting = ref(false);
 const toDelete = ref(null);
-const fmtSP = ref((v) => v);
 
 const statusOptions = [
   { label: $t("order.pending"), value: "pending" },
@@ -182,14 +180,13 @@ const statusOptions = [
   { label: $t("order.paid"), value: "paid" },
 ];
 
-// ── Columns — replaced "paid_amount" with "total_paid_sp" + added "remaining"
 const cols = [
   { key: "customer_name", label: "customer" },
   { key: "order_date", label: "date" },
-  { key: "item_count", label: "items", align: "center" },
-  { key: "total_sp", label: "total", align: "end" },
-  { key: "total_paid_sp", label: "paid", align: "end" },
-  { key: "remaining", label: "remaining", align: "end" },
+  { key: "item_count", label: "items" },
+  { key: "total_sp", label: "total" },
+  { key: "total_paid_sp", label: "paid" },
+  { key: "remaining", label: "remaining" },
   { key: "status", label: "status" },
 ];
 
@@ -199,6 +196,16 @@ const statusClass = (s) =>
     partly_paid: "badge-info",
     paid: "badge-success",
   }[s] ?? "badge-secondary");
+
+// Formats any SP value using the order's frozen rate when display_currency=USD
+const fmtOrder = (row, spValue) => {
+  if (row.display_currency === "USD" && row.total_usd > 0) {
+    const frozenRate = row.total_sp / row.total_usd;
+    const usdValue = spValue / frozenRate;
+    return fmtTx(usdValue, "USD", spValue ?? 0);
+  }
+  return fmtTx(spValue ?? 0, "SP", spValue ?? 0);
+};
 
 const load = async () => {
   loading.value = true;
@@ -248,8 +255,7 @@ watchDebounced(
 );
 
 onMounted(async () => {
-  await currency.loadSettings();
-  fmtSP.value = currency.fmtSP;
+  await loadSettings();
   await load();
 });
 
@@ -272,8 +278,6 @@ watch(useSyncTick(), () => load());
 .filter-date {
   width: 160px;
 }
-
-// ── Badges ────────────────────────────────────────────────────────────────────
 .badge {
   padding: 3px 10px;
   border-radius: 20px;
@@ -296,23 +300,18 @@ watch(useSyncTick(), () => load());
   background: var(--bg-elevated);
   color: var(--text-muted);
 }
-
-// ── Cell values ───────────────────────────────────────────────────────────────
 .paid-amount {
   font-weight: 600;
   color: #10b981;
 }
-
 .zero-amount {
   color: var(--text-muted);
   font-size: 0.85em;
 }
-
 .remaining-amount {
   font-weight: 600;
   color: #f59e0b;
 }
-
 .fully-paid-badge {
   display: inline-flex;
   align-items: center;
@@ -321,7 +320,6 @@ watch(useSyncTick(), () => load());
   font-weight: 600;
   color: #10b981;
 }
-
 .item-count-badge {
   display: inline-flex;
   align-items: center;
@@ -334,8 +332,6 @@ watch(useSyncTick(), () => load());
   font-weight: 700;
   color: var(--text-sub);
 }
-
-// ── Action buttons ────────────────────────────────────────────────────────────
 .action-buttons {
   display: flex;
   gap: 6px;
@@ -361,8 +357,6 @@ watch(useSyncTick(), () => load());
     color: #ef4444;
   }
 }
-
-// ── Utils ─────────────────────────────────────────────────────────────────────
 .d-flex {
   display: flex;
 }

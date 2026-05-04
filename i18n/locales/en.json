@@ -159,7 +159,7 @@
     "partly_paid": "Partly Paid",
     "paid": "Paid"
   },
-  "Order":"Order",
+  "Order": "Order",
   "product": "Product",
   "products": "Products",
   "addProduct": "Add Product",
@@ -366,5 +366,16 @@
   "someItemsExceedStock": "Some quantities exceed available stock",
   "priceCannotBeZero": "Price cannot be 0 for selected products",
   "addItemsFirst": "Add at least one item to continue",
-  "units": "units"
+  "units": "units",
+  "Theme": "Theme",
+  "Mode": "Mode",
+  "Color": "Color",
+  "Dark": "Dark",
+  "Light": "Light",
+  "appearance": "Appearance",
+  "registerReferee": "Register Referee",
+  "lightMode": "Light Mode",
+  "auto": "Auto",
+  "prices": "Prices",
+  "stock": "Stock"
 }

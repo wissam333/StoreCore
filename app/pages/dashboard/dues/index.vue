@@ -12,11 +12,42 @@
 
     <!-- Summary strip -->
     <div class="dues-summary">
-      <div class="sum-chip danger">
+      <div v-if="totalUnpaidUsd > 0" class="sum-chip danger">
         <Icon name="mdi:alert-circle-outline" size="18" />
         <div>
+          <span class="sum-chip-label">{{ $t("totalUnpaid") }} (USD)</span>
+          <span class="sum-chip-val"
+            >${{
+              totalUnpaidUsd.toLocaleString("en-US", {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })
+            }}</span
+          >
+        </div>
+      </div>
+      <div v-if="totalUnpaidSp > 0" class="sum-chip danger">
+        <Icon name="mdi:alert-circle-outline" size="18" />
+        <div>
+          <span class="sum-chip-label">{{ $t("totalUnpaid") }} (SP)</span>
+          <span class="sum-chip-val"
+            >{{
+              totalUnpaidSp.toLocaleString("en-US", {
+                maximumFractionDigits: 0,
+              })
+            }}
+            ل.س</span
+          >
+        </div>
+      </div>
+      <div
+        v-if="totalUnpaidUsd === 0 && totalUnpaidSp === 0"
+        class="sum-chip danger"
+      >
+        <Icon name="mdi:check-circle-outline" size="18" />
+        <div>
           <span class="sum-chip-label">{{ $t("totalUnpaid") }}</span>
-          <span class="sum-chip-val">{{ fmtSP(totalUnpaidSp) }}</span>
+          <span class="sum-chip-val">—</span>
         </div>
       </div>
     </div>
@@ -53,8 +84,9 @@
         }
       "
     >
+      <!-- Amount: show in source currency, with report-currency equivalent -->
       <template #cell-amount="{ row }">
-        {{ row.amount }} {{ row.currency }}
+        {{ fmtDue(row) }}
       </template>
 
       <template #cell-customer_name="{ row }">
@@ -67,6 +99,7 @@
         </NuxtLink>
         <span v-else>{{ row.customer_name ?? "—" }}</span>
       </template>
+
       <template #cell-paid="{ row }">
         <span
           class="badge"
@@ -75,11 +108,13 @@
           {{ row.paid ? $t("paid") : $t("unpaid") }}
         </span>
       </template>
+
       <template #cell-due_date="{ row }">
         <span :class="isOverdue(row) ? 'overdue' : ''">
           {{ row.due_date ? new Date(row.due_date).toLocaleDateString() : "—" }}
         </span>
       </template>
+
       <template #actions="{ row }">
         <div class="action-buttons">
           <button
@@ -115,7 +150,6 @@
       max-width="500px"
     >
       <div class="modal-form">
-        <!-- ✅ Use the shared Combobox component -->
         <SharedUiFormCombobox
           v-model="selectedCustomer"
           v-model:search="customerSearch"
@@ -220,9 +254,12 @@ const {
 
 const { locale, t: $t } = useI18n();
 const { $toast } = useNuxtApp();
+const { fmtTx, loadSettings } = useCurrency();
 
-// ✅ Destructure fmtSP directly — it's a stable function from the singleton
-const { fmtSP, loadSettings } = useCurrency();
+// ── Display helpers ───────────────────────────────────────────────────────────
+
+// Each due row has amount + currency + amount_sp — use all three for correctness
+const fmtDue = (row) => fmtTx(row.amount, row.currency, row.amount_sp);
 
 // ── Table state ───────────────────────────────────────────────────────────────
 const search = ref("");
@@ -232,6 +269,7 @@ const loading = ref(false);
 const dues = ref([]);
 const total = ref(0);
 const totalUnpaidSp = ref(0);
+const totalUnpaidUsd = ref(0);
 
 // ── Modal state ───────────────────────────────────────────────────────────────
 const showModal = ref(false);
@@ -241,7 +279,7 @@ const showDeleteModal = ref(false);
 const deleting = ref(false);
 const toDelete = ref(null);
 
-// ── Customer combobox — exact same pattern as orders/new.vue ──────────────────
+// ── Customer combobox ─────────────────────────────────────────────────────────
 const customerSearch = ref("");
 const customerSuggestions = ref([]);
 const customerLoading = ref(false);
@@ -275,7 +313,6 @@ const onCreateCustomer = async (name) => {
   }
 };
 
-// Keep form.customer_id in sync when combobox selection changes
 watch(selectedCustomer, (c) => {
   form.customer_id = c?.id ?? null;
 });
@@ -302,9 +339,9 @@ const paidOptions = computed(() => [
 
 // ── Table columns ─────────────────────────────────────────────────────────────
 const cols = [
-  { key: "customer_name", label: "customer", sortable: true },
+  { key: "customer_name", label: "customer" },
   { key: "description", label: "description" },
-  { key: "amount", label: "amount", align: "end" },
+  { key: "amount", label: "amount" },
   { key: "due_date", label: "dueDate" },
   { key: "paid", label: "status" },
 ];
@@ -410,11 +447,11 @@ const load = async () => {
     limit: 20,
     offset: (page.value - 1) * 20,
   });
-
   if (r.ok) {
     dues.value = r.data;
     total.value = r.total;
     totalUnpaidSp.value = r.totalUnpaidSp;
+    totalUnpaidUsd.value = r.totalUnpaidUsd;
   }
   loading.value = false;
 };
@@ -439,6 +476,9 @@ watch(useSyncTick(), () => load());
 <style lang="scss" scoped>
 .dues-summary {
   margin-bottom: 1.5rem;
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 .sum-chip {
   display: inline-flex;

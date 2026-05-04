@@ -225,7 +225,7 @@ export const useMobileStore = () => {
     return db;
   };
 
-  // ── STATS ─────────────────────────────────────────────────────────────────
+  // ── STATS ─────────────────────────────────────────────────────────────────────
   const getStats = async () => {
     try {
       const db = await getMobileDb();
@@ -233,6 +233,11 @@ export const useMobileStore = () => {
       const firstOfMonth = today.slice(0, 7) + "-01";
       const rate = await getDollarRate();
       const reportCurrency = await getReportCurrency();
+
+      const toReport = (amountUsd, amountSp) => {
+        if (reportCurrency === "USD") return amountUsd + amountSp / rate;
+        return amountUsd * rate + amountSp;
+      };
 
       const totalProducts = (
         await db.query(
@@ -253,27 +258,36 @@ export const useMobileStore = () => {
           [today],
         )
       ).values[0].n;
-      const monthCollectedSP = (
+
+      // Split by payment currency — USD payments use frozen amount, never re-rate
+      const monthCollected = (
         await db.query(
           `
-        SELECT COALESCE(SUM(op.amount_sp),0) as n
-        FROM order_payments op JOIN orders o ON op.order_id=o.id
+        SELECT
+          COALESCE(SUM(CASE WHEN op.currency = 'USD' THEN op.amount   ELSE 0 END), 0) as usd_sum,
+          COALESCE(SUM(CASE WHEN op.currency != 'USD' THEN op.amount_sp ELSE 0 END), 0) as sp_sum
+        FROM order_payments op JOIN orders o ON op.order_id = o.id
         WHERE op._deleted=0 AND o._deleted=0 AND date(op.paid_at) >= ?`,
           [firstOfMonth],
         )
-      ).values[0].n;
+      ).values[0];
+
       const unpaidDues = (
         await db.query(
           `SELECT COUNT(*) as n FROM dues WHERE paid=0 AND _deleted=0`,
         )
       ).values[0].n;
-      const unpaidDuesAmount = (
-        await db.query(
-          `SELECT COALESCE(SUM(amount_sp),0) as n FROM dues WHERE paid=0 AND _deleted=0`,
-        )
-      ).values[0].n;
 
-      const divisor = reportCurrency === "USD" ? rate : 1;
+      const unpaidDuesRow = (
+        await db.query(
+          `
+        SELECT
+          COALESCE(SUM(CASE WHEN currency = 'USD' THEN amount   ELSE 0 END), 0) as usd_sum,
+          COALESCE(SUM(CASE WHEN currency != 'USD' THEN amount_sp ELSE 0 END), 0) as sp_sum
+        FROM dues WHERE paid=0 AND _deleted=0`,
+        )
+      ).values[0];
+
       return {
         ok: true,
         data: {
@@ -281,10 +295,13 @@ export const useMobileStore = () => {
           totalCustomers,
           lowStock,
           todayOrders,
-          monthRevenue: monthCollectedSP / divisor,
+          monthRevenue: toReport(monthCollected.usd_sum, monthCollected.sp_sum),
           reportCurrency,
           unpaidDues,
-          unpaidDuesAmount: unpaidDuesAmount / divisor,
+          unpaidDuesAmount: toReport(
+            unpaidDuesRow.usd_sum,
+            unpaidDuesRow.sp_sum,
+          ),
         },
       };
     } catch (err) {
@@ -366,6 +383,7 @@ export const useMobileStore = () => {
   const getProducts = async ({
     search = "",
     categoryId,
+    currency,
     limit = 50,
     offset = 0,
     activeOnly = false,
@@ -382,6 +400,10 @@ export const useMobileStore = () => {
       if (categoryId) {
         where += " AND p.category_id=?";
         params.push(categoryId);
+      }
+      if (currency) {
+        where += " AND p.currency=?";
+        params.push(currency);
       }
       if (activeOnly) {
         where += " AND p.is_active=1";
@@ -527,13 +549,29 @@ export const useMobileStore = () => {
       const data =
         (
           await db.query(
-            `SELECT * FROM customers WHERE _deleted=0 AND (name LIKE ? OR phone LIKE ?) ORDER BY name ASC LIMIT ? OFFSET ?`,
+            `
+          SELECT
+            c.*,
+            COALESCE(SUM(CASE WHEN op._deleted=0 AND op.currency='USD'  THEN op.amount   ELSE 0 END), 0) AS spent_usd,
+            COALESCE(SUM(CASE WHEN op._deleted=0 AND op.currency!='USD' THEN op.amount_sp ELSE 0 END), 0) AS spent_sp,
+            COUNT(DISTINCT CASE WHEN o._deleted=0 THEN o.id END)                                          AS total_orders,
+            MAX(CASE WHEN o._deleted=0 THEN o.order_date END)                                             AS last_order
+          FROM customers c
+          LEFT JOIN orders o          ON o.customer_id = c.id
+          LEFT JOIN order_payments op ON op.order_id   = o.id
+          WHERE c._deleted=0
+            AND (c.name LIKE ? OR c.phone LIKE ?)
+          GROUP BY c.id
+          ORDER BY c.name ASC
+          LIMIT ? OFFSET ?
+          `,
             [like, like, limit, offset],
           )
         ).values ?? [];
       const total = (
         await db.query(
-          `SELECT COUNT(*) as n FROM customers WHERE _deleted=0 AND (name LIKE ? OR phone LIKE ?)`,
+          `SELECT COUNT(*) as n FROM customers
+         WHERE _deleted=0 AND (name LIKE ? OR phone LIKE ?)`,
           [like, like],
         )
       ).values[0].n;
@@ -547,9 +585,22 @@ export const useMobileStore = () => {
     try {
       const db = await getMobileDb();
       const customer = (
-        await db.query(`SELECT * FROM customers WHERE id=? AND _deleted=0`, [
-          id,
-        ])
+        await db.query(
+          `
+        SELECT
+          c.*,
+          COALESCE(SUM(CASE WHEN op._deleted=0 AND op.currency='USD'  THEN op.amount   ELSE 0 END), 0) AS spent_usd,
+          COALESCE(SUM(CASE WHEN op._deleted=0 AND op.currency!='USD' THEN op.amount_sp ELSE 0 END), 0) AS spent_sp,
+          COUNT(DISTINCT CASE WHEN o._deleted=0 THEN o.id END)                                          AS total_orders,
+          MAX(CASE WHEN o._deleted=0 THEN o.order_date END)                                             AS last_order
+        FROM customers c
+        LEFT JOIN orders o          ON o.customer_id = c.id
+        LEFT JOIN order_payments op ON op.order_id   = o.id
+        WHERE c._deleted=0 AND c.id=?
+        GROUP BY c.id
+        `,
+          [id],
+        )
       ).values?.[0];
       if (!customer) return { ok: false, error: "Not found" };
       const orders =
@@ -909,8 +960,10 @@ export const useMobileStore = () => {
       if (order.customer_id) {
         const custBefore = await freshRow("customers", order.customer_id);
         await db.run(
-          `UPDATE customers SET total_orders=(SELECT COUNT(*) FROM orders WHERE customer_id=? AND _deleted=0 AND status='paid'), total_spent=(SELECT COALESCE(SUM(total_sp),0) FROM orders WHERE customer_id=? AND _deleted=0 AND status='paid'), last_order=datetime('now'), version=version+1, updated_at=datetime('now') WHERE id=?`,
-          [order.customer_id, order.customer_id, order.customer_id],
+          `UPDATE customers
+     SET last_order=datetime('now'), version=version+1, updated_at=datetime('now')
+     WHERE id=?`,
+          [order.customer_id],
         );
         const freshCust = await freshRow("customers", order.customer_id);
         if (freshCust)
@@ -1180,10 +1233,15 @@ export const useMobileStore = () => {
       ).values[0].n;
       const totalUnpaidSp = (
         await db.query(
-          `SELECT COALESCE(SUM(amount_sp),0) as n FROM dues WHERE _deleted=0 AND paid=0`,
+          `SELECT COALESCE(SUM(amount_sp),0) as n FROM dues WHERE _deleted=0 AND paid=0 AND currency='SP'`,
         )
       ).values[0].n;
-      return { ok: true, data, total, totalUnpaidSp };
+      const totalUnpaidUsd = (
+        await db.query(
+          `SELECT COALESCE(SUM(amount),0) as n FROM dues WHERE _deleted=0 AND paid=0 AND currency='USD'`,
+        )
+      ).values[0].n;
+      return { ok: true, data, total, totalUnpaidSp, totalUnpaidUsd };
     } catch (err) {
       return { ok: false, error: err.message };
     }
@@ -1391,6 +1449,7 @@ export const useMobileStore = () => {
   };
 
   // ── REPORTS ────────────────────────────────────────────────────────────────
+  // ── REVENUE REPORT ────────────────────────────────────────────────────────────
   const getRevenueReport = async ({ dateFrom, dateTo } = {}) => {
     try {
       const db = await getMobileDb();
@@ -1398,92 +1457,168 @@ export const useMobileStore = () => {
       const t = dateTo || "2099-12-31";
       const rate = await getDollarRate();
       const reportCurrency = await getReportCurrency();
-      const divisor = reportCurrency === "USD" ? rate : 1;
 
+      // Core helper: USD amounts use frozen value, SP amounts convert only when needed
+      const toReport = (amountUsd, amountSp) => {
+        if (reportCurrency === "USD") return amountUsd + amountSp / rate;
+        return amountUsd * rate + amountSp;
+      };
+
+      // ── Daily collections ──────────────────────────────────────────────────
       const daily = (
         (
           await db.query(
             `
-        SELECT date(op.paid_at) as day,
-          COALESCE(SUM(op.amount_sp),0) as collected_sp,
-          COUNT(DISTINCT op.order_id)   as payment_count
-        FROM order_payments op JOIN orders o ON op.order_id=o.id
-        WHERE op._deleted=0 AND o._deleted=0 AND date(op.paid_at) BETWEEN ? AND ?
-        GROUP BY day ORDER BY day`,
+          SELECT
+            date(op.paid_at) as day,
+            COALESCE(SUM(CASE WHEN op.currency = 'USD' THEN op.amount   ELSE 0 END), 0) as collected_usd,
+            COALESCE(SUM(CASE WHEN op.currency != 'USD' THEN op.amount_sp ELSE 0 END), 0) as collected_sp_only,
+            COUNT(DISTINCT op.order_id) as payment_count
+          FROM order_payments op JOIN orders o ON op.order_id = o.id
+          WHERE op._deleted=0 AND o._deleted=0 AND date(op.paid_at) BETWEEN ? AND ?
+          GROUP BY day ORDER BY day`,
             [f, t],
           )
         ).values ?? []
       ).map((row) => ({
-        ...row,
-        collected: row.collected_sp / divisor,
+        day: row.day,
+        payment_count: row.payment_count,
+        collected: toReport(row.collected_usd, row.collected_sp_only),
       }));
 
+      // ── By status ──────────────────────────────────────────────────────────
       const byStatus =
         (
           await db.query(
             `
-        SELECT status, COUNT(*) as count, SUM(total_sp) as total_sp
-        FROM orders WHERE _deleted=0 AND date(order_date) BETWEEN ? AND ? GROUP BY status`,
+          SELECT
+            o.status,
+            COUNT(*) as count,
+            SUM(o.total_sp) as total_sp
+          FROM orders o
+          WHERE o._deleted=0 AND date(o.order_date) BETWEEN ? AND ?
+          GROUP BY o.status`,
             [f, t],
           )
         ).values ?? [];
 
+      // ── Top products ───────────────────────────────────────────────────────
       const topProducts = (
         (
           await db.query(
             `
-        SELECT oi.product_name, SUM(oi.quantity) as qty,
-          SUM(oi.line_total_sp) as revenue_sp,
-          COALESCE(SUM(oi.quantity * p.buy_price * CASE WHEN p.currency='USD' THEN ? ELSE 1 END),0) as cost_sp
-        FROM order_items oi JOIN orders o ON oi.order_id=o.id
-        LEFT JOIN products p ON oi.product_id=p.id
-        WHERE oi._deleted=0 AND o._deleted=0 AND date(o.order_date) BETWEEN ? AND ?
-        GROUP BY oi.product_name ORDER BY qty DESC LIMIT 10`,
+          SELECT
+            oi.product_name,
+            SUM(oi.quantity) as qty,
+            COALESCE(SUM(CASE WHEN oi.currency_at_sale = 'USD'
+              THEN oi.sell_price_at_sale * oi.quantity ELSE 0 END), 0) as revenue_usd,
+            COALESCE(SUM(CASE WHEN oi.currency_at_sale != 'USD'
+              THEN oi.line_total_sp ELSE 0 END), 0) as revenue_sp_only,
+            COALESCE(SUM(oi.quantity * p.buy_price *
+              CASE WHEN p.currency = 'USD' THEN ? ELSE 1 END), 0) as cost_sp
+          FROM order_items oi JOIN orders o ON oi.order_id = o.id
+          LEFT JOIN products p ON oi.product_id = p.id
+          WHERE oi._deleted=0 AND o._deleted=0 AND date(o.order_date) BETWEEN ? AND ?
+          GROUP BY oi.product_name ORDER BY qty DESC LIMIT 10`,
             [rate, f, t],
           )
         ).values ?? []
-      ).map((row) => ({
-        ...row,
-        revenue: row.revenue_sp / divisor,
-        cost: row.cost_sp / divisor,
-        profit: (row.revenue_sp - row.cost_sp) / divisor,
-      }));
+      ).map((row) => {
+        const revenue = toReport(row.revenue_usd, row.revenue_sp_only);
+        const cost =
+          reportCurrency === "USD" ? row.cost_sp / rate : row.cost_sp;
+        return {
+          product_name: row.product_name,
+          qty: row.qty,
+          revenue,
+          cost,
+          profit: revenue - cost,
+        };
+      });
 
-      const totals =
+      // ── Order value (what was sold, by item currency) ──────────────────────
+      const orderValueRow =
         (
           await db.query(
             `
-        SELECT COALESCE(SUM(total_sp),0) as order_value_sp, COUNT(*) as orders,
-          COALESCE(SUM(CASE WHEN status='paid'        THEN total_sp ELSE 0 END),0) as fully_paid_sp,
-          COALESCE(SUM(CASE WHEN status='partly_paid' THEN total_sp ELSE 0 END),0) as partly_paid_sp,
-          COALESCE(SUM(CASE WHEN status='pending'     THEN total_sp ELSE 0 END),0) as pending_sp
-        FROM orders WHERE _deleted=0 AND date(order_date) BETWEEN ? AND ?`,
+        SELECT
+          COALESCE(SUM(CASE WHEN oi.currency_at_sale = 'USD'
+            THEN oi.sell_price_at_sale * oi.quantity ELSE 0 END), 0) as ov_usd,
+          COALESCE(SUM(CASE WHEN oi.currency_at_sale != 'USD'
+            THEN oi.line_total_sp ELSE 0 END), 0) as ov_sp_only,
+          COUNT(DISTINCT o.id) as orders
+        FROM orders o
+        LEFT JOIN order_items oi ON oi.order_id = o.id AND oi._deleted = 0
+        WHERE o._deleted=0 AND date(o.order_date) BETWEEN ? AND ?`,
             [f, t],
           )
         ).values?.[0] ?? {};
 
-      const collectedSP =
+      // ── Status breakdown totals ────────────────────────────────────────────
+      const statusTotals =
         (
           await db.query(
             `
-        SELECT COALESCE(SUM(op.amount_sp),0) as n
-        FROM order_payments op JOIN orders o ON op.order_id=o.id
+        SELECT
+          COALESCE(SUM(CASE WHEN o.status='paid'
+            AND oi.currency_at_sale='USD' THEN oi.sell_price_at_sale * oi.quantity ELSE 0 END),0) as paid_usd,
+          COALESCE(SUM(CASE WHEN o.status='paid'
+            AND oi.currency_at_sale!='USD' THEN oi.line_total_sp ELSE 0 END),0) as paid_sp,
+          COALESCE(SUM(CASE WHEN o.status='partly_paid'
+            AND oi.currency_at_sale='USD' THEN oi.sell_price_at_sale * oi.quantity ELSE 0 END),0) as partly_usd,
+          COALESCE(SUM(CASE WHEN o.status='partly_paid'
+            AND oi.currency_at_sale!='USD' THEN oi.line_total_sp ELSE 0 END),0) as partly_sp,
+          COALESCE(SUM(CASE WHEN o.status='pending'
+            AND oi.currency_at_sale='USD' THEN oi.sell_price_at_sale * oi.quantity ELSE 0 END),0) as pending_usd,
+          COALESCE(SUM(CASE WHEN o.status='pending'
+            AND oi.currency_at_sale!='USD' THEN oi.line_total_sp ELSE 0 END),0) as pending_sp
+        FROM orders o
+        LEFT JOIN order_items oi ON oi.order_id = o.id AND oi._deleted = 0
+        WHERE o._deleted=0 AND date(o.order_date) BETWEEN ? AND ?`,
+            [f, t],
+          )
+        ).values?.[0] ?? {};
+
+      // ── Total collected (by payment currency) ─────────────────────────────
+      const collectedRow =
+        (
+          await db.query(
+            `
+        SELECT
+          COALESCE(SUM(CASE WHEN op.currency = 'USD' THEN op.amount   ELSE 0 END), 0) as collected_usd,
+          COALESCE(SUM(CASE WHEN op.currency != 'USD' THEN op.amount_sp ELSE 0 END), 0) as collected_sp_only
+        FROM order_payments op JOIN orders o ON op.order_id = o.id
         WHERE op._deleted=0 AND o._deleted=0 AND date(op.paid_at) BETWEEN ? AND ?`,
             [f, t],
           )
-        ).values?.[0]?.n ?? 0;
+        ).values?.[0] ?? {};
 
-      const costSP =
+      // ── Cost of goods sold ─────────────────────────────────────────────────
+      const costRow =
         (
           await db.query(
             `
-        SELECT COALESCE(SUM(oi.quantity * p.buy_price * CASE WHEN p.currency='USD' THEN ? ELSE 1 END),0) as n
-        FROM order_items oi JOIN orders o ON oi.order_id=o.id
-        LEFT JOIN products p ON oi.product_id=p.id
+        SELECT
+          COALESCE(SUM(CASE WHEN p.currency = 'USD'
+            THEN oi.quantity * p.buy_price ELSE 0 END), 0) as cost_usd,
+          COALESCE(SUM(CASE WHEN p.currency != 'USD'
+            THEN oi.quantity * p.buy_price ELSE 0 END), 0) as cost_sp_only
+        FROM order_items oi JOIN orders o ON oi.order_id = o.id
+        LEFT JOIN products p ON oi.product_id = p.id
         WHERE oi._deleted=0 AND o._deleted=0 AND date(o.order_date) BETWEEN ? AND ?`,
-            [rate, f, t],
+            [f, t],
           )
-        ).values?.[0]?.n ?? 0;
+        ).values?.[0] ?? {};
+
+      const orderValue = toReport(
+        orderValueRow.ov_usd ?? 0,
+        orderValueRow.ov_sp_only ?? 0,
+      );
+      const collected = toReport(
+        collectedRow.collected_usd ?? 0,
+        collectedRow.collected_sp_only ?? 0,
+      );
+      const cost = toReport(costRow.cost_usd ?? 0, costRow.cost_sp_only ?? 0);
 
       return {
         ok: true,
@@ -1493,16 +1628,24 @@ export const useMobileStore = () => {
           topProducts,
           reportCurrency,
           totals: {
-            orderValue: totals.order_value_sp / divisor,
-            orders: totals.orders,
-            collected: collectedSP / divisor,
-            outstanding:
-              Math.max(0, totals.order_value_sp - collectedSP) / divisor,
-            cost: costSP / divisor,
-            profit: (collectedSP - costSP) / divisor,
-            fullyPaid: totals.fully_paid_sp / divisor,
-            partlyPaid: totals.partly_paid_sp / divisor,
-            pending: totals.pending_sp / divisor,
+            orderValue,
+            orders: orderValueRow.orders ?? 0,
+            collected,
+            outstanding: Math.max(0, orderValue - collected),
+            cost,
+            profit: collected - cost,
+            fullyPaid: toReport(
+              statusTotals.paid_usd ?? 0,
+              statusTotals.paid_sp ?? 0,
+            ),
+            partlyPaid: toReport(
+              statusTotals.partly_usd ?? 0,
+              statusTotals.partly_sp ?? 0,
+            ),
+            pending: toReport(
+              statusTotals.pending_usd ?? 0,
+              statusTotals.pending_sp ?? 0,
+            ),
           },
         },
       };
@@ -1511,6 +1654,7 @@ export const useMobileStore = () => {
     }
   };
 
+  // ── DUES REPORT ───────────────────────────────────────────────────────────────
   const getDuesReport = async ({ dateFrom, dateTo } = {}) => {
     try {
       const db = await getMobileDb();
@@ -1518,29 +1662,58 @@ export const useMobileStore = () => {
       const t = dateTo || "2099-12-31";
       const rate = await getDollarRate();
       const reportCurrency = await getReportCurrency();
-      const divisor = reportCurrency === "USD" ? rate : 1;
+
+      const toReport = (amountUsd, amountSp) => {
+        if (reportCurrency === "USD") return amountUsd + amountSp / rate;
+        return amountUsd * rate + amountSp;
+      };
+
       const summary =
         (
           await db.query(
-            `SELECT COUNT(*) as total_dues, COALESCE(SUM(CASE WHEN paid=0 THEN amount_sp ELSE 0 END),0) as unpaid_sp, COALESCE(SUM(CASE WHEN paid=1 THEN amount_sp ELSE 0 END),0) as paid_sp, COUNT(CASE WHEN paid=0 THEN 1 END) as unpaid_count, COUNT(CASE WHEN paid=1 THEN 1 END) as paid_count FROM dues WHERE _deleted=0 AND date(created_at) BETWEEN ? AND ?`,
+            `
+        SELECT
+          COALESCE(SUM(CASE WHEN paid=0 AND currency='USD' THEN amount   ELSE 0 END),0) as unpaid_usd,
+          COALESCE(SUM(CASE WHEN paid=0 AND currency!='USD' THEN amount_sp ELSE 0 END),0) as unpaid_sp,
+          COALESCE(SUM(CASE WHEN paid=1 AND currency='USD' THEN amount   ELSE 0 END),0) as paid_usd,
+          COALESCE(SUM(CASE WHEN paid=1 AND currency!='USD' THEN amount_sp ELSE 0 END),0) as paid_sp,
+          COUNT(CASE WHEN paid=0 THEN 1 END) as unpaid_count,
+          COUNT(CASE WHEN paid=1 THEN 1 END) as paid_count
+        FROM dues WHERE _deleted=0 AND date(created_at) BETWEEN ? AND ?`,
             [f, t],
           )
         ).values?.[0] ?? {};
+
       const topDebtors = (
         (
           await db.query(
-            `SELECT c.name, c.phone, COALESCE(SUM(d.amount_sp),0) as total_sp FROM dues d JOIN customers c ON d.customer_id=c.id WHERE d._deleted=0 AND d.paid=0 GROUP BY d.customer_id ORDER BY total_sp DESC LIMIT 10`,
+            `
+          SELECT
+            c.name, c.phone,
+            COALESCE(SUM(CASE WHEN d.currency='USD' THEN d.amount   ELSE 0 END),0) as total_usd,
+            COALESCE(SUM(CASE WHEN d.currency!='USD' THEN d.amount_sp ELSE 0 END),0) as total_sp_only
+          FROM dues d JOIN customers c ON d.customer_id = c.id
+          WHERE d._deleted=0 AND d.paid=0
+          GROUP BY d.customer_id
+          ORDER BY (total_usd * ? + total_sp_only) DESC
+          LIMIT 10`,
+            [rate],
           )
         ).values ?? []
-      ).map((r) => ({ ...r, total: r.total_sp / divisor }));
+      ).map((r) => ({
+        name: r.name,
+        phone: r.phone,
+        total: toReport(r.total_usd, r.total_sp_only),
+      }));
+
       return {
         ok: true,
         data: {
           reportCurrency,
-          unpaid: summary.unpaid_sp / divisor,
-          paid: summary.paid_sp / divisor,
-          unpaidCount: summary.unpaid_count,
-          paidCount: summary.paid_count,
+          unpaid: toReport(summary.unpaid_usd ?? 0, summary.unpaid_sp ?? 0),
+          paid: toReport(summary.paid_usd ?? 0, summary.paid_sp ?? 0),
+          unpaidCount: summary.unpaid_count ?? 0,
+          paidCount: summary.paid_count ?? 0,
           topDebtors,
         },
       };

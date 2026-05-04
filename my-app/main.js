@@ -31,23 +31,24 @@ const __dirname = path.dirname(__filename);
 
 if (require("electron-squirrel-startup")) app.quit();
 
-if (process.platform === "win32") {
-  const command = process.argv[1];
-  if (command === "--squirrel-install" || command === "--squirrel-updated") {
-    app.setLoginItemSettings({
-      openAtLogin: true,
-      path: path.join(path.dirname(process.execPath), "..", "Update.exe"),
-      args: [
-        "--processStart",
-        `"${path.basename(process.execPath)}"`,
-        "--process-start-args",
-        '"--autostart"',
-      ],
-    });
-  } else if (command === "--squirrel-uninstall") {
-    app.setLoginItemSettings({ openAtLogin: false });
-  }
-}
+// run on startup
+// if (process.platform === "win32") {
+//   const command = process.argv[1];
+//   if (command === "--squirrel-install" || command === "--squirrel-updated") {
+//     app.setLoginItemSettings({
+//       openAtLogin: true,
+//       path: path.join(path.dirname(process.execPath), "..", "Update.exe"),
+//       args: [
+//         "--processStart",
+//         `"${path.basename(process.execPath)}"`,
+//         "--process-start-args",
+//         '"--autostart"',
+//       ],
+//     });
+//   } else if (command === "--squirrel-uninstall") {
+//     app.setLoginItemSettings({ openAtLogin: false });
+//   }
+// }
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -90,7 +91,7 @@ const createWindow = async () => {
     return;
   }
   mainWindow = new BrowserWindow({
-    icon: path.join(__dirname, "../public/logo/logo.ico"),
+    icon: path.join(__dirname, "../public/logo/logo.png"),
     width: 1200,
     height: 800,
     webPreferences: {

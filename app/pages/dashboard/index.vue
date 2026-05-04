@@ -146,7 +146,7 @@
               <span class="or-date">{{ formatDate(o.order_date) }}</span>
             </div>
             <div class="or-right">
-              <span class="or-amount">{{ fmtSP(o.total_sp) }}</span>
+              <span class="or-amount">{{ fmtOrder(o) }}</span>
               <span class="badge" :class="statusClass(o.status)">
                 {{ $t("order." + o.status) }}
               </span>
@@ -192,7 +192,7 @@
               <span class="debtor-name">{{ d.name }}</span>
               <span class="debtor-phone">{{ d.phone || "—" }}</span>
             </div>
-            <div class="debtor-amount">{{ fmtSP(d.total_sp) }}</div>
+            <div class="debtor-amount">{{ fmtDebtor(d) }}</div>
           </div>
         </div>
       </div>
@@ -211,7 +211,7 @@ definePageMeta({
 });
 
 const { getStats, getOrders, getDuesReport, getProducts } = useStore();
-const currency = useCurrency();
+const { fmt, dollarRate, reportCurrency, loadSettings } = useCurrency();
 const { t: $t } = useI18n();
 
 const loading = ref(true);
@@ -219,9 +219,7 @@ const stats = ref({});
 const lowStockProducts = ref([]);
 const recentOrders = ref([]);
 const topDebtors = ref([]);
-const fmtSP = ref((v) => v);
-const fmt = ref((v) => v);
-const activeStatus = ref(null); // "pending" | "partly_paid" | "paid" | null
+const activeStatus = ref(null);
 
 const orderStatuses = [
   { value: "pending", class: "pill-warning" },
@@ -229,7 +227,6 @@ const orderStatuses = [
   { value: "paid", class: "pill-success" },
 ];
 
-// ── Status counts from loaded orders ─────────────────────────────────────────
 const statusCounts = computed(() => {
   const counts = { pending: 0, partly_paid: 0, paid: 0 };
   for (const o of recentOrders.value) {
@@ -238,7 +235,6 @@ const statusCounts = computed(() => {
   return counts;
 });
 
-// ── Filtered orders list ──────────────────────────────────────────────────────
 const filteredOrders = computed(() => {
   if (!activeStatus.value) return recentOrders.value;
   return recentOrders.value.filter((o) => o.status === activeStatus.value);
@@ -247,12 +243,10 @@ const filteredOrders = computed(() => {
 const toggleStatus = (val) => {
   activeStatus.value = activeStatus.value === val ? null : val;
 };
-
 const clearStatus = () => {
   activeStatus.value = null;
 };
 
-// ── Stat cards ────────────────────────────────────────────────────────────────
 const formatDate = (d) =>
   d
     ? new Date(d).toLocaleDateString(undefined, {
@@ -275,6 +269,17 @@ const statusBadgeClass = (s) =>
     partly_paid: "filter-badge-info",
     paid: "filter-badge-success",
   }[s] ?? "");
+
+// Format an order total using frozen rate when display_currency=USD
+const fmtOrder = (order) => {
+  if (order.display_currency === "USD" && order.total_usd > 0) {
+    return fmt(order.total_usd, "USD");
+  }
+  return fmt(order.total_sp, "SP");
+};
+
+// Format a debtor amount — getDuesReport already returns `total` in report currency
+const fmtDebtor = (d) => fmt(d.total, reportCurrency.value);
 
 const statCards = computed(() => [
   {
@@ -307,7 +312,7 @@ const statCards = computed(() => [
     value: stats.value.monthRevenue ?? 0,
     icon: "mdi:cash-multiple",
     color: "amber",
-    formatter: (v) => fmt.value(v),
+    formatter: (v) => fmt(v, reportCurrency.value),
     onClick: () => navigateTo("/dashboard/reports/revenue"),
   },
   {
@@ -325,31 +330,29 @@ const statCards = computed(() => [
     icon: "mdi:cash-clock",
     color: "red",
     description: stats.value.unpaidDuesAmount
-      ? fmt.value(stats.value.unpaidDuesAmount)
+      ? fmt(stats.value.unpaidDuesAmount, reportCurrency.value)
       : undefined,
     onClick: () => navigateTo("/dashboard/dues"),
   },
 ]);
 
-// ── Load ──────────────────────────────────────────────────────────────────────
 const load = async () => {
   loading.value = true;
   try {
-    await currency.loadSettings();
-    fmtSP.value = currency.fmtSP;
-    fmt.value = currency.fmt;
+    await loadSettings();
 
     const [sR, oR, dR] = await Promise.all([
       getStats(),
-      getOrders({ limit: 20 }), // load more so status counts are meaningful
+      getOrders({ limit: 5 }),
       getDuesReport(),
     ]);
 
     if (sR.ok) stats.value = sR.data;
     if (oR.ok) recentOrders.value = oR.data;
+    // topDebtors already have `total` in report currency from getDuesReport fix
     if (dR.ok) topDebtors.value = dR.data.topDebtors?.slice(0, 5) ?? [];
 
-    const pAll = await getProducts({ limit: 200, activeOnly: true });
+    const pAll = await getProducts({ limit: 10, activeOnly: true });
     if (pAll.ok) {
       lowStockProducts.value = pAll.data
         .filter((p) => p.stock <= p.min_stock && p.min_stock > 0)

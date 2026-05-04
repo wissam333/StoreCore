@@ -187,7 +187,7 @@
 
                 <div class="item-total">
                   <label class="field-label">{{ $t("lineTotal") }}</label>
-                  <strong>{{ fmtSP(lineTotalSP(item)) }}</strong>
+                  <strong>{{ lineTotalDisplay(item) }}</strong>
                 </div>
               </div>
             </div>
@@ -236,7 +236,7 @@
               <span class="lis-name">{{
                 item.product_name || $t("product")
               }}</span>
-              <span class="lis-val">{{ fmtSP(lineTotalSP(item)) }}</span>
+              <span class="lis-val">{{ lineTotalDisplay(item) }}</span>
             </div>
             <div class="total-line total-line--grand">
               <span>{{ $t("total") }}</span>
@@ -301,7 +301,8 @@ const {
   getOrderById,
   saveOrder,
 } = useStore();
-const { fmtSP, toSP, dollarRate, reportCurrency, loadSettings } = useCurrency();
+const { fmtSP, fmtTx, toSP, dollarRate, reportCurrency, loadSettings } =
+  useCurrency();
 
 const isEdit = computed(
   () => !!route.params.id && route.path.includes("/edit"),
@@ -398,6 +399,13 @@ const clampQty = (idx) => {
 const lineTotalSP = (item) =>
   toSP(item.sell_price_at_sale * (item.quantity || 1), item.currency_at_sale);
 
+const lineTotalDisplay = (item) =>
+  fmtTx(
+    item.sell_price_at_sale * (item.quantity || 1),
+    item.currency_at_sale,
+    lineTotalSP(item),
+  );
+
 const grandTotalSP = computed(() =>
   items.value.reduce((s, i) => s + lineTotalSP(i), 0),
 );
@@ -458,7 +466,9 @@ const save = async () => {
       order_date: new Date().toISOString(),
       // No paid_amount on create — payment is added after via the detail page
       paid_amount: 0,
-      display_currency: "SP",
+      display_currency: items.value.every((i) => i.currency_at_sale === "USD")
+        ? "USD"
+        : "SP",
       notes: orderNotes.value,
     },
     items: items.value.map((i) => ({

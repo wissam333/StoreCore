@@ -42,7 +42,7 @@
               <span class="pstat-label">{{ $t("orders") }}</span>
             </div>
             <div class="pstat">
-              <span class="pstat-val">{{ fmtSP(customer.total_spent) }}</span>
+              <span class="pstat-val"> {{ fmtSpent(customer) }}</span>
               <span class="pstat-label">{{ $t("totalSpent") }}</span>
             </div>
           </div>
@@ -81,9 +81,9 @@
                     $t("order." + row.status)
                   }}</span>
                 </template>
-                <template #cell-total_sp="{ row }">{{
-                  fmtSP(row.total_sp)
-                }}</template>
+                <template #cell-total_sp="{ row }">
+                  {{ fmtOrderTotal(row) }}
+                </template>
                 <template #cell-order_date="{ row }">{{
                   new Date(row.order_date).toLocaleDateString()
                 }}</template>
@@ -177,26 +177,24 @@
 <script setup>
 definePageMeta({
   searchMeta: {
-    label: "Customer Profile",
-    labelAr: "ملف العميل",
+    label: "Customer Detail",
+    labelAr: "تفاصيل العميل",
     icon: "mdi:account-outline",
     group: "Main",
   },
 });
 
-// ✅ Top-level
 const { getCustomerById, saveCustomer, markDuePaid } = useStore();
 const route = useRoute();
 const { locale, t: $t } = useI18n();
 const { $toast } = useNuxtApp();
-const currency = useCurrency();
+const { fmt, dollarRate, reportCurrency, loadSettings } = useCurrency();
 
 const loading = ref(true);
 const customer = ref(null);
 const activeTab = ref("orders");
 const showEditModal = ref(false);
 const saving = ref(false);
-const fmtSP = ref((v) => v);
 const editForm = reactive({ name: "", phone: "", address: "", notes: "" });
 
 const tabs = [
@@ -205,14 +203,14 @@ const tabs = [
 ];
 
 const orderCols = [
-  { key: "order_date", label: "date", sortable: true },
-  { key: "total_sp", label: "total", align: "end" },
+  { key: "order_date", label: "date" },
+  { key: "total_sp", label: "total" },
   { key: "status", label: "status" },
 ];
 
 const dueCols = [
   { key: "description", label: "description" },
-  { key: "amount", label: "amount", align: "end" },
+  { key: "amount", label: "amount" },
   { key: "due_date", label: "dueDate" },
   { key: "paid", label: "status" },
 ];
@@ -223,6 +221,24 @@ const statusClass = (s) =>
     partly_paid: "badge-info",
     paid: "badge-success",
   }[s] ?? "");
+
+// Frozen USD split — same logic as reports
+const fmtSpent = (c) => {
+  const usd = c?.spent_usd ?? 0;
+  const sp = c?.spent_sp ?? 0;
+  if (reportCurrency.value === "USD") {
+    return fmt(usd + sp / dollarRate.value, "USD");
+  }
+  return fmt(usd * dollarRate.value + sp, "SP");
+};
+
+// Orders in customer profile still use total_sp with display_currency frozen rate
+const fmtOrderTotal = (order) => {
+  if (order.display_currency === "USD" && order.total_usd > 0) {
+    return fmt(order.total_usd, "USD");
+  }
+  return fmt(order.total_sp, "SP");
+};
 
 const load = async () => {
   loading.value = true;
@@ -259,8 +275,7 @@ const payDue = async (id) => {
 };
 
 onMounted(async () => {
-  await currency.loadSettings();
-  fmtSP.value = currency.fmtSP;
+  await loadSettings();
   await load();
 });
 

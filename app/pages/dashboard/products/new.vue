@@ -250,9 +250,9 @@
 <script setup>
 definePageMeta({
   searchMeta: {
-    label: "Add Product",
-    labelAr: "إضافة منتج",
-    icon: "mdi:package-variant-closed",
+    label: "New Product",
+    labelAr: "منتج جديد",
+    icon: "mdi:package-variant-plus",
     group: "Main",
   },
 });

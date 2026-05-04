@@ -153,6 +153,15 @@
 </template>
 
 <script setup>
+definePageMeta({
+  searchMeta: {
+    label: "Settings",
+    labelAr: "الإعدادات",
+    icon: "mdi:cog-outline",
+    group: "Main",
+  },
+});
+
 const { locale, t: $t } = useI18n();
 const { $toast } = useNuxtApp();
 const { getSettings, setSetting } = useStore();

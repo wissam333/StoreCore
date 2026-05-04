@@ -3,8 +3,8 @@
   <div>
     <template v-if="phase === 'loading'">
       <div class="app-loading">
+        <img src="/logo/logo.png" class="app-logo" alt="logo" />
         <Icon name="mdi:loading" size="32" class="spin" />
-        <p class="loading-text">{{ loadingMsg || $t("loading") }}</p>
       </div>
     </template>
 
@@ -228,7 +228,7 @@ onMounted(() => {
 });
 </script>
 
-<style scoped>
+<style lang="scss" scoped>
 .app-loading {
   position: fixed;
   inset: 0;
@@ -238,11 +238,18 @@ onMounted(() => {
   justify-content: center;
   background: var(--bg-page, #f1f5f9);
   gap: 1rem;
+
+  .app-logo {
+    width: clamp(100px, 30vw, 180px);
+    object-fit: contain;
+    margin-bottom: 0.5rem;
+  }
+  .spin {
+    animation: spin 0.9s linear infinite;
+    color: var(--primary, #2563eb);
+  }
 }
-.spin {
-  animation: spin 0.9s linear infinite;
-  color: var(--primary, #2563eb);
-}
+
 .error-icon {
   color: #ef4444;
 }

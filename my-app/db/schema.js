@@ -217,13 +217,6 @@ export function initSchema(db) {
     ).run(uuid());
   }
 
-  const catCount = db.prepare(`SELECT COUNT(*) as n FROM categories`).get();
-  if (catCount.n === 0) {
-    db.prepare(`INSERT INTO categories (id, name) VALUES (?, 'General')`).run(
-      uuid(),
-    );
-  }
-
   // ── Backfill: migrate existing paid_amount into order_payments ─────────────
   // Only runs once — checks if any payments already exist for each order.
   try {
