@@ -1,9 +1,11 @@
 // store-app/composables/useP2PSync.js
-// UPDATED: CDN loadScript replaced with npm imports (peerjs, qrcodejs2-fixes)
+// UPDATED: order_payments added to ALL_TABLES and APPLY_ORDER
 // Protocol v4 unchanged — only table lists updated.
 
-import Peer from "peerjs";
-import QRCode from "qrcodejs2-fixes";
+const PEERJS_CDN =
+  "https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js";
+const QRCODE_CDN =
+  "https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js";
 
 // ── Table lists ───────────────────────────────────────────────────────────────
 const ALL_TABLES = [
@@ -12,7 +14,7 @@ const ALL_TABLES = [
   "customers",
   "orders",
   "order_items",
-  "order_payments",
+  "order_payments", // ← NEW
   "dues",
   "staff",
 ];
@@ -24,7 +26,7 @@ const APPLY_ORDER = [
   "products",
   "orders",
   "order_items",
-  "order_payments",
+  "order_payments", // ← NEW: after orders + order_items (FK constraint)
   "dues",
 ];
 
@@ -39,52 +41,18 @@ const makeQueue = () => {
   };
 };
 
+const loadScript = (src) =>
+  new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) return resolve();
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error(`Failed to load: ${src}`));
+    document.head.appendChild(s);
+  });
+
 const isElectron = () =>
   typeof window !== "undefined" && !!window.__ELECTRON__ && !!window.store;
-
-// ── PeerJS server lifecycle ───────────────────────────────────────────────────
-let _localIp = "127.0.0.1";
-
-const startLocalServer = async () => {
-  if (!isElectron()) return; // mobile/web: skip, uses cloud PeerJS
-  try {
-    const result = await window.electronAPI.p2pStartServer();
-    if (result?.ok) {
-      _localIp = result.ip;
-      console.log("[P2P] Local server started, IP:", _localIp);
-    } else {
-      throw new Error(result?.error ?? "Server start failed");
-    }
-  } catch (e) {
-    throw new Error("[P2P] Could not start local PeerJS server: " + e?.message);
-  }
-};
-
-const stopLocalServer = async () => {
-  if (!isElectron()) return;
-  try {
-    await window.electronAPI.p2pStopServer();
-    console.log("[P2P] Local server stopped");
-  } catch (e) {
-    console.warn("[P2P] Server stop error:", e?.message);
-  }
-};
-
-// ── Peer factory — always points to local server in Electron ─────────────────
-const makePeer = () => {
-  if (isElectron()) {
-    return new Peer(undefined, {
-      host: "127.0.0.1", // renderer always talks to local server
-      port: 9000,
-      path: "/myapp",
-      config: { iceServers: [] }, // LAN only — no STUN needed
-    });
-  }
-  // Fallback for non-Electron (web/mobile): use cloud PeerJS
-  return new Peer(undefined, {
-    config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] },
-  });
-};
 
 const dumpTable = async (db, table) => {
   try {
@@ -128,9 +96,10 @@ export const useP2PSync = () => {
     }
   };
 
+  // In useP2PSync.js — replace collectLocalData with this:
   const collectLocalData = async () => {
     const dump = {};
-    const changedFieldsMap = {};
+    const changedFieldsMap = {}; // { "table:rowId": ["field1", "field2"] }
 
     if (isElectron()) {
       for (const table of ALL_TABLES) {
@@ -141,6 +110,7 @@ export const useP2PSync = () => {
           dump[table] = [];
         }
       }
+      // Get sync_queue to know which fields were locally changed
       try {
         const q = await window.store.getSyncQueue();
         if (q.ok) {
@@ -154,6 +124,7 @@ export const useP2PSync = () => {
               for (const f of fields) changedFieldsMap[key].add(f);
             }
           }
+          // Convert Sets to arrays
           for (const key of Object.keys(changedFieldsMap)) {
             changedFieldsMap[key] = [...changedFieldsMap[key]];
           }
@@ -173,6 +144,7 @@ export const useP2PSync = () => {
       dump[table] = await dumpTable(db, table);
     }
 
+    // Get changed_fields from sync_queue
     try {
       const qRows =
         (
@@ -200,6 +172,7 @@ export const useP2PSync = () => {
     return { dump, changedFieldsMap };
   };
 
+  // Replace applyRemoteDump signature:
   const applyRemoteDump = async (dump, changedFieldsMap = {}) => {
     const totalRows = APPLY_ORDER.reduce(
       (s, t) => s + (dump[t]?.length ?? 0),
@@ -251,6 +224,7 @@ export const useP2PSync = () => {
     await flushIfMobile();
   };
 
+  // Replace sendDump:
   const sendDump = async (conn) => {
     setState("syncing", "Collecting local data…");
     const { dump, changedFieldsMap } = await collectLocalData();
@@ -273,10 +247,17 @@ export const useP2PSync = () => {
       }
     }
 
+    // Send the changed fields map so receiver knows what was intentionally edited
     conn.send({ type: "CHANGED_FIELDS_MAP", map: changedFieldsMap });
+
     await new Promise((r) => setTimeout(r, 100));
     conn.send({ type: "DONE" });
     console.log(`[P2P] Sent ${totalRows} rows + changedFieldsMap`);
+  };
+
+  const loadPeer = async () => {
+    await loadScript(PEERJS_CDN);
+    return window.Peer;
   };
 
   // ── HOST ──────────────────────────────────────────────────────────────────
@@ -285,15 +266,13 @@ export const useP2PSync = () => {
     error.value = null;
 
     try {
-      // Start the local PeerJS server FIRST
-      await startLocalServer();
-
-      _peer = makePeer();
+      const Peer = await loadPeer();
+      _peer = new Peer(undefined, {
+        config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] },
+      });
 
       _peer.on("open", (id) => {
-        // Encode LAN IP + peer ID so guest knows where to connect
-        // Format: "192.168.1.5|peer-id-here"
-        peerId.value = isElectron() ? `${_localIp}|${id}` : id;
+        peerId.value = id;
         setState("ready", "Show this QR to the other device");
       });
 
@@ -308,28 +287,39 @@ export const useP2PSync = () => {
         conn.on("data", (msg) => {
           enqueue(async () => {
             if (!msg?.type) return;
-            console.log(`[P2P] Host received: ${msg.type}`);
+            console.log(
+              `[P2P] Host received: ${msg.type}` +
+                (msg.table
+                  ? ` table=${msg.table} rows=${msg.rows?.length ?? 0}`
+                  : ""),
+            );
 
             if (msg.type === "HELLO") {
+              console.log("[P2P] Host sending HELLO_ACK");
               conn.send({ type: "HELLO_ACK" });
             }
+
             if (msg.type === "READY") {
+              console.log("[P2P] Host received READY — starting sendDump");
               await sendDump(conn);
             }
+
             if (msg.type === "DATA") {
               if (!buffer[msg.table]) buffer[msg.table] = [];
               buffer[msg.table].push(...msg.rows);
             }
+
             if (msg.type === "CHANGED_FIELDS_MAP") {
               remoteChangedFieldsMap = msg.map ?? {};
             }
+
             if (msg.type === "DONE") {
               setState("syncing", "Merging guest data…");
               const toApply = buffer;
               const toApplyMap = remoteChangedFieldsMap;
               buffer = {};
               remoteChangedFieldsMap = {};
-              await applyRemoteDump(toApply, toApplyMap);
+              await applyRemoteDump(toApply, toApplyMap); // pass the map
               conn.send({ type: "ACK" });
               await new Promise((r) => setTimeout(r, 300));
               useSyncTick().value++;
@@ -339,7 +329,10 @@ export const useP2PSync = () => {
           });
         });
 
-        conn.on("open", () => console.log("[P2P] Host: data channel open"));
+        conn.on("open", () => {
+          console.log("[P2P] Host: data channel open");
+        });
+
         conn.on("error", (e) => {
           error.value = e.message;
           setState("error", e.message);
@@ -356,36 +349,16 @@ export const useP2PSync = () => {
     }
   };
 
-  // ── GUEST ───────────────────────────────────────────────────────────────────
-  const connectToHost = async (scanned) => {
+  // ── GUEST ─────────────────────────────────────────────────────────────────
+  const connectToHost = async (hostPeerId) => {
     setState("loading", "Connecting…");
     error.value = null;
 
-    // Decode the scanned value — may contain "ip|peerId" or just "peerId"
-    let hostIp = "127.0.0.1";
-    let hostPeerId = scanned;
-
-    if (scanned.includes("|")) {
-      const parts = scanned.split("|");
-      hostIp = parts[0];
-      hostPeerId = parts[1];
-    }
-
     try {
-      // Guest also starts the local server (needed if guest is also Electron)
-      // If guest is a phone/tablet, this is a no-op
-      if (isElectron()) await startLocalServer();
-
-      _peer = isElectron()
-        ? new Peer(undefined, {
-            host: hostIp, // ← connect to HOST machine's IP
-            port: 9000,
-            path: "/myapp",
-            config: { iceServers: [] },
-          })
-        : new Peer(undefined, {
-            config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] },
-          });
+      const Peer = await loadPeer();
+      _peer = new Peer(undefined, {
+        config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] },
+      });
 
       _peer.on("open", () => {
         _conn = _peer.connect(hostPeerId, { reliable: true });
@@ -397,31 +370,42 @@ export const useP2PSync = () => {
         _conn.on("data", (msg) => {
           enqueue(async () => {
             if (!msg?.type) return;
-            console.log(`[P2P] Guest received: ${msg.type}`);
+            console.log(
+              `[P2P] Guest received: ${msg.type}` +
+                (msg.table
+                  ? ` table=${msg.table} rows=${msg.rows?.length ?? 0}`
+                  : ""),
+            );
 
             if (msg.type === "HELLO_ACK") {
+              console.log("[P2P] Guest received HELLO_ACK — sending READY");
               setState("syncing", "Receiving data from host…");
               await new Promise((r) => setTimeout(r, 50));
               _conn.send({ type: "READY" });
             }
+
             if (msg.type === "DATA") {
               if (!buffer[msg.table]) buffer[msg.table] = [];
               buffer[msg.table].push(...msg.rows);
             }
+
             if (msg.type === "CHANGED_FIELDS_MAP") {
               remoteChangedFieldsMap = msg.map ?? {};
             }
+
             if (msg.type === "DONE") {
               setState("syncing", "Merging host data…");
               const toApply = buffer;
               const toApplyMap = remoteChangedFieldsMap;
               buffer = {};
               remoteChangedFieldsMap = {};
-              await applyRemoteDump(toApply, toApplyMap);
+              await applyRemoteDump(toApply, toApplyMap); // pass the map
+
               await new Promise((r) => setTimeout(r, 300));
               useSyncTick().value++;
               await sendDump(_conn);
             }
+
             if (msg.type === "ACK") {
               setState("done", "Sync complete ✓");
               cleanup();
@@ -451,9 +435,8 @@ export const useP2PSync = () => {
     }
   };
 
-  // ── Cleanup — stops server when session ends ─────────────────────────────
   const cleanup = () => {
-    setTimeout(async () => {
+    setTimeout(() => {
       try {
         _conn?.close();
       } catch {}
@@ -462,7 +445,6 @@ export const useP2PSync = () => {
       } catch {}
       _conn = null;
       _peer = null;
-      await stopLocalServer(); // ← stop server after sync is done
     }, 2000);
   };
 
@@ -475,17 +457,6 @@ export const useP2PSync = () => {
     error.value = null;
   };
 
-  const makeQrCode = (el, text) => {
-    return new QRCode(el, {
-      text,
-      width: 160,
-      height: 160,
-      colorDark: "#0f172a",
-      colorLight: "#f8fafc",
-      correctLevel: QRCode.CorrectLevel.M,
-    });
-  };
-
   return {
     status: readonly(status),
     statusMsg: readonly(statusMsg),
@@ -495,6 +466,6 @@ export const useP2PSync = () => {
     startHost,
     connectToHost,
     reset,
-    makeQrCode,
+    loadQrLib: () => loadScript(QRCODE_CDN),
   };
 };
