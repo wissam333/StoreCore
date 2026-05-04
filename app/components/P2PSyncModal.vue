@@ -62,6 +62,7 @@
                 <div class="p2p-spinner"></div>
                 <p>{{ statusMsg || $t("p2p.status.preparing") }}</p>
               </div>
+
               <div v-else-if="status === 'ready'" class="p2p-qr-wrap">
                 <p class="p2p-qr-label">{{ $t("p2p.host.qrLabel") }}</p>
                 <div class="p2p-qr-box">
@@ -76,6 +77,7 @@
                 </p>
                 <p class="p2p-hint">{{ $t("p2p.host.hint") }}</p>
               </div>
+
               <div v-else-if="status === 'syncing'" class="p2p-syncing">
                 <div class="p2p-sync-anim">
                   <div class="p2p-sync-ring"></div>
@@ -97,11 +99,13 @@
                   {{ $t("p2p.status.rows") }}
                 </p>
               </div>
+
               <div v-else-if="status === 'done'" class="p2p-done">
                 <div class="p2p-done-icon">✓</div>
                 <p class="p2p-done-msg">{{ $t("p2p.status.done") }}</p>
                 <p class="p2p-done-sub">{{ $t("p2p.status.doneSub") }}</p>
               </div>
+
               <div v-else-if="status === 'error'" class="p2p-error">
                 <div class="p2p-error-icon">!</div>
                 <p class="p2p-error-msg">
@@ -115,7 +119,6 @@
               <!-- Step: enter ID or scan -->
               <div v-if="guestStep === 'enter'" class="p2p-enter">
                 <p class="p2p-enter-label">{{ $t("p2p.guest.enterLabel") }}</p>
-
                 <div class="p2p-input-wrap">
                   <input
                     v-model="manualId"
@@ -155,11 +158,10 @@
                 <p v-if="scanError" class="p2p-scan-error">{{ scanError }}</p>
               </div>
 
-              <!-- Step: live camera scan view -->
+              <!-- Step: live camera scan -->
               <div v-else-if="guestStep === 'scan'" class="p2p-scan">
                 <p class="p2p-scan-label">{{ $t("p2p.guest.scanLabel") }}</p>
 
-                <!-- Engine status badge -->
                 <div class="p2p-engine-badge" :class="engineBadgeClass">
                   <span class="p2p-engine-dot"></span>
                   {{ engineLabel }}
@@ -168,7 +170,6 @@
                 <div class="p2p-video-wrap">
                   <video
                     ref="videoEl"
-                    id="p2p-qr-video"
                     class="p2p-video"
                     autoplay
                     playsinline
@@ -183,7 +184,6 @@
                       <div class="p2p-scan-corner p2p-scan-corner--br"></div>
                     </div>
                   </div>
-                  <!-- Canvas hidden — only used for jsQR/ZXing pixel fallback -->
                   <canvas ref="canvasEl" class="p2p-canvas-hidden"></canvas>
                 </div>
 
@@ -213,6 +213,7 @@
                   <div class="p2p-spinner"></div>
                   <p>{{ statusMsg || $t("p2p.status.connecting") }}</p>
                 </div>
+
                 <div v-else-if="status === 'syncing'" class="p2p-syncing">
                   <div class="p2p-sync-anim">
                     <div class="p2p-sync-ring"></div>
@@ -234,11 +235,13 @@
                     {{ $t("p2p.status.rows") }}
                   </p>
                 </div>
+
                 <div v-else-if="status === 'done'" class="p2p-done">
                   <div class="p2p-done-icon">✓</div>
                   <p class="p2p-done-msg">{{ $t("p2p.status.done") }}</p>
                   <p class="p2p-done-sub">{{ $t("p2p.status.doneSub") }}</p>
                 </div>
+
                 <div v-else-if="status === 'error'" class="p2p-error">
                   <div class="p2p-error-icon">!</div>
                   <p class="p2p-error-msg">
@@ -266,7 +269,12 @@
 
           <!-- Footer -->
           <div class="p2p-footer">
-            <button v-if="mode !== 'pick'" class="p2p-back" @click="goBack">
+            <!-- Back button: hidden while syncing to prevent partial-sync disasters -->
+            <button
+              v-if="mode !== 'pick' && status !== 'syncing'"
+              class="p2p-back"
+              @click="goBack"
+            >
               ← {{ $t("p2p.nav.back") }}
             </button>
             <button
@@ -284,7 +292,6 @@
 </template>
 
 <script setup>
-// ── npm imports — no CDN, fully offline ───────────────────────────────────────
 import jsQR from "jsqr";
 import * as ZXing from "@zxing/library";
 import { ref, computed, watch, nextTick, onUnmounted } from "vue";
@@ -302,7 +309,7 @@ const {
   startHost,
   connectToHost,
   reset,
-  makeQrCode, // replaces loadQrLib — synchronous, no CDN
+  makeQrCode,
 } = useP2PSync();
 
 // ── UI state ──────────────────────────────────────────────────────────────────
@@ -312,13 +319,10 @@ const manualId = ref("");
 const scanLoading = ref(false);
 const scanError = ref("");
 
-// Active scan engine label for the status badge
-const activeEngine = ref(""); // "BarcodeDetector" | "jsQR" | "ZXing" | ""
-
-const engineLabel = computed(() => {
-  if (!activeEngine.value) return "Scanning…";
-  return `Engine: ${activeEngine.value}`;
-});
+const activeEngine = ref("");
+const engineLabel = computed(() =>
+  activeEngine.value ? `Engine: ${activeEngine.value}` : "Scanning…",
+);
 const engineBadgeClass = computed(() => ({
   "p2p-engine-badge--native": activeEngine.value === "BarcodeDetector",
   "p2p-engine-badge--js":
@@ -376,8 +380,6 @@ let _videoStream = null;
 let _scanRaf = null;
 let _scanActive = false;
 let _lastScanTime = 0;
-
-// BarcodeDetector is created fresh per scan session (avoids Android WebView stale issues)
 let _barcodeDetector = null;
 
 const SCAN_INTERVAL_MS = 150;
@@ -388,15 +390,12 @@ const progressPct = computed(() =>
     : 0,
 );
 
-// ─────────────────────────────────────────────────────────────────────────────
-// HOST — generate QR code
-// ─────────────────────────────────────────────────────────────────────────────
+// ── HOST — QR code generation ─────────────────────────────────────────────────
 const chooseMode = async (m) => {
   mode.value = m;
   if (m === "host") await startHost();
 };
 
-// Watch for status=ready then render QR using the bundled QRCode library
 let _qrInstance = null;
 
 watch([() => status.value, qrEl], async ([s, el]) => {
@@ -409,16 +408,13 @@ watch([() => status.value, qrEl], async ([s, el]) => {
     }
     await new Promise((r) => setTimeout(r, 100));
     if (!qrEl.value) return;
-    // makeQrCode is synchronous — QRCode is bundled via npm, no CDN await needed
     _qrInstance = makeQrCode(qrEl.value, peerId.value);
   } catch (e) {
     console.warn("[P2P] QR generation failed:", e);
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GUEST — manual connect
-// ─────────────────────────────────────────────────────────────────────────────
+// ── GUEST — manual connect ────────────────────────────────────────────────────
 const connectManual = () => {
   const id = manualId.value.trim();
   if (!id) return;
@@ -428,9 +424,7 @@ const connectManual = () => {
   connectToHost(id);
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GUEST — startScan() entry point
-// ─────────────────────────────────────────────────────────────────────────────
+// ── GUEST — scan entry point ──────────────────────────────────────────────────
 const startScan = async () => {
   if (scanLoading.value) return;
   scanError.value = "";
@@ -439,10 +433,6 @@ const startScan = async () => {
   scanLoading.value = false;
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GUEST — startWebScan()
-// jsQR and ZXing are imported at module level — always available, no loading.
-// ─────────────────────────────────────────────────────────────────────────────
 const startWebScan = async () => {
   try {
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -464,15 +454,13 @@ const startWebScan = async () => {
     if (videoEl.value) {
       videoEl.value.srcObject = _videoStream;
       await videoEl.value.play().catch(() => {});
-      // Wait for Android camera to stabilize (exposure, focus, white-balance)
-      await new Promise((r) => setTimeout(r, 1200));
+      await new Promise((r) => setTimeout(r, 1200)); // camera stabilise
     }
 
-    // Create BarcodeDetector FRESH here, after stream is live.
-    // Check getSupportedFormats() — some WebViews expose the class but
-    // don't actually support qr_code, causing silent failures.
+    // Fresh BarcodeDetector per session
     _barcodeDetector = null;
     activeEngine.value = "";
+
     if ("BarcodeDetector" in window) {
       try {
         const supported = await window.BarcodeDetector.getSupportedFormats();
@@ -480,26 +468,15 @@ const startWebScan = async () => {
           _barcodeDetector = new window.BarcodeDetector({
             formats: ["qr_code"],
           });
-          console.log(
-            "[P2P] BarcodeDetector ready ✓ supported formats:",
-            supported.join(", "),
-          );
           activeEngine.value = "BarcodeDetector";
+          console.log("[P2P] BarcodeDetector ready ✓");
         } else {
-          console.log(
-            "[P2P] BarcodeDetector available but qr_code not in supported formats:",
-            supported,
-          );
           activeEngine.value = "jsQR";
         }
-      } catch (e) {
-        console.log("[P2P] BarcodeDetector init failed:", e?.message);
-        _barcodeDetector = null;
+      } catch {
         activeEngine.value = "jsQR";
       }
     } else {
-      console.log("[P2P] BarcodeDetector not available — using jsQR + ZXing");
-      // jsQR and ZXing are already imported — set label immediately, no async load
       activeEngine.value = "jsQR";
     }
 
@@ -510,7 +487,6 @@ const startWebScan = async () => {
       scanError.value =
         "Camera permission denied. Please allow camera access and try again.";
     } else {
-      console.error("[P2P] Camera error:", e?.message);
       scanError.value = "Could not open camera. Please type the ID manually.";
     }
   }
@@ -526,7 +502,6 @@ const stopWebScan = () => {
     _videoStream.getTracks().forEach((t) => t.stop());
     _videoStream = null;
   }
-  // Destroy detector reference so it is always fresh on next scan session
   _barcodeDetector = null;
   activeEngine.value = "";
   if (guestStep.value === "scan") guestStep.value = "enter";
@@ -536,12 +511,6 @@ const scheduleScan = () => {
   if (_scanActive) _scanRaf = requestAnimationFrame(scanFrame);
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// scanFrame — core detection loop
-// Strategy 1: BarcodeDetector on the VIDEO element directly (native, fastest)
-// Strategy 2: jsQR on raw canvas pixels (imported from npm)
-// Strategy 3: ZXing as last resort (imported from npm)
-// ─────────────────────────────────────────────────────────────────────────────
 const scanFrame = async (timestamp) => {
   if (!_scanActive) return;
   if (timestamp - _lastScanTime < SCAN_INTERVAL_MS) {
@@ -565,9 +534,7 @@ const scanFrame = async (timestamp) => {
   }
 
   try {
-    // ── Strategy 1: BarcodeDetector on the VIDEO element directly ────────────
-    // Pass `video` (HTMLVideoElement) — NOT the canvas.
-    // BarcodeDetector on Android WebView is optimized for video input.
+    // Strategy 1: native BarcodeDetector on the video element
     if (_barcodeDetector) {
       try {
         const codes = await _barcodeDetector.detect(video);
@@ -586,8 +553,7 @@ const scanFrame = async (timestamp) => {
       }
     }
 
-    // ── Prepare canvas for software decoders ─────────────────────────────────
-    // Use 75% center crop (where user is pointing the QR guide frame)
+    // Prepare canvas crop (75% centre)
     const W = video.videoWidth;
     const H = video.videoHeight;
     const size = Math.min(W, H) * 0.75;
@@ -598,14 +564,12 @@ const scanFrame = async (timestamp) => {
     canvas.height = size;
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     ctx.drawImage(video, sx, sy, size, size, 0, 0, size, size);
-
-    // Read imageData ONCE — pass raw to jsQR directly (no double-read).
     const imageData = ctx.getImageData(0, 0, size, size);
 
-    // ── Strategy 2: jsQR (npm import, always available) ───────────────────────
+    // Strategy 2: jsQR
     activeEngine.value = "jsQR";
     const code = jsQR(imageData.data, size, size, {
-      inversionAttempts: "attemptBoth", // handles inverted QR codes
+      inversionAttempts: "attemptBoth",
     });
     if (code?.data) {
       console.log("[P2P] jsQR hit:", code.data);
@@ -613,7 +577,7 @@ const scanFrame = async (timestamp) => {
       return;
     }
 
-    // ── Strategy 3: ZXing — most thorough, highest CPU, last resort ──────────
+    // Strategy 3: ZXing
     try {
       activeEngine.value = "ZXing";
       const hints = new Map();
@@ -627,8 +591,6 @@ const scanFrame = async (timestamp) => {
         return;
       }
     } catch (e) {
-      // ZXing throws NotFoundException on every blank frame — completely normal.
-      // Only log actual unexpected errors.
       if (
         e?.name &&
         !e.name.includes("NotFoundException") &&
@@ -637,16 +599,11 @@ const scanFrame = async (timestamp) => {
         console.warn("[P2P] ZXing frame error:", e?.name, e?.message);
       }
     }
-  } catch (e) {
-    // Ignore per-frame errors (stream closed mid-frame etc.)
-  }
+  } catch {}
 
   scheduleScan();
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Shared: handle a decoded peer ID
-// ─────────────────────────────────────────────────────────────────────────────
 const handleScannedId = (id) => {
   if (!id?.trim()) return;
   stopWebScan();
@@ -657,10 +614,10 @@ const handleScannedId = (id) => {
   connectToHost(id.trim());
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Navigation
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Navigation ────────────────────────────────────────────────────────────────
 const goBack = async () => {
+  // Don't allow going back while sync is in progress
+  if (status.value === "syncing") return;
   stopWebScan();
   unhookConsole();
   reset();
@@ -672,6 +629,7 @@ const goBack = async () => {
   _qrInstance = null;
 };
 
+// Only block close during active sync — allow close on done/error/idle/ready
 const tryClose = () => {
   if (status.value === "syncing") return;
   handleClose();
@@ -795,6 +753,7 @@ onUnmounted(() => {
   flex: 1;
 }
 
+/* Mode picker */
 .p2p-pick {
   padding: 24px 20px;
 }
@@ -848,6 +807,7 @@ onUnmounted(() => {
   line-height: 1.4;
 }
 
+/* Waiting spinner */
 .p2p-waiting {
   padding: 40px 20px;
   display: flex;
@@ -871,6 +831,7 @@ onUnmounted(() => {
   }
 }
 
+/* QR */
 .p2p-qr-wrap {
   padding: 24px 20px;
   display: flex;
@@ -941,6 +902,7 @@ onUnmounted(() => {
   margin: 0;
 }
 
+/* Syncing */
 .p2p-syncing {
   padding: 32px 20px;
   display: flex;
@@ -992,6 +954,7 @@ onUnmounted(() => {
   margin: 0;
 }
 
+/* Done */
 .p2p-done {
   padding: 40px 20px;
   display: flex;
@@ -1034,6 +997,7 @@ onUnmounted(() => {
   margin: 0;
 }
 
+/* Error */
 .p2p-error {
   padding: 40px 20px;
   display: flex;
@@ -1073,6 +1037,7 @@ onUnmounted(() => {
   background: var(--p2p-accent-mid);
 }
 
+/* Guest enter */
 .p2p-enter {
   padding: 24px 20px;
   display: flex;
@@ -1136,7 +1101,6 @@ onUnmounted(() => {
   height: 1px;
   background: var(--p2p-border);
 }
-
 .p2p-scan-btn {
   display: flex;
   align-items: center;
@@ -1160,7 +1124,6 @@ onUnmounted(() => {
   opacity: 0.5;
   cursor: not-allowed;
 }
-
 .p2p-scan-error {
   font-size: 12px;
   color: var(--p2p-error);
@@ -1171,7 +1134,7 @@ onUnmounted(() => {
   border-radius: 8px;
 }
 
-/* Engine status badge */
+/* Engine badge */
 .p2p-engine-badge {
   display: flex;
   align-items: center;
@@ -1213,6 +1176,7 @@ onUnmounted(() => {
   }
 }
 
+/* Camera scan */
 .p2p-scan {
   padding: 20px;
   display: flex;
@@ -1241,7 +1205,6 @@ onUnmounted(() => {
 .p2p-canvas-hidden {
   display: none;
 }
-
 .p2p-scan-overlay {
   position: absolute;
   inset: 0;
@@ -1273,16 +1236,15 @@ onUnmounted(() => {
 }
 @keyframes scan {
   0% {
-    top: 0%;
+    top: 0;
   }
   50% {
     top: calc(100% - 2px);
   }
   100% {
-    top: 0%;
+    top: 0;
   }
 }
-
 .p2p-scan-corner {
   position: absolute;
   width: 18px;
@@ -1314,7 +1276,6 @@ onUnmounted(() => {
   border-width: 0 3px 3px 0;
   border-radius: 0 0 4px 0;
 }
-
 .p2p-cancel-scan {
   background: var(--p2p-surface2);
   border: 1px solid var(--p2p-border);
@@ -1329,6 +1290,7 @@ onUnmounted(() => {
   color: var(--p2p-text);
 }
 
+/* Debug */
 .p2p-debug {
   margin: 0;
   background: #0f172a;
@@ -1356,6 +1318,7 @@ onUnmounted(() => {
   color: #f87171;
 }
 
+/* Footer */
 .p2p-footer {
   padding: 14px 20px;
   border-top: 1px solid var(--p2p-border);
