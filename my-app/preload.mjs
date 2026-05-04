@@ -82,6 +82,8 @@ contextBridge.exposeInMainWorld("license", {
 
 contextBridge.exposeInMainWorld("electronAPI", {
   nativeFetch: (url) => ipcRenderer.invoke("native-fetch", url),
+  p2pStartServer: () => ipcRenderer.invoke("p2p:start-server"),
+  p2pStopServer: () => ipcRenderer.invoke("p2p:stop-server"),
 });
 
 contextBridge.exposeInMainWorld("__ELECTRON__", true);

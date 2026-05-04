@@ -166,11 +166,6 @@
                 </div>
 
                 <div class="p2p-video-wrap">
-                  <!--
-                    FIX (Bug 2): video element is the primary input for BarcodeDetector.
-                    We pass videoEl.value directly to detector.detect() — NOT the canvas.
-                    The canvas is only used as fallback for jsQR software decode.
-                  -->
                   <video
                     ref="videoEl"
                     id="p2p-qr-video"
@@ -182,17 +177,13 @@
                   <div class="p2p-scan-overlay">
                     <div class="p2p-scan-frame">
                       <div class="p2p-scan-line"></div>
-                      <!-- Corner accents -->
                       <div class="p2p-scan-corner p2p-scan-corner--tl"></div>
                       <div class="p2p-scan-corner p2p-scan-corner--tr"></div>
                       <div class="p2p-scan-corner p2p-scan-corner--bl"></div>
                       <div class="p2p-scan-corner p2p-scan-corner--br"></div>
                     </div>
                   </div>
-                  <!--
-                    Canvas is hidden — only used for jsQR pixel fallback.
-                    BarcodeDetector receives the video element directly.
-                  -->
+                  <!-- Canvas hidden — only used for jsQR/ZXing pixel fallback -->
                   <canvas ref="canvasEl" class="p2p-canvas-hidden"></canvas>
                 </div>
 
@@ -293,7 +284,10 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, nextTick, onMounted, onUnmounted } from "vue";
+// ── npm imports — no CDN, fully offline ───────────────────────────────────────
+import jsQR from "jsqr";
+import * as ZXing from "@zxing/library";
+import { ref, computed, watch, nextTick, onUnmounted } from "vue";
 import { useP2PSync } from "~/composables/useP2PSync";
 
 const props = defineProps({ modelValue: Boolean });
@@ -308,7 +302,7 @@ const {
   startHost,
   connectToHost,
   reset,
-  loadQrLib,
+  makeQrCode, // replaces loadQrLib — synchronous, no CDN
 } = useP2PSync();
 
 // ── UI state ──────────────────────────────────────────────────────────────────
@@ -318,7 +312,7 @@ const manualId = ref("");
 const scanLoading = ref(false);
 const scanError = ref("");
 
-// Active scan engine label for the status badge in the UI
+// Active scan engine label for the status badge
 const activeEngine = ref(""); // "BarcodeDetector" | "jsQR" | "ZXing" | ""
 
 const engineLabel = computed(() => {
@@ -342,6 +336,7 @@ const MAX_LOGS = 12;
 
 let _origLog = null,
   _origError = null;
+
 const hookConsole = () => {
   _origLog = console.log.bind(console);
   _origError = console.error.bind(console);
@@ -364,6 +359,7 @@ const hookConsole = () => {
     }
   };
 };
+
 const unhookConsole = () => {
   if (_origLog) {
     console.log = _origLog;
@@ -376,49 +372,21 @@ const unhookConsole = () => {
 };
 
 // ── Scan internals ────────────────────────────────────────────────────────────
-let _qrInstance = null;
 let _videoStream = null;
 let _scanRaf = null;
 let _scanActive = false;
 let _lastScanTime = 0;
 
-/*
- * FIX (Bug 1): _barcodeDetector is NOT initialized on onMounted.
- * It is created fresh each time startWebScan() is called, AFTER the stream
- * is live. This prevents Android WebView stale-detector issues.
- */
+// BarcodeDetector is created fresh per scan session (avoids Android WebView stale issues)
 let _barcodeDetector = null;
 
 const SCAN_INTERVAL_MS = 150;
-
-// CDNs
-const JSQR_CDN = "https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js";
-const ZXING_CDN = "https://unpkg.com/@zxing/library@0.20.0/umd/index.min.js";
 
 const progressPct = computed(() =>
   progress.value.total > 0
     ? Math.round((progress.value.current / progress.value.total) * 100)
     : 0,
 );
-
-// ── Script loader ─────────────────────────────────────────────────────────────
-const loadScript = (src) =>
-  new Promise((resolve, reject) => {
-    if (document.querySelector(`script[src="${src}"]`)) return resolve();
-    const s = document.createElement("script");
-    s.src = src;
-    s.onload = resolve;
-    s.onerror = () => reject(new Error(`Failed: ${src}`));
-    document.head.appendChild(s);
-  });
-
-/*
- * FIX (Bug 1 detail): onMounted only pre-loads jsQR script asset.
- * NO BarcodeDetector instantiation here — that happens fresh per scan session.
- */
-onMounted(() => {
-  loadScript(JSQR_CDN).catch(() => {});
-});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HOST — generate QR code
@@ -428,25 +396,21 @@ const chooseMode = async (m) => {
   if (m === "host") await startHost();
 };
 
+// Watch for status=ready then render QR using the bundled QRCode library
+let _qrInstance = null;
+
 watch([() => status.value, qrEl], async ([s, el]) => {
   if (s !== "ready" || !el) return;
   await nextTick();
   try {
-    await loadQrLib();
     if (_qrInstance) {
       _qrInstance.clear();
       _qrInstance = null;
     }
     await new Promise((r) => setTimeout(r, 100));
     if (!qrEl.value) return;
-    _qrInstance = new window.QRCode(qrEl.value, {
-      text: peerId.value,
-      width: 160,
-      height: 160,
-      colorDark: "#0f172a",
-      colorLight: "#f8fafc",
-      correctLevel: window.QRCode.CorrectLevel.M,
-    });
+    // makeQrCode is synchronous — QRCode is bundled via npm, no CDN await needed
+    _qrInstance = makeQrCode(qrEl.value, peerId.value);
   } catch (e) {
     console.warn("[P2P] QR generation failed:", e);
   }
@@ -477,7 +441,7 @@ const startScan = async () => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GUEST — startWebScan()
-// All 3 fixes are applied here + in scanFrame below.
+// jsQR and ZXing are imported at module level — always available, no loading.
 // ─────────────────────────────────────────────────────────────────────────────
 const startWebScan = async () => {
   try {
@@ -504,11 +468,9 @@ const startWebScan = async () => {
       await new Promise((r) => setTimeout(r, 1200));
     }
 
-    /*
-     * FIX (Bug 1): Create BarcodeDetector FRESH here, after stream is live.
-     * Also check getSupportedFormats() — some WebViews expose the class but
-     * don't actually support qr_code, causing silent failures.
-     */
+    // Create BarcodeDetector FRESH here, after stream is live.
+    // Check getSupportedFormats() — some WebViews expose the class but
+    // don't actually support qr_code, causing silent failures.
     _barcodeDetector = null;
     activeEngine.value = "";
     if ("BarcodeDetector" in window) {
@@ -528,22 +490,18 @@ const startWebScan = async () => {
             "[P2P] BarcodeDetector available but qr_code not in supported formats:",
             supported,
           );
+          activeEngine.value = "jsQR";
         }
       } catch (e) {
         console.log("[P2P] BarcodeDetector init failed:", e?.message);
         _barcodeDetector = null;
+        activeEngine.value = "jsQR";
       }
     } else {
-      console.log("[P2P] BarcodeDetector not available in this WebView");
+      console.log("[P2P] BarcodeDetector not available — using jsQR + ZXing");
+      // jsQR and ZXing are already imported — set label immediately, no async load
+      activeEngine.value = "jsQR";
     }
-
-    // Pre-load software decoders in parallel (non-blocking)
-    Promise.allSettled([loadScript(JSQR_CDN), loadScript(ZXING_CDN)]).then(
-      () => {
-        console.log("[P2P] Software decoders ready (jsQR + ZXing)");
-        if (!activeEngine.value) activeEngine.value = "jsQR";
-      },
-    );
 
     _scanActive = true;
     scheduleScan();
@@ -568,7 +526,7 @@ const stopWebScan = () => {
     _videoStream.getTracks().forEach((t) => t.stop());
     _videoStream = null;
   }
-  // FIX (Bug 1): destroy detector reference on stop so it is always fresh
+  // Destroy detector reference so it is always fresh on next scan session
   _barcodeDetector = null;
   activeEngine.value = "";
   if (guestStep.value === "scan") guestStep.value = "enter";
@@ -579,7 +537,10 @@ const scheduleScan = () => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// scanFrame — the core detection loop with all 3 bugs fixed
+// scanFrame — core detection loop
+// Strategy 1: BarcodeDetector on the VIDEO element directly (native, fastest)
+// Strategy 2: jsQR on raw canvas pixels (imported from npm)
+// Strategy 3: ZXing as last resort (imported from npm)
 // ─────────────────────────────────────────────────────────────────────────────
 const scanFrame = async (timestamp) => {
   if (!_scanActive) return;
@@ -605,12 +566,8 @@ const scanFrame = async (timestamp) => {
 
   try {
     // ── Strategy 1: BarcodeDetector on the VIDEO element directly ────────────
-    /*
-     * FIX (Bug 2): We pass `video` (HTMLVideoElement) — NOT the canvas.
-     * BarcodeDetector on Android WebView is optimized for video input.
-     * Passing a canvas (especially a cropped/resized one) causes silent
-     * failures because the WebView's ML pipeline expects a video frame handle.
-     */
+    // Pass `video` (HTMLVideoElement) — NOT the canvas.
+    // BarcodeDetector on Android WebView is optimized for video input.
     if (_barcodeDetector) {
       try {
         const codes = await _barcodeDetector.detect(video);
@@ -620,7 +577,6 @@ const scanFrame = async (timestamp) => {
           return;
         }
       } catch (e) {
-        // BarcodeDetector can throw on individual frames — not fatal
         if (
           !e.message?.includes("closed") &&
           !e.message?.includes("InvalidState")
@@ -643,61 +599,42 @@ const scanFrame = async (timestamp) => {
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     ctx.drawImage(video, sx, sy, size, size, 0, 0, size, size);
 
-    /*
-     * FIX (Bug 3): Read imageData ONCE from the canvas, pass it directly
-     * to jsQR. Previously the code was:
-     *   getImageData → modify pixels → putImageData → getImageData again
-     * That caused a double-read where jsQR was decoding the already-written
-     * contrast-boosted data (fine), but the contrast boost was also being
-     * applied to a fresh getImageData call (not fine — redundant processing
-     * and stale data). We now read once and pass raw directly.
-     * The contrast boost has been removed — jsQR with inversionAttempts
-     * handles dark-on-light and light-on-dark without pre-processing.
-     */
+    // Read imageData ONCE — pass raw to jsQR directly (no double-read).
     const imageData = ctx.getImageData(0, 0, size, size);
 
-    // ── Strategy 2: jsQR on raw pixels (single read, no pre-processing) ──────
-    if (window.jsQR) {
-      activeEngine.value = "jsQR";
-      const code = window.jsQR(imageData.data, size, size, {
-        inversionAttempts: "attemptBoth", // handles inverted QR codes
-      });
-      if (code?.data) {
-        console.log("[P2P] jsQR hit:", code.data);
-        handleScannedId(code.data);
-        return;
-      }
+    // ── Strategy 2: jsQR (npm import, always available) ───────────────────────
+    activeEngine.value = "jsQR";
+    const code = jsQR(imageData.data, size, size, {
+      inversionAttempts: "attemptBoth", // handles inverted QR codes
+    });
+    if (code?.data) {
+      console.log("[P2P] jsQR hit:", code.data);
+      handleScannedId(code.data);
+      return;
     }
 
     // ── Strategy 3: ZXing — most thorough, highest CPU, last resort ──────────
-    if (window.ZXing) {
-      try {
-        activeEngine.value = "ZXing";
-        const hints = new Map();
-        hints.set(window.ZXing.DecodeHintType.TRY_HARDER, true);
-        const reader = new window.ZXing.BrowserQRCodeReader(hints);
-        const lumSrc = new window.ZXing.HTMLCanvasElementLuminanceSource(
-          canvas,
-        );
-        const bitmap = new window.ZXing.BinaryBitmap(
-          new window.ZXing.HybridBinarizer(lumSrc),
-        );
-        const result = new window.ZXing.QRCodeReader().decode(bitmap);
-        if (result?.text) {
-          console.log("[P2P] ZXing hit:", result.text);
-          handleScannedId(result.text);
-          return;
-        }
-      } catch (e) {
-        // ZXing throws NotFoundException on every blank frame — completely normal
-        // Only log actual unexpected errors
-        if (
-          e?.name &&
-          !e.name.includes("NotFoundException") &&
-          !e.name.includes("Format")
-        ) {
-          console.warn("[P2P] ZXing frame error:", e?.name, e?.message);
-        }
+    try {
+      activeEngine.value = "ZXing";
+      const hints = new Map();
+      hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+      const lumSrc = new ZXing.HTMLCanvasElementLuminanceSource(canvas);
+      const bitmap = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lumSrc));
+      const result = new ZXing.QRCodeReader().decode(bitmap);
+      if (result?.text) {
+        console.log("[P2P] ZXing hit:", result.text);
+        handleScannedId(result.text);
+        return;
+      }
+    } catch (e) {
+      // ZXing throws NotFoundException on every blank frame — completely normal.
+      // Only log actual unexpected errors.
+      if (
+        e?.name &&
+        !e.name.includes("NotFoundException") &&
+        !e.name.includes("Format")
+      ) {
+        console.warn("[P2P] ZXing frame error:", e?.name, e?.message);
       }
     }
   } catch (e) {
@@ -1234,7 +1171,7 @@ onUnmounted(() => {
   border-radius: 8px;
 }
 
-/* Engine status badge (shows which decoder is active) */
+/* Engine status badge */
 .p2p-engine-badge {
   display: flex;
   align-items: center;
@@ -1346,7 +1283,6 @@ onUnmounted(() => {
   }
 }
 
-/* Corner accents on the scan frame */
 .p2p-scan-corner {
   position: absolute;
   width: 18px;
