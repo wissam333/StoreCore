@@ -35,7 +35,7 @@ module.exports = {
       config: {
         name: "storecore",
         setupExe: "StoreCore-Setup.exe",
-        setupIcon: path.join(__dirname, "../public/logo/logo.png"),
+        setupIcon: path.join(__dirname, "../public/logo/logo.ico"),
         noMsi: true,
       },
     },
