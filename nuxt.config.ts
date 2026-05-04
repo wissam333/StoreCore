@@ -10,6 +10,19 @@ export default defineNuxtConfig({
     "@nuxtjs/i18n",
     "@vee-validate/nuxt",
   ],
+
+  icon: {
+    fallbackToApi: false,
+    provider: "client",
+    clientBundle: {
+      scan: true,
+      includeCustomCollections: false,
+    },
+    serverBundle: {
+      collections: ["ph", "bi", "mdi"],
+    },
+  },
+
   nitro: {
     publicAssets: [
       {

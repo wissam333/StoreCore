@@ -13,7 +13,9 @@ import {
   getMachineId,
 } from "./license/licenseManager.js";
 import fs from "fs";
+import http from "http"; // ← NEW: needed to create our own HTTP server
 import { createRequire } from "module";
+import { networkInterfaces } from "os";
 const require = createRequire(import.meta.url);
 
 // ── File logger ───────────────────────────────────────────────────────────────
@@ -30,25 +32,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 if (require("electron-squirrel-startup")) app.quit();
-
-// run on startup
-// if (process.platform === "win32") {
-//   const command = process.argv[1];
-//   if (command === "--squirrel-install" || command === "--squirrel-updated") {
-//     app.setLoginItemSettings({
-//       openAtLogin: true,
-//       path: path.join(path.dirname(process.execPath), "..", "Update.exe"),
-//       args: [
-//         "--processStart",
-//         `"${path.basename(process.execPath)}"`,
-//         "--process-start-args",
-//         '"--autostart"',
-//       ],
-//     });
-//   } else if (command === "--squirrel-uninstall") {
-//     app.setLoginItemSettings({ openAtLogin: false });
-//   }
-// }
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -137,26 +120,118 @@ const db = getDb();
 initSchema(db);
 registerStoreHandlers(db, ipcMain);
 
-// ── License IPC ───────────────────────────────────────────────────────────────
+// ── P2P PeerJS Server (on-demand) ─────────────────────────────────────────────
+//
+// FIX: PeerServer() from the "peer" package returns an Express middleware,
+// NOT a real http.Server — so it has no .close() method. The correct approach
+// is to create our own http.Server and pass it to PeerServer via { server }.
+// We keep a reference to peerHttpServer so we can call .close() on it properly.
+//
+let peerHttpServer = null; // The real http.Server — this is what we .close()
+let peerServerApp = null; // The PeerServer instance (for logging/events only)
 
-// KEY FIX: activate handler now checks that the key was actually written to
-// disk before returning ok:true. If storage fails, we return ok:false with a
-// diagnostic error so the license page shows it — the user keeps the input
-// field and can try again. We never call onActivated() unless save confirmed.
+const getLocalIp = () => {
+  const nets = networkInterfaces();
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name]) {
+      if (net.family === "IPv4" && !net.internal) {
+        return net.address; // e.g. 192.168.1.5
+      }
+    }
+  }
+  return "127.0.0.1";
+};
+
+ipcMain.handle("p2p:start-server", () => {
+  return new Promise((resolve, reject) => {
+    // Already running — just return the current IP
+    if (peerHttpServer && peerHttpServer.listening) {
+      log("[PeerServer] Already running, IP:", getLocalIp());
+      resolve({ ok: true, ip: getLocalIp() });
+      return;
+    }
+
+    try {
+      const { PeerServer } = require("peer");
+
+      // Create our own http.Server FIRST so we control its lifecycle
+      peerHttpServer = http.createServer();
+
+      // Attach PeerServer to our http.Server via the `server` option.
+      // This is the only pattern where .close() works correctly.
+      peerServerApp = PeerServer({
+        server: peerHttpServer,
+        path: "/myapp",
+      });
+
+      peerServerApp.on("connection", (client) => {
+        log("[PeerServer] Client connected:", client.getId());
+      });
+
+      peerServerApp.on("disconnect", (client) => {
+        log("[PeerServer] Client disconnected:", client.getId());
+      });
+
+      // Handle errors on the HTTP server itself
+      peerHttpServer.on("error", (err) => {
+        log("[PeerServer] HTTP error:", err.message);
+        peerHttpServer = null;
+        peerServerApp = null;
+        reject({ ok: false, error: err.message });
+      });
+
+      // listen() callback fires only when the port is actually bound —
+      // no more setTimeout guesswork
+      peerHttpServer.listen(9000, () => {
+        const ip = getLocalIp();
+        log("[PeerServer] Started on port 9000, IP:", ip);
+        resolve({ ok: true, ip });
+      });
+    } catch (e) {
+      peerHttpServer = null;
+      peerServerApp = null;
+      log("[PeerServer] Failed to start:", e.message);
+      reject({ ok: false, error: e.message });
+    }
+  });
+});
+
+ipcMain.handle("p2p:stop-server", () => {
+  return new Promise((resolve) => {
+    // Nothing running — nothing to do
+    if (!peerHttpServer) {
+      log("[PeerServer] Stop called but server was not running");
+      resolve({ ok: true });
+      return;
+    }
+
+    // .close() on the real http.Server — this is what was missing before
+    peerHttpServer.close((err) => {
+      if (err) {
+        log("[PeerServer] Stop error:", err.message);
+      } else {
+        log("[PeerServer] Stopped cleanly");
+      }
+      peerHttpServer = null;
+      peerServerApp = null;
+      resolve({ ok: true });
+    });
+  });
+});
+
+// ── License IPC ───────────────────────────────────────────────────────────────
 ipcMain.handle("license:activate", async (_, key) => {
   log("[license:activate] key:", key?.slice(0, 8) + "...");
 
   const result = await activateLicense(key, db);
   log("[license:activate] server result:", JSON.stringify(result));
 
-  if (!result.ok) return result; // server rejected — pass error straight through
+  if (!result.ok) return result;
 
-  // Confirm the key landed on disk
   const saved = getSavedKey();
   log("[license:activate] getSavedKey after save:", saved ? "OK ✓" : "NULL ✗");
 
   if (!saved) {
-    // Run storage diagnostics so we can see the cause in app.log
     const userData = app.getPath("userData");
     const storePath = path.join(userData, "license.json");
     let diag = `userData=${userData}`;
@@ -171,15 +246,12 @@ ipcMain.handle("license:activate", async (_, key) => {
 
     return {
       ok: false,
-      // Tell the user what happened without a dead-end.
-      // The input field stays open so they can retry.
       error:
         "Your license was accepted by the server but could not be saved on this PC. " +
         `Check app.log at: ${getLogFile()}`,
     };
   }
 
-  // Key is on disk — safe to proceed
   return { ok: true };
 });
 
@@ -193,8 +265,6 @@ ipcMain.handle("license:getKey", () => {
 
 ipcMain.handle("license:getMachineId", () => getMachineId());
 
-// This is only sent after activate() confirmed ok:true AND key is on disk.
-// So we can open the main window unconditionally here.
 ipcMain.on("license:activated", async () => {
   log("[main] license:activated — opening main window");
   if (licenseWindow && !licenseWindow.isDestroyed()) {
