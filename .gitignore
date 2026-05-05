@@ -6,11 +6,11 @@
 .cache
 dist
 .history
-sync-backend
-
+dist
+public_nuxt
 # Node dependencies
 node_modules
-
+sync-backend
 # Logs
 logs
 *.log

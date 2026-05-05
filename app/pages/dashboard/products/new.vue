@@ -35,10 +35,10 @@
             :rows="3"
             class="mb-1"
           />
-          <SharedUiFormBaseInput
+          <SharedUiScannerBarcodeInput
             v-model="form.barcode"
-            :label="$t('barcode')"
-            icon-left="mdi:barcode"
+            :placeholder="$t('barcode')"
+            @scan="(code) => $toast.success(`Barcode: ${code}`)"
           />
         </div>
 

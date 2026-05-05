@@ -45,6 +45,142 @@
           />
         </div>
 
+        <!-- ── BARCODE SCANNER CARD ──────────────────────────────────────── -->
+        <div class="form-card scanner-card">
+          <div class="card-head">
+            <Icon name="mdi:barcode-scan" size="18" />
+            <h4>{{ $t("scanToAdd") || "Scan to Add Product" }}</h4>
+
+            <!-- Electron: always-on badge -->
+            <span v-if="isElectronEnv" class="hw-ready-badge">
+              <span class="hw-dot" />
+              {{ $t("scannerReady") || "Scanner Ready" }}
+            </span>
+          </div>
+
+          <!-- Scan feedback flash -->
+          <Transition name="scan-flash">
+            <div
+              v-if="scanFeedback"
+              class="scan-feedback"
+              :class="scanFeedback.type"
+            >
+              <Icon
+                :name="
+                  scanFeedback.type === 'success'
+                    ? 'mdi:check-circle'
+                    : 'mdi:alert-circle'
+                "
+                size="16"
+              />
+              {{ scanFeedback.msg }}
+            </div>
+          </Transition>
+
+          <!-- Manual barcode input + camera button (non-Electron) -->
+          <div class="scanner-row">
+            <div
+              class="barcode-field"
+              :class="{ 'barcode-field--scanning': webCameraOpen }"
+            >
+              <Icon name="mdi:barcode" size="17" class="barcode-field-icon" />
+              <input
+                ref="barcodeInputRef"
+                v-model="barcodeInput"
+                class="barcode-input"
+                :placeholder="
+                  $t('typeBarcodeOrScan') || 'Type barcode or scan…'
+                "
+                @keydown.enter.prevent="onManualBarcode"
+              />
+              <button
+                v-if="!isElectronEnv"
+                class="barcode-cam-btn"
+                :class="{ active: webCameraOpen }"
+                :disabled="scanLoading"
+                @click="toggleWebCamera"
+                :title="$t('openCamera') || 'Open Camera'"
+              >
+                <Icon
+                  :name="
+                    scanLoading
+                      ? 'mdi:loading'
+                      : webCameraOpen
+                      ? 'mdi:close'
+                      : 'mdi:camera'
+                  "
+                  size="18"
+                  :class="{ spin: scanLoading }"
+                />
+              </button>
+              <button
+                class="barcode-go-btn"
+                :disabled="!barcodeInput.trim()"
+                @click="onManualBarcode"
+              >
+                <Icon name="mdi:arrow-right" size="16" />
+              </button>
+            </div>
+          </div>
+
+          <!-- Web camera preview panel -->
+          <Transition name="camera-slide">
+            <div v-if="webCameraOpen" class="camera-panel">
+              <div class="camera-viewport">
+                <video
+                  ref="videoEl"
+                  class="camera-video"
+                  autoplay
+                  playsinline
+                  muted
+                />
+                <canvas ref="canvasEl" class="camera-canvas-hidden" />
+                <!-- Scan frame overlay -->
+                <div class="scan-overlay">
+                  <div class="scan-frame">
+                    <div class="scan-line" />
+                    <!-- Corner markers -->
+                    <span class="sf-corner sf-tl" />
+                    <span class="sf-corner sf-tr" />
+                    <span class="sf-corner sf-bl" />
+                    <span class="sf-corner sf-br" />
+                  </div>
+                </div>
+                <p class="camera-hint">
+                  {{
+                    $t("pointCameraAtBarcode") ||
+                    "Point camera at barcode or QR code"
+                  }}
+                </p>
+              </div>
+              <div v-if="cameraError" class="camera-error">
+                <Icon name="mdi:alert-circle-outline" size="14" />
+                {{ cameraError }}
+              </div>
+              <button class="camera-close-btn" @click="closeWebCamera">
+                <Icon name="mdi:close" size="15" />
+                {{ $t("cancel") }}
+              </button>
+            </div>
+          </Transition>
+
+          <!-- Hint text -->
+          <p class="scanner-hint">
+            <template v-if="isElectronEnv">
+              {{
+                $t("hwScannerHint") ||
+                "Hardware scanner is active — scan any barcode to instantly add it to the order."
+              }}
+            </template>
+            <template v-else>
+              {{
+                $t("mobileScannerHint") ||
+                "Type a barcode and press Enter, or tap the camera icon to scan."
+              }}
+            </template>
+          </p>
+        </div>
+
         <!-- Items — empty state -->
         <div v-if="!items.length" class="items-empty">
           <div class="empty-icon-wrap">
@@ -68,6 +204,7 @@
               v-for="(item, idx) in items"
               :key="item._key"
               class="item-card"
+              :class="{ 'item-card--fresh': item._fresh }"
             >
               <!-- Row 1: Product select + delete -->
               <div class="item-top">
@@ -118,6 +255,11 @@
                     >
                       <Icon name="mdi:alert" size="11" />
                       {{ $t("exceedsStock") }}
+                    </span>
+                    <!-- Scanned badge -->
+                    <span v-if="item._scanned" class="scanned-tag">
+                      <Icon name="mdi:barcode-scan" size="11" />
+                      {{ $t("scanned") || "Scanned" }}
                     </span>
                   </div>
                 </div>
@@ -282,6 +424,8 @@
 </template>
 
 <script setup>
+import { ref, computed, nextTick, onMounted, onUnmounted } from "vue";
+
 definePageMeta({
   searchMeta: {
     label: "New Order",
@@ -307,6 +451,9 @@ const { fmtSP, fmtTx, toSP, dollarRate, reportCurrency, loadSettings } =
 const isEdit = computed(
   () => !!route.params.id && route.path.includes("/edit"),
 );
+
+// ── Environment ───────────────────────────────────────────────────────────────
+const isElectronEnv = typeof window !== "undefined" && !!window.electronAPI;
 
 // ── Currency ──────────────────────────────────────────────────────────────────
 const currencyOpts = [
@@ -369,6 +516,8 @@ const addItem = () =>
     sell_price_at_sale: 0,
     currency_at_sale: "SP",
     _maxStock: null,
+    _scanned: false,
+    _fresh: false,
   });
 
 const removeItem = (idx) => items.value.splice(idx, 1);
@@ -381,11 +530,9 @@ const onProductSelect = (idx, productId) => {
   item.sell_price_at_sale = p.sell_price;
   item.currency_at_sale = p.currency;
   item._maxStock = p.stock;
-  // Reset qty to 1, but if out of stock set to 0 so validation catches it
   item.quantity = p.stock > 0 ? 1 : 0;
 };
 
-// Clamp qty on blur — can't exceed stock, can't be < 1
 const clampQty = (idx) => {
   const item = items.value[idx];
   const max = item._maxStock;
@@ -418,28 +565,21 @@ const totalQty = computed(() =>
 const validationErrors = computed(() => {
   const errs = [];
   if (!items.value.length) return errs;
-
-  const hasNoProduct = items.value.some((i) => !i.product_id);
-  if (hasNoProduct) errs.push($t("selectProductForAllItems"));
-
-  const hasZeroQty = items.value.some((i) => !i.quantity || i.quantity < 1);
-  if (hasZeroQty) errs.push($t("qtyMustBeAtLeastOne"));
-
-  const hasOutOfStock = items.value.some(
-    (i) => i._maxStock !== null && i._maxStock === 0,
-  );
-  if (hasOutOfStock) errs.push($t("removeOutOfStockItems"));
-
-  const hasExceedsStock = items.value.some(
-    (i) => i._maxStock !== null && i._maxStock > 0 && i.quantity > i._maxStock,
-  );
-  if (hasExceedsStock) errs.push($t("someItemsExceedStock"));
-
-  const hasZeroPrice = items.value.some(
-    (i) => i.product_id && i.sell_price_at_sale <= 0,
-  );
-  if (hasZeroPrice) errs.push($t("priceCannotBeZero"));
-
+  if (items.value.some((i) => !i.product_id))
+    errs.push($t("selectProductForAllItems"));
+  if (items.value.some((i) => !i.quantity || i.quantity < 1))
+    errs.push($t("qtyMustBeAtLeastOne"));
+  if (items.value.some((i) => i._maxStock !== null && i._maxStock === 0))
+    errs.push($t("removeOutOfStockItems"));
+  if (
+    items.value.some(
+      (i) =>
+        i._maxStock !== null && i._maxStock > 0 && i.quantity > i._maxStock,
+    )
+  )
+    errs.push($t("someItemsExceedStock"));
+  if (items.value.some((i) => i.product_id && i.sell_price_at_sale <= 0))
+    errs.push($t("priceCannotBeZero"));
   return errs;
 });
 
@@ -447,24 +587,319 @@ const canSave = computed(
   () => items.value.length > 0 && validationErrors.value.length === 0,
 );
 
+// ─────────────────────────────────────────────────────────────────────────────
+// BARCODE SCANNER LOGIC
+// ─────────────────────────────────────────────────────────────────────────────
+
+const barcodeInputRef = ref(null);
+const barcodeInput = ref("");
+const scanLoading = ref(false);
+// FIX: renamed from scanError to cameraError to avoid confusion with useScanner's scanError
+const cameraError = ref("");
+const webCameraOpen = ref(false);
+const videoEl = ref(null);
+const canvasEl = ref(null);
+const scanFeedback = ref(null); // { type: 'success'|'error', msg: string }
+
+let _feedbackTimer = null;
+
+const showFeedback = (type, msg) => {
+  scanFeedback.value = { type, msg };
+  clearTimeout(_feedbackTimer);
+  _feedbackTimer = setTimeout(() => {
+    scanFeedback.value = null;
+  }, 2500);
+};
+
+// ── Core: handle a resolved barcode string ────────────────────────────────────
+const handleBarcode = (code) => {
+  const barcode = (code ?? "").trim();
+  if (!barcode) return;
+
+  const product = allProducts.value.find(
+    (p) => p.barcode && p.barcode.trim() === barcode,
+  );
+
+  if (!product) {
+    showFeedback(
+      "error",
+      `${$t("barcodeNotFound") || "Product not found"}: ${barcode}`,
+    );
+    barcodeInput.value = barcode;
+    return;
+  }
+
+  if (product.stock === 0) {
+    showFeedback("error", `${product.name} — ${$t("outOfStock")}`);
+    return;
+  }
+
+  const existing = items.value.find((i) => i.product_id === product.id);
+  if (existing) {
+    const newQty = (existing.quantity || 1) + 1;
+    if (existing._maxStock !== null && newQty > existing._maxStock) {
+      showFeedback("error", `${product.name} — ${$t("exceedsStock")}`);
+      return;
+    }
+    existing.quantity = newQty;
+    showFeedback("success", `${product.name} ×${existing.quantity}`);
+  } else {
+    const newItem = {
+      _key: ++_keyCounter,
+      product_id: product.id,
+      product_name: product.name,
+      quantity: 1,
+      sell_price_at_sale: product.sell_price,
+      currency_at_sale: product.currency,
+      _maxStock: product.stock,
+      _scanned: true,
+      _fresh: true,
+    };
+    items.value.push(newItem);
+
+    setTimeout(() => {
+      const idx = items.value.findIndex((i) => i._key === newItem._key);
+      if (idx !== -1) items.value[idx]._fresh = false;
+    }, 1200);
+
+    showFeedback("success", `${product.name} added`);
+  }
+
+  barcodeInput.value = "";
+  nextTick(() => barcodeInputRef.value?.focus());
+};
+
+// ── Manual input (Enter key or Go button) ─────────────────────────────────────
+const onManualBarcode = () => {
+  const code = barcodeInput.value.trim();
+  if (!code) return;
+  handleBarcode(code);
+};
+
+// ── Hardware scanner (Electron) — keydown buffer ──────────────────────────────
+let _hwBuffer = "";
+let _hwTimer = null;
+const HW_TIMEOUT_MS = 80;
+
+const _onHwKey = (e) => {
+  const tag = document.activeElement?.tagName?.toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select") return;
+  if (["Shift", "Control", "Alt", "Meta", "Tab"].includes(e.key)) return;
+
+  if (e.key === "Enter") {
+    const code = _hwBuffer.trim();
+    _hwBuffer = "";
+    clearTimeout(_hwTimer);
+    if (code.length > 2) handleBarcode(code);
+    return;
+  }
+
+  _hwBuffer += e.key;
+  clearTimeout(_hwTimer);
+  _hwTimer = setTimeout(() => {
+    const code = _hwBuffer.trim();
+    _hwBuffer = "";
+    if (code.length > 2) handleBarcode(code);
+  }, HW_TIMEOUT_MS);
+};
+
+// ── Web camera — works on Electron WebView, Android WebView, desktop browsers ─
+const JSQR_CDN = "https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js";
+let _webStream = null;
+let _webRaf = null;
+let _webActive = false;
+let _barcodeDetector = null;
+let _lastFrameTime = 0;
+const FRAME_INTERVAL_MS = 200;
+
+const _loadJsQr = () =>
+  new Promise((resolve, reject) => {
+    if (window.jsQR) return resolve();
+    const existing = document.querySelector(`script[src="${JSQR_CDN}"]`);
+    if (existing) {
+      existing.addEventListener("load", resolve);
+      existing.addEventListener("error", reject);
+      return;
+    }
+    const s = document.createElement("script");
+    s.src = JSQR_CDN;
+    s.onload = resolve;
+    s.onerror = reject;
+    document.head.appendChild(s);
+  });
+
+const _webScanFrame = async (ts) => {
+  if (!_webActive) return;
+  if (ts - _lastFrameTime < FRAME_INTERVAL_MS) {
+    _webRaf = requestAnimationFrame(_webScanFrame);
+    return;
+  }
+  _lastFrameTime = ts;
+
+  const video = videoEl.value;
+  const canvas = canvasEl.value;
+  if (!video || !canvas || video.readyState < 4 || video.videoWidth === 0) {
+    _webRaf = requestAnimationFrame(_webScanFrame);
+    return;
+  }
+
+  const W = video.videoWidth;
+  const H = video.videoHeight;
+  const size = Math.min(W, H) * 0.75;
+  const sx = (W - size) / 2;
+  const sy = (H - size) / 2;
+
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+  try {
+    ctx.drawImage(video, sx, sy, size, size, 0, 0, size, size);
+
+    if (_barcodeDetector) {
+      const codes = await _barcodeDetector.detect(canvas);
+      if (codes.length > 0) {
+        closeWebCamera();
+        handleBarcode(codes[0].rawValue);
+        return;
+      }
+    }
+
+    if (window.jsQR) {
+      const imageData = ctx.getImageData(0, 0, size, size);
+      const d = imageData.data;
+      for (let i = 0; i < d.length; i += 4) {
+        let g = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+        g = g < 128 ? g * 0.7 : 128 + (g - 128) * 1.3;
+        g = Math.max(0, Math.min(255, g));
+        d[i] = d[i + 1] = d[i + 2] = g;
+      }
+      ctx.putImageData(imageData, 0, 0);
+      const result = window.jsQR(
+        ctx.getImageData(0, 0, size, size).data,
+        size,
+        size,
+        { inversionAttempts: "attemptBoth" },
+      );
+      if (result?.data) {
+        closeWebCamera();
+        handleBarcode(result.data);
+        return;
+      }
+    }
+  } catch {
+    /* ignore per-frame errors */
+  }
+
+  if (_webActive) _webRaf = requestAnimationFrame(_webScanFrame);
+};
+
+const openWebCamera = async () => {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    cameraError.value = $t("cameraNotAvailable") || "Camera not available.";
+    return;
+  }
+  try {
+    cameraError.value = "";
+    scanLoading.value = true;
+
+    // FIX: acquire stream BEFORE setting webCameraOpen so we don't show
+    // an empty panel if getUserMedia fails or is slow.
+    _webStream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+      },
+    });
+
+    // Now open the panel and wait for <video> to mount
+    webCameraOpen.value = true;
+    await nextTick();
+
+    if (videoEl.value) {
+      videoEl.value.srcObject = _webStream;
+      await videoEl.value.play().catch(() => {});
+      // 1500ms stabilisation — proven reliable on Android WebView
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+
+    await _loadJsQr().catch(() => {});
+
+    if ("BarcodeDetector" in window) {
+      try {
+        _barcodeDetector = new window.BarcodeDetector({
+          formats: [
+            "qr_code",
+            "ean_13",
+            "ean_8",
+            "code_128",
+            "code_39",
+            "upc_a",
+            "upc_e",
+          ],
+        });
+      } catch {
+        _barcodeDetector = null;
+      }
+    }
+
+    _webActive = true;
+    _lastFrameTime = 0;
+    _webRaf = requestAnimationFrame(_webScanFrame);
+  } catch (e) {
+    cameraError.value =
+      e.name === "NotAllowedError"
+        ? $t("cameraPermissionDenied") || "Camera permission denied."
+        : $t("cameraOpenFailed") || "Could not open camera.";
+    // Clean up stream if it was partially opened
+    _webStream?.getTracks().forEach((t) => t.stop());
+    _webStream = null;
+    webCameraOpen.value = false;
+  } finally {
+    scanLoading.value = false;
+  }
+};
+
+const closeWebCamera = () => {
+  _webActive = false;
+  // FIX: null out _webRaf after cancelling so stale frame callbacks don't fire
+  if (_webRaf) {
+    cancelAnimationFrame(_webRaf);
+    _webRaf = null;
+  }
+  if (_webStream) {
+    _webStream.getTracks().forEach((t) => t.stop());
+    _webStream = null;
+  }
+  _barcodeDetector = null;
+  webCameraOpen.value = false;
+  cameraError.value = "";
+};
+
+const toggleWebCamera = async () => {
+  if (webCameraOpen.value) {
+    closeWebCamera();
+    return;
+  }
+  await openWebCamera();
+};
+
 // ── Save ──────────────────────────────────────────────────────────────────────
 const saving = ref(false);
 const orderNotes = ref("");
 
 const save = async () => {
   if (!canSave.value) return;
-
   if (!selectedCustomer.value && customerSearch.value.trim()) {
     await onCreateCustomer(customerSearch.value.trim());
   }
-
   saving.value = true;
   const r = await saveOrder({
     order: {
       id: isEdit.value ? route.params.id : undefined,
       customer_id: selectedCustomer.value?.id ?? null,
       order_date: new Date().toISOString(),
-      // No paid_amount on create — payment is added after via the detail page
       paid_amount: 0,
       display_currency: items.value.every((i) => i.currency_at_sale === "USD")
         ? "USD"
@@ -483,7 +918,6 @@ const save = async () => {
     })),
   });
   saving.value = false;
-
   if (r.ok) {
     $toast.success($t(isEdit.value ? "orderUpdated" : "orderCreated"));
     navigateTo("/dashboard/orders/" + r.id);
@@ -511,14 +945,35 @@ const loadEdit = async () => {
     sell_price_at_sale: i.sell_price_at_sale,
     currency_at_sale: i.currency_at_sale,
     _maxStock: i.current_stock ?? null,
+    _scanned: false,
+    _fresh: false,
   }));
 };
 
+// ── Lifecycle ─────────────────────────────────────────────────────────────────
 onMounted(async () => {
   await loadSettings();
   const r = await getProducts({ limit: 500, activeOnly: true });
   if (r.ok) allProducts.value = r.data;
   await loadEdit();
+
+  if (isElectronEnv) {
+    window.addEventListener("keydown", _onHwKey);
+  }
+
+  // Pre-load jsQR in the background for faster first camera scan
+  if (!isElectronEnv) {
+    _loadJsQr().catch(() => {});
+  }
+});
+
+onUnmounted(() => {
+  if (isElectronEnv) {
+    window.removeEventListener("keydown", _onHwKey);
+    clearTimeout(_hwTimer);
+  }
+  closeWebCamera();
+  clearTimeout(_feedbackTimer);
 });
 </script>
 
@@ -590,6 +1045,368 @@ onMounted(async () => {
   border-radius: 20px;
 }
 
+// ── Scanner card ──────────────────────────────────────────────────────────────
+.scanner-card {
+  border-color: var(--primary);
+  background: linear-gradient(
+    135deg,
+    var(--bg-surface) 0%,
+    color-mix(in srgb, var(--primary) 4%, var(--bg-surface)) 100%
+  );
+}
+
+.hw-ready-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 3px 10px;
+  background: rgba(16, 185, 129, 0.1);
+  color: #10b981;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+
+.hw-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #10b981;
+  animation: pulse-dot 1.8s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(0.7);
+  }
+}
+
+// Scan feedback flash
+.scan-feedback {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  margin-bottom: 12px;
+
+  &.success {
+    background: rgba(16, 185, 129, 0.1);
+    color: #10b981;
+    border: 1px solid rgba(16, 185, 129, 0.25);
+  }
+
+  &.error {
+    background: rgba(239, 68, 68, 0.08);
+    color: #ef4444;
+    border: 1px solid rgba(239, 68, 68, 0.2);
+  }
+}
+
+.scan-flash-enter-active {
+  transition: all 0.2s ease;
+}
+.scan-flash-leave-active {
+  transition: all 0.3s ease;
+}
+.scan-flash-enter-from {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+.scan-flash-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+// Scanner row
+.scanner-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.barcode-field {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  background: var(--bg-elevated);
+  border: 1.5px solid var(--border-color);
+  border-radius: 10px;
+  overflow: hidden;
+  transition: border-color 0.15s, box-shadow 0.15s;
+
+  &:focus-within {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(var(--primary-rgb, 211, 47, 47), 0.08);
+  }
+
+  &--scanning {
+    border-color: var(--primary);
+  }
+}
+
+.barcode-field-icon {
+  padding: 0 10px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.barcode-input {
+  flex: 1;
+  background: none;
+  border: none;
+  outline: none;
+  padding: 10px 4px;
+  font-size: 0.88rem;
+  color: var(--text-primary);
+  font-family: monospace;
+  letter-spacing: 0.04em;
+  min-width: 0;
+
+  &::placeholder {
+    color: var(--text-muted);
+    font-family: "Tajawal", sans-serif;
+    letter-spacing: 0;
+    font-size: 0.82rem;
+  }
+}
+
+// FIX: use border-inline-start instead of border-left for RTL support
+.barcode-cam-btn {
+  background: none;
+  border: none;
+  border-inline-start: 1px solid var(--border-color);
+  width: 42px;
+  height: 40px;
+  cursor: pointer;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: color 0.15s, background 0.15s;
+
+  &:hover,
+  &.active {
+    background: var(--primary-soft);
+    color: var(--primary);
+  }
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .spin {
+    animation: spin 0.8s linear infinite;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.barcode-go-btn {
+  background: var(--primary);
+  border: none;
+  // FIX: logical border-radius so corners flip correctly in RTL
+  border-start-end-radius: 8px;
+  border-end-end-radius: 8px;
+  border-start-start-radius: 0;
+  border-end-start-radius: 0;
+  width: 38px;
+  height: 40px;
+  cursor: pointer;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: opacity 0.15s;
+
+  &:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+
+  &:not(:disabled):hover {
+    opacity: 0.85;
+  }
+}
+
+.scanner-hint {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin: 10px 0 0;
+  line-height: 1.5;
+}
+
+// Camera panel
+.camera-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.camera-viewport {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #000;
+  aspect-ratio: 4 / 3;
+  max-height: 300px;
+}
+
+.camera-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.camera-canvas-hidden {
+  display: none;
+}
+
+.scan-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.scan-frame {
+  position: relative;
+  width: 60%;
+  aspect-ratio: 1;
+
+  &::before {
+    content: "";
+    position: absolute;
+    inset: -9999px;
+    box-shadow: inset 0 0 0 9999px rgba(0, 0, 0, 0.45);
+    border-radius: 10px;
+    pointer-events: none;
+  }
+}
+
+.scan-line {
+  position: absolute;
+  inset-inline: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--primary), transparent);
+  animation: scanline 2s ease-in-out infinite;
+}
+
+@keyframes scanline {
+  0%,
+  100% {
+    top: 5%;
+  }
+  50% {
+    top: 93%;
+  }
+}
+
+// FIX: corner markers use logical inset-inline/inset-block properties for RTL
+.sf-corner {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border-color: var(--primary);
+  border-style: solid;
+}
+
+.sf-tl {
+  inset-block-start: 0;
+  inset-inline-start: 0;
+  border-width: 3px 0 0 3px;
+  border-start-start-radius: 3px;
+}
+.sf-tr {
+  inset-block-start: 0;
+  inset-inline-end: 0;
+  border-width: 3px 3px 0 0;
+  border-start-end-radius: 3px;
+}
+.sf-bl {
+  inset-block-end: 0;
+  inset-inline-start: 0;
+  border-width: 0 0 3px 3px;
+  border-end-start-radius: 3px;
+}
+.sf-br {
+  inset-block-end: 0;
+  inset-inline-end: 0;
+  border-width: 0 3px 3px 0;
+  border-end-end-radius: 3px;
+}
+
+.camera-hint {
+  position: absolute;
+  inset-block-end: 8px;
+  inset-inline: 0;
+  text-align: center;
+  font-size: 0.7rem;
+  color: rgba(255, 255, 255, 0.75);
+  margin: 0;
+  padding: 0 12px;
+}
+
+.camera-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.07);
+  border-radius: 8px;
+  padding: 8px 12px;
+  border: 1px solid rgba(239, 68, 68, 0.15);
+}
+
+.camera-close-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 8px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.15s;
+
+  &:hover {
+    color: var(--text-primary);
+  }
+}
+
+.camera-slide-enter-active,
+.camera-slide-leave-active {
+  transition: all 0.25s ease;
+}
+.camera-slide-enter-from,
+.camera-slide-leave-to {
+  opacity: 0;
+  transform: translateY(-10px);
+}
+
 // ── Empty state ───────────────────────────────────────────────────────────────
 .items-empty {
   background: var(--bg-surface);
@@ -640,15 +1457,20 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  transition: border-color 0.15s, box-shadow 0.15s;
+  transition: border-color 0.15s, box-shadow 0.15s, background 0.4s;
 
   &:hover {
     border-color: var(--primary);
     box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
   }
+
+  &--fresh {
+    border-color: #10b981 !important;
+    background: rgba(16, 185, 129, 0.04);
+    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.12);
+  }
 }
 
-// Top row
 .item-top {
   display: flex;
   align-items: flex-start;
@@ -713,7 +1535,18 @@ onMounted(async () => {
   color: #f59e0b;
 }
 
-// Bottom row
+.scanned-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 20px;
+  background: rgba(99, 102, 241, 0.1);
+  color: #6366f1;
+}
+
 .item-bottom {
   display: flex;
   align-items: flex-end;
@@ -745,11 +1578,9 @@ onMounted(async () => {
   margin: 0;
 }
 
-// Qty stepper
 .qty-control {
   display: flex;
   align-items: center;
-  gap: 0;
   border: 1px solid var(--border-color);
   border-radius: 8px;
   overflow: hidden;
@@ -809,7 +1640,6 @@ onMounted(async () => {
   border-color: #ef4444 !important;
 }
 
-// Add more button
 .add-item-btn {
   display: flex;
   align-items: center;
@@ -833,7 +1663,6 @@ onMounted(async () => {
   }
 }
 
-// Delete button
 .del-btn {
   flex-shrink: 0;
   width: 34px;
@@ -928,7 +1757,6 @@ onMounted(async () => {
   font-weight: 800;
 }
 
-// ── Payment info box ──────────────────────────────────────────────────────────
 .payment-info-box {
   display: flex;
   gap: 10px;
@@ -959,7 +1787,6 @@ onMounted(async () => {
   }
 }
 
-// ── Validation errors ─────────────────────────────────────────────────────────
 .validation-errors {
   display: flex;
   flex-direction: column;
@@ -979,7 +1806,6 @@ onMounted(async () => {
   font-weight: 500;
 }
 
-// ── Save ──────────────────────────────────────────────────────────────────────
 .save-btn {
   width: 100%;
 }
@@ -991,7 +1817,7 @@ onMounted(async () => {
   margin-top: -4px;
 }
 
-// ── Transition ────────────────────────────────────────────────────────────────
+// ── Transitions ───────────────────────────────────────────────────────────────
 .item-anim-enter-active {
   transition: all 0.25s ease;
 }
