@@ -160,11 +160,21 @@ const toggleCamera = async () => {
 
 const openCamera = async () => {
   scanLoading.value = true;
-  cameraOpen.value = true; // show panel immediately so the <video> mounts
+  cameraOpen.value = true; // show panel so <video> mounts
   cameraWarmup.value = true;
 
-  // Wait for the DOM to paint the video element before handing refs to useScanner
   await nextTick();
+
+  // Hide warmup overlay as soon as the video element has actual frames —
+  // this is the real signal the camera is ready, not a blind timeout.
+  if (videoEl.value) {
+    const onCanPlay = () => {
+      cameraWarmup.value = false;
+      scanLoading.value = false;
+      videoEl.value?.removeEventListener("canplay", onCanPlay);
+    };
+    videoEl.value.addEventListener("canplay", onCanPlay);
+  }
 
   await startScan({
     onScan: emitScan,
@@ -172,16 +182,17 @@ const openCamera = async () => {
     canvasEl: canvasEl.value,
   });
 
+  // startScan resolves after stream is attached and 1500ms delay is done.
+  // If canplay already fired during that time, these are no-ops.
+  cameraWarmup.value = false;
   scanLoading.value = false;
-
-  // Hide warmup overlay after the 1500ms stabilisation inside useScanner
-  // We add a small extra buffer so the transition feels smooth
-  setTimeout(() => {
-    cameraWarmup.value = false;
-  }, 1600);
 };
 
 const closeCamera = async () => {
+  // Remove any pending canplay listener before tearing down
+  if (videoEl.value) {
+    videoEl.value.oncanplay = null;
+  }
   cameraOpen.value = false;
   cameraWarmup.value = false;
   scanLoading.value = false;
