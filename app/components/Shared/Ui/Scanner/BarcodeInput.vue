@@ -5,7 +5,7 @@
     <!-- Input row -->
     <div
       class="barcode-field"
-      :class="{ scanning: isScanning && isElectronEnv }"
+      :class="{ scanning: isHwScanning && isElectronEnv }"
     >
       <div class="barcode-icon">
         <Icon name="mdi:barcode-scan" size="18" />
@@ -20,7 +20,7 @@
         @input="emit('update:modelValue', localValue)"
       />
 
-      <!-- Camera scan button: shown on web + Capacitor mobile, hidden on Electron -->
+      <!-- Camera scan button: shown on web + mobile, hidden on Electron -->
       <button
         v-if="!isElectronEnv"
         class="barcode-scan-btn"
@@ -49,7 +49,7 @@
       </span>
     </div>
 
-    <!-- Camera preview panel (web + Capacitor, both use getUserMedia) -->
+    <!-- Camera preview panel (web + mobile — both use getUserMedia) -->
     <Transition name="camera-slide">
       <div v-if="cameraOpen" class="camera-panel">
         <div class="camera-viewport">
@@ -90,8 +90,7 @@
 </template>
 
 <script setup>
-import { ref, watch, onUnmounted, nextTick } from "vue";
-import { useScanner } from "~/composables/useScanner";
+import { ref, watch, onMounted, onUnmounted, nextTick } from "vue";
 
 const props = defineProps({
   modelValue: { type: String, default: "" },
@@ -106,16 +105,18 @@ const props = defineProps({
 
 const emit = defineEmits(["update:modelValue", "scan"]);
 
-const { startScan, stopScan, scanError, isScanning } = useScanner();
-
-// Environment flags — resolved once on mount, not reactive
+// ── Environment ───────────────────────────────────────────────────────────────
 const isElectronEnv = typeof window !== "undefined" && !!window.electronAPI;
 
 // ── Local state ───────────────────────────────────────────────────────────────
 const localValue = ref(props.modelValue);
 const cameraOpen = ref(false);
-const cameraWarmup = ref(false); // shows "starting camera…" overlay
+const cameraWarmup = ref(false);
 const scanLoading = ref(false);
+const scanError = ref("");
+const isHwScanning = ref(false);
+
+// ── Template refs ─────────────────────────────────────────────────────────────
 const inputRef = ref(null);
 const videoEl = ref(null);
 const canvasEl = ref(null);
@@ -140,68 +141,299 @@ const emitScan = (code) => {
   closeCamera();
 };
 
-// ── Electron / HW scanner ─────────────────────────────────────────────────────
-// On Electron the HW scanner is always-on: we start listening immediately
-// and keep it alive for the lifetime of this component instance.
-if (isElectronEnv) {
-  startScan({ onScan: emitScan });
-  onUnmounted(() => stopScan());
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// CAMERA SCANNER — ported directly from the working P2P scanner pattern
+//
+// 3 root causes fixed vs old BarcodeInput:
+//
+//   FIX 1 — Stream acquired BEFORE cameraOpen = true
+//            Old code set cameraOpen first → <video> mounted → but videoEl.value
+//            was still null when passed to useScanner → stream never attached.
+//
+//   FIX 2 — 1500ms stabilisation after video.play()
+//            Android WebView reports videoWidth = 0 for ~1s after play().
+//            Without this wait the frame loop reads blank frames forever.
+//
+//   FIX 3 — Center-square crop + contrast boost before jsQR
+//            jsQR on a full 1280×720 frame is slow and misses codes in corners.
+//            Cropping 70% center square + grayscale contrast matches what P2P does.
+// ─────────────────────────────────────────────────────────────────────────────
 
-// ── Camera (web browser + Capacitor WebView) ──────────────────────────────────
-// Both environments use getUserMedia — no Capacitor plugin needed.
+const JSQR_CDN = "https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js";
+const SCAN_INTERVAL_MS = 200;
+
+let _stream = null;
+let _raf = null;
+let _active = false;
+let _lastFrameTime = 0;
+let _barcodeDetector = null;
+
+const _loadJsQr = () =>
+  new Promise((resolve, reject) => {
+    if (window.jsQR) return resolve();
+    const existing = document.querySelector(`script[src="${JSQR_CDN}"]`);
+    if (existing) {
+      existing.addEventListener("load", resolve);
+      existing.addEventListener("error", reject);
+      return;
+    }
+    const s = document.createElement("script");
+    s.src = JSQR_CDN;
+    s.onload = resolve;
+    s.onerror = reject;
+    document.head.appendChild(s);
+  });
+
+// ── Frame loop — identical logic to P2P's scanFrame ──────────────────────────
+const _scanFrame = async (timestamp) => {
+  if (!_active) return;
+
+  if (timestamp - _lastFrameTime < SCAN_INTERVAL_MS) {
+    _raf = requestAnimationFrame(_scanFrame);
+    return;
+  }
+  _lastFrameTime = timestamp;
+
+  const video = videoEl.value;
+  const canvas = canvasEl.value;
+
+  if (
+    !video ||
+    !canvas ||
+    !_stream ||
+    video.readyState < 4 ||
+    video.videoWidth === 0
+  ) {
+    _raf = requestAnimationFrame(_scanFrame);
+    return;
+  }
+
+  const W = video.videoWidth;
+  const H = video.videoHeight;
+
+  // FIX 3a — crop center 70% square (where the frame overlay sits)
+  const size = Math.min(W, H) * 0.7;
+  const sx = (W - size) / 2;
+  const sy = (H - size) / 2;
+
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+  try {
+    ctx.drawImage(video, sx, sy, size, size, 0, 0, size, size);
+
+    // Try native BarcodeDetector first (fastest, handles barcodes natively)
+    if (_barcodeDetector) {
+      const codes = await _barcodeDetector.detect(canvas);
+      if (codes.length > 0) {
+        emitScan(codes[0].rawValue);
+        return;
+      }
+    }
+
+    // jsQR fallback — FIX 3b: contrast boost before decode
+    if (window.jsQR) {
+      const imageData = ctx.getImageData(0, 0, size, size);
+      const d = imageData.data;
+      for (let i = 0; i < d.length; i += 4) {
+        let g = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+        g = g < 128 ? g * 0.7 : 128 + (g - 128) * 1.3;
+        g = Math.max(0, Math.min(255, g));
+        d[i] = d[i + 1] = d[i + 2] = g;
+      }
+      ctx.putImageData(imageData, 0, 0);
+
+      const code = window.jsQR(
+        ctx.getImageData(0, 0, size, size).data,
+        size,
+        size,
+        { inversionAttempts: "attemptBoth" },
+      );
+      if (code?.data) {
+        emitScan(code.data);
+        return;
+      }
+    }
+  } catch {
+    /* ignore per-frame errors — keep looping */
+  }
+
+  if (_active) _raf = requestAnimationFrame(_scanFrame);
+};
+
+// ── Open camera ───────────────────────────────────────────────────────────────
+const openCamera = async () => {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    scanError.value =
+      $t("cameraNotAvailable") ||
+      "Camera not available. Please type the code manually.";
+    return;
+  }
+
+  try {
+    scanError.value = "";
+    scanLoading.value = true;
+
+    // FIX 1 — acquire stream BEFORE showing panel so <video> ref is valid
+    _stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+      },
+    });
+
+    cameraOpen.value = true;
+    cameraWarmup.value = true;
+    await nextTick(); // wait for <video> to mount
+
+    if (videoEl.value) {
+      videoEl.value.srcObject = _stream;
+      await videoEl.value.play().catch(() => {});
+
+      // FIX 2 — 1500ms stabilisation (proven on Android WebView, same as P2P)
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+
+    await _loadJsQr().catch(() => {});
+
+    // Re-init BarcodeDetector if not already done
+    if ("BarcodeDetector" in window && !_barcodeDetector) {
+      try {
+        _barcodeDetector = new window.BarcodeDetector({
+          formats: [
+            "qr_code",
+            "ean_13",
+            "ean_8",
+            "code_128",
+            "code_39",
+            "upc_a",
+            "upc_e",
+          ],
+        });
+      } catch {
+        _barcodeDetector = null;
+      }
+    }
+
+    cameraWarmup.value = false;
+    scanLoading.value = false;
+
+    _active = true;
+    _lastFrameTime = 0;
+    _raf = requestAnimationFrame(_scanFrame);
+  } catch (e) {
+    // Clean up any partial stream
+    _stream?.getTracks().forEach((t) => t.stop());
+    _stream = null;
+    cameraOpen.value = false;
+    cameraWarmup.value = false;
+    scanLoading.value = false;
+
+    if (e.name === "NotAllowedError") {
+      scanError.value =
+        $t("cameraPermissionDenied") ||
+        "Camera permission denied. Please allow camera access and try again.";
+    } else {
+      scanError.value =
+        $t("cameraOpenFailed") ||
+        "Could not open camera. Please type the code manually.";
+    }
+  }
+};
+
+// ── Close / stop camera ───────────────────────────────────────────────────────
+const closeCamera = () => {
+  _active = false;
+  if (_raf) {
+    cancelAnimationFrame(_raf);
+    _raf = null;
+  }
+  if (_stream) {
+    _stream.getTracks().forEach((t) => t.stop());
+    _stream = null;
+  }
+  cameraOpen.value = false;
+  cameraWarmup.value = false;
+  scanLoading.value = false;
+};
+
 const toggleCamera = async () => {
   if (cameraOpen.value) {
-    await closeCamera();
+    closeCamera();
     return;
   }
   await openCamera();
 };
 
-const openCamera = async () => {
-  scanLoading.value = true;
-  cameraOpen.value = true; // show panel so <video> mounts
-  cameraWarmup.value = true;
+// ─────────────────────────────────────────────────────────────────────────────
+// ELECTRON — Hardware barcode gun (USB HID / serial)
+// Rapid keydown bursts → buffer → emitScan on Enter or 80ms silence
+// ─────────────────────────────────────────────────────────────────────────────
+let _hwBuffer = "";
+let _hwTimer = null;
+const HW_TIMEOUT_MS = 80;
 
-  await nextTick();
+const _onHwKey = (e) => {
+  const tag = document.activeElement?.tagName?.toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select") return;
+  if (["Shift", "Control", "Alt", "Meta", "Tab"].includes(e.key)) return;
 
-  // Hide warmup overlay as soon as the video element has actual frames —
-  // this is the real signal the camera is ready, not a blind timeout.
-  if (videoEl.value) {
-    const onCanPlay = () => {
-      cameraWarmup.value = false;
-      scanLoading.value = false;
-      videoEl.value?.removeEventListener("canplay", onCanPlay);
-    };
-    videoEl.value.addEventListener("canplay", onCanPlay);
+  if (e.key === "Enter") {
+    const code = _hwBuffer.trim();
+    _hwBuffer = "";
+    clearTimeout(_hwTimer);
+    if (code.length > 2) emitScan(code);
+    return;
   }
 
-  await startScan({
-    onScan: emitScan,
-    videoEl: videoEl.value,
-    canvasEl: canvasEl.value,
-  });
-
-  // startScan resolves after stream is attached and 1500ms delay is done.
-  // If canplay already fired during that time, these are no-ops.
-  cameraWarmup.value = false;
-  scanLoading.value = false;
+  _hwBuffer += e.key;
+  clearTimeout(_hwTimer);
+  _hwTimer = setTimeout(() => {
+    const code = _hwBuffer.trim();
+    _hwBuffer = "";
+    if (code.length > 2) emitScan(code);
+  }, HW_TIMEOUT_MS);
 };
 
-const closeCamera = async () => {
-  // Remove any pending canplay listener before tearing down
-  if (videoEl.value) {
-    videoEl.value.oncanplay = null;
+// ── Lifecycle ─────────────────────────────────────────────────────────────────
+onMounted(() => {
+  // Pre-load jsQR silently — first camera open will be instant
+  _loadJsQr().catch(() => {});
+
+  // Init BarcodeDetector eagerly if available
+  if ("BarcodeDetector" in window) {
+    try {
+      _barcodeDetector = new window.BarcodeDetector({
+        formats: [
+          "qr_code",
+          "ean_13",
+          "ean_8",
+          "code_128",
+          "code_39",
+          "upc_a",
+          "upc_e",
+        ],
+      });
+    } catch {
+      _barcodeDetector = null;
+    }
   }
-  cameraOpen.value = false;
-  cameraWarmup.value = false;
-  scanLoading.value = false;
-  await stopScan();
-};
 
-// Ensure camera is released if the component is torn down while open
+  if (isElectronEnv) {
+    isHwScanning.value = true;
+    window.addEventListener("keydown", _onHwKey);
+  }
+});
+
 onUnmounted(() => {
-  if (!isElectronEnv) stopScan();
+  closeCamera();
+  if (isElectronEnv) {
+    window.removeEventListener("keydown", _onHwKey);
+    clearTimeout(_hwTimer);
+    isHwScanning.value = false;
+  }
 });
 </script>
 
@@ -221,17 +453,16 @@ onUnmounted(() => {
   border-radius: 10px;
   overflow: hidden;
   transition: border-color 0.15s, box-shadow 0.15s;
+}
 
-  &:focus-within {
-    border-color: var(--primary);
-    box-shadow: 0 0 0 3px var(--primary-soft);
-  }
+.barcode-field:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
 
-  /* Pulse border while HW scanner is active on Electron */
-  &.scanning {
-    border-color: #10b981;
-    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.12);
-  }
+.barcode-field.scanning {
+  border-color: #10b981;
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.12);
 }
 
 .barcode-icon {
@@ -252,16 +483,16 @@ onUnmounted(() => {
   color: var(--text-primary);
   font-family: monospace;
   letter-spacing: 0.05em;
+}
 
-  &::placeholder {
-    color: var(--text-muted);
-    font-family: "Tajawal", sans-serif;
-    letter-spacing: 0;
-  }
+.barcode-input::placeholder {
+  color: var(--text-muted);
+  font-family: "Tajawal", sans-serif;
+  letter-spacing: 0;
+}
 
-  &:disabled {
-    opacity: 0.5;
-  }
+.barcode-input:disabled {
+  opacity: 0.5;
 }
 
 .barcode-scan-btn {
@@ -276,17 +507,17 @@ onUnmounted(() => {
   align-items: center;
   transition: color 0.15s, background 0.15s;
   flex-shrink: 0;
+}
 
-  &:hover,
-  &.active {
-    background: var(--primary-soft);
-    color: var(--primary);
-  }
+.barcode-scan-btn:hover,
+.barcode-scan-btn.active {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
 
-  &:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
+.barcode-scan-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .spin {
@@ -340,23 +571,22 @@ onUnmounted(() => {
   display: none;
 }
 
-/* Animated scan frame */
 .scan-frame {
   position: absolute;
   inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
+}
 
-  &::before {
-    content: "";
-    position: absolute;
-    width: 60%;
-    aspect-ratio: 1;
-    border: 2px solid var(--primary);
-    border-radius: 10px;
-    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.45);
-  }
+.scan-frame::before {
+  content: "";
+  position: absolute;
+  width: 60%;
+  aspect-ratio: 1;
+  border: 2px solid var(--primary);
+  border-radius: 10px;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.45);
 }
 
 .scan-line {
@@ -377,7 +607,6 @@ onUnmounted(() => {
   }
 }
 
-/* Warmup overlay */
 .camera-warmup {
   position: absolute;
   inset: 0;
@@ -391,7 +620,6 @@ onUnmounted(() => {
   font-size: 0.82rem;
 }
 
-/* Error message */
 .camera-error {
   display: flex;
   align-items: center;
@@ -404,7 +632,6 @@ onUnmounted(() => {
   margin: 0;
 }
 
-/* Close button */
 .camera-close {
   display: flex;
   align-items: center;
@@ -418,10 +645,10 @@ onUnmounted(() => {
   color: var(--text-muted);
   cursor: pointer;
   transition: color 0.15s;
+}
 
-  &:hover {
-    color: var(--text-primary);
-  }
+.camera-close:hover {
+  color: var(--text-primary);
 }
 
 /* ── Transitions ──────────────────────────────────────────────────────────── */
