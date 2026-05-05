@@ -205,8 +205,17 @@ const _startWeb = async ({ onScan, videoEl, canvasEl }) => {
     videoEl.srcObject = _webStream;
     await videoEl.play().catch(() => {});
 
-    // 1500ms stabilisation delay — proven reliable on Android WebView
-    await new Promise((r) => setTimeout(r, 1500));
+    // Wait for actual frames via canplay — instant on desktop, ~800ms on Android.
+    // Falls back to 3s timeout so we never hang forever.
+    await new Promise((resolve) => {
+      if (videoEl.readyState >= 3) return resolve();
+      const onReady = () => {
+        videoEl.removeEventListener("canplay", onReady);
+        resolve();
+      };
+      videoEl.addEventListener("canplay", onReady);
+      setTimeout(resolve, 3000); // safety fallback
+    });
 
     // Load jsQR in background (may already be cached)
     await loadJsQr().catch(() => {});
