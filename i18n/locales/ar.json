@@ -376,5 +376,19 @@
   "lightMode": "الوضع الفاتح",
   "auto": "تلقائي",
   "prices": "الأسعار",
-  "stock": "المخزن"
+  "stock": "المخزن",
+  "scanBarcode": "مسح الباركود",
+  "scannerReady": "الماسح جاهز",
+  "scanToAdd": "امسح لإضافة منتج",
+  "typeBarcodeOrScan": "اكتب الباركود أو امسح…",
+  "openCamera": "فتح الكاميرا",
+  "startingCamera": "جارٍ تشغيل الكاميرا…",
+  "pointCameraAtBarcode": "وجّه الكاميرا نحو الباركود أو رمز QR",
+  "hwScannerHint": "الماسح الضوئي نشط — امسح أي باركود لإضافته فوراً إلى الطلب.",
+  "mobileScannerHint": "اكتب الباركود واضغط Enter، أو انقر على أيقونة الكاميرا للمسح.",
+  "barcodeNotFound": "المنتج غير موجود",
+  "cameraNotAvailable": "الكاميرا غير متاحة.",
+  "cameraPermissionDenied": "تم رفض إذن الكاميرا.",
+  "cameraOpenFailed": "تعذّر فتح الكاميرا.",
+  "scanned": "تم المسح"
 }

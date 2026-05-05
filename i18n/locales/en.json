@@ -377,5 +377,19 @@
   "lightMode": "Light Mode",
   "auto": "Auto",
   "prices": "Prices",
-  "stock": "Stock"
+  "stock": "Stock",
+  "scanBarcode": "Scan Barcode",
+  "scannerReady": "Scanner Ready",
+  "scanToAdd": "Scan to Add Product",
+  "typeBarcodeOrScan": "Type barcode or scan…",
+  "openCamera": "Open Camera",
+  "startingCamera": "Starting camera…",
+  "pointCameraAtBarcode": "Point camera at barcode or QR code",
+  "hwScannerHint": "Hardware scanner is active — scan any barcode to instantly add it to the order.",
+  "mobileScannerHint": "Type a barcode and press Enter, or tap the camera icon to scan.",
+  "barcodeNotFound": "Product not found",
+  "cameraNotAvailable": "Camera not available.",
+  "cameraPermissionDenied": "Camera permission denied.",
+  "cameraOpenFailed": "Could not open camera.",
+  "scanned": "Scanned"
 }
