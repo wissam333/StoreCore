@@ -227,16 +227,11 @@ const _buildHints = (ZXing) => {
     ZXing.BarcodeFormat.AZTEC,
     ZXing.BarcodeFormat.RSS_14,
     ZXing.BarcodeFormat.RSS_EXPANDED,
-  ].filter(Boolean); // guard against older ZXing versions
-
+  ].filter(Boolean);
   hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, formats);
-
-  // Try harder — attempt decoding even if the image quality is poor
   hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-
-  // Enable pure barcode mode for printed codes in controlled environments
-  hints.set(ZXing.DecodeHintType.PURE_BARCODE, false);
-
+  // ↓ KEY: tells ZXing to also attempt rotated/inverted decoding passes
+  hints.set(ZXing.DecodeHintType.ALSO_INVERTED, true);
   return hints;
 };
 
@@ -285,9 +280,7 @@ const openCamera = async () => {
 
     // 5. Create reader — BrowserMultiFormatReader handles the decode loop
     _zxingReader = new ZXing.BrowserMultiFormatReader(hints, {
-      // How long ZXing waits between decode attempts (ms)
-      // Lower = faster response, higher CPU; 150ms is a good balance
-      delayBetweenScanAttempts: 150,
+      delayBetweenScanAttempts: 120,
     });
 
     // 6. Start continuous decode from the live <video> element
