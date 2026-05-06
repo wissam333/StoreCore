@@ -28,7 +28,6 @@
               {{ selectedCustomer.name }}
             </span>
           </div>
-
           <SharedUiFormCombobox
             v-model="selectedCustomer"
             v-model:search="customerSearch"
@@ -50,15 +49,12 @@
           <div class="card-head">
             <Icon name="mdi:barcode-scan" size="18" />
             <h4>{{ $t("scanToAdd") || "Scan to Add Product" }}</h4>
-
-            <!-- Electron: always-on badge -->
             <span v-if="isElectronEnv" class="hw-ready-badge">
               <span class="hw-dot" />
               {{ $t("scannerReady") || "Scanner Ready" }}
             </span>
           </div>
 
-          <!-- Scan feedback flash -->
           <Transition name="scan-flash">
             <div
               v-if="scanFeedback"
@@ -77,7 +73,6 @@
             </div>
           </Transition>
 
-          <!-- Manual barcode input + camera button (non-Electron) -->
           <div class="scanner-row">
             <div
               class="barcode-field"
@@ -123,61 +118,58 @@
             </div>
           </div>
 
-          <!-- Web camera preview panel -->
-          <Transition name="camera-slide">
-            <div v-if="webCameraOpen" class="camera-panel">
-              <div class="camera-viewport">
-                <video
-                  ref="videoEl"
-                  class="camera-video"
-                  autoplay
-                  playsinline
-                  muted
-                />
-                <canvas ref="canvasEl" class="camera-canvas-hidden" />
-                <!-- Scan frame overlay -->
-                <div class="scan-overlay">
-                  <div class="scan-frame">
-                    <div class="scan-line" />
-                    <!-- Corner markers -->
-                    <span class="sf-corner sf-tl" />
-                    <span class="sf-corner sf-tr" />
-                    <span class="sf-corner sf-bl" />
-                    <span class="sf-corner sf-br" />
-                  </div>
+          <!--
+            KEY FIX: v-show (not v-if) + NO <Transition> around the camera panel.
+            On Capacitor, <Transition name="camera-slide"> with v-if delays DOM
+            insertion past nextTick, so videoEl.value is null when we try to set
+            srcObject — stream is acquired but never attached, frames never flow.
+            v-show keeps <video> always in the DOM so we can attach immediately.
+          -->
+          <div v-show="webCameraOpen" class="camera-panel">
+            <div class="camera-viewport">
+              <video
+                ref="videoEl"
+                class="camera-video"
+                autoplay
+                playsinline
+                muted
+              />
+              <canvas ref="canvasEl" class="camera-canvas-hidden" />
+              <div class="scan-overlay">
+                <div class="scan-frame">
+                  <div class="scan-line" />
+                  <span class="sf-corner sf-tl" />
+                  <span class="sf-corner sf-tr" />
+                  <span class="sf-corner sf-bl" />
+                  <span class="sf-corner sf-br" />
                 </div>
-                <p class="camera-hint">
-                  {{
-                    $t("pointCameraAtBarcode") ||
-                    "Point camera at barcode or QR code"
-                  }}
-                </p>
               </div>
-              <div v-if="cameraError" class="camera-error">
-                <Icon name="mdi:alert-circle-outline" size="14" />
-                {{ cameraError }}
-              </div>
-              <button class="camera-close-btn" @click="closeWebCamera">
-                <Icon name="mdi:close" size="15" />
-                {{ $t("cancel") }}
-              </button>
+              <p class="camera-hint">
+                {{
+                  $t("pointCameraAtBarcode") ||
+                  "Point camera at barcode or QR code"
+                }}
+              </p>
             </div>
-          </Transition>
+            <div v-if="cameraError" class="camera-error">
+              <Icon name="mdi:alert-circle-outline" size="14" />
+              {{ cameraError }}
+            </div>
+            <button class="camera-close-btn" @click="closeWebCamera">
+              <Icon name="mdi:close" size="15" />
+              {{ $t("cancel") }}
+            </button>
+          </div>
 
-          <!-- Hint text -->
           <p class="scanner-hint">
-            <template v-if="isElectronEnv">
-              {{
-                $t("hwScannerHint") ||
-                "Hardware scanner is active — scan any barcode to instantly add it to the order."
-              }}
-            </template>
-            <template v-else>
-              {{
-                $t("mobileScannerHint") ||
-                "Type a barcode and press Enter, or tap the camera icon to scan."
-              }}
-            </template>
+            <template v-if="isElectronEnv">{{
+              $t("hwScannerHint") ||
+              "Hardware scanner is active — scan any barcode to instantly add it to the order."
+            }}</template>
+            <template v-else>{{
+              $t("mobileScannerHint") ||
+              "Type a barcode and press Enter, or tap the camera icon to scan."
+            }}</template>
           </p>
         </div>
 
@@ -206,7 +198,6 @@
               class="item-card"
               :class="{ 'item-card--fresh': item._fresh }"
             >
-              <!-- Row 1: Product select + delete -->
               <div class="item-top">
                 <div class="item-product">
                   <SharedUiFormBaseSelect
@@ -242,9 +233,9 @@
                           : `${$t("inStock")}: ${item._maxStock}`
                       }}
                     </span>
-                    <span v-if="item._maxStock === 0" class="error-tag">
-                      {{ $t("cannotAddOutOfStock") }}
-                    </span>
+                    <span v-if="item._maxStock === 0" class="error-tag">{{
+                      $t("cannotAddOutOfStock")
+                    }}</span>
                     <span
                       v-if="
                         item.quantity > item._maxStock &&
@@ -253,13 +244,14 @@
                       "
                       class="warn-tag"
                     >
-                      <Icon name="mdi:alert" size="11" />
-                      {{ $t("exceedsStock") }}
+                      <Icon name="mdi:alert" size="11" />{{
+                        $t("exceedsStock")
+                      }}
                     </span>
-                    <!-- Scanned badge -->
                     <span v-if="item._scanned" class="scanned-tag">
-                      <Icon name="mdi:barcode-scan" size="11" />
-                      {{ $t("scanned") || "Scanned" }}
+                      <Icon name="mdi:barcode-scan" size="11" />{{
+                        $t("scanned") || "Scanned"
+                      }}
                     </span>
                   </div>
                 </div>
@@ -268,7 +260,6 @@
                 </button>
               </div>
 
-              <!-- Row 2: Price · Currency · Qty · Total -->
               <div class="item-bottom">
                 <div class="item-field">
                   <label class="field-label">{{ $t("price") }}</label>
@@ -280,7 +271,6 @@
                     :class="{ 'input-error': item.sell_price_at_sale <= 0 }"
                   />
                 </div>
-
                 <div class="item-field item-field--cur">
                   <label class="field-label">{{ $t("cur") }}</label>
                   <SharedUiFormBaseSelect
@@ -288,7 +278,6 @@
                     :options="currencyOpts"
                   />
                 </div>
-
                 <div class="item-field item-field--qty">
                   <label class="field-label">{{ $t("qty") }}</label>
                   <div class="qty-control">
@@ -326,7 +315,6 @@
                     </button>
                   </div>
                 </div>
-
                 <div class="item-total">
                   <label class="field-label">{{ $t("lineTotal") }}</label>
                   <strong>{{ lineTotalDisplay(item) }}</strong>
@@ -334,15 +322,11 @@
               </div>
             </div>
           </TransitionGroup>
-
-          <!-- Add more button inside list -->
           <button class="add-item-btn" @click="addItem">
-            <Icon name="mdi:plus" size="16" />
-            {{ $t("addItem") }}
+            <Icon name="mdi:plus" size="16" />{{ $t("addItem") }}
           </button>
         </div>
 
-        <!-- Notes -->
         <div class="form-card">
           <SharedUiFormBaseTextarea
             v-model="orderNotes"
@@ -360,15 +344,11 @@
             <Icon name="mdi:calculator-outline" size="18" />
             <h4>{{ $t("orderSummary") }}</h4>
           </div>
-
-          <!-- Item count -->
           <div v-if="items.length" class="summary-items-count">
             <Icon name="mdi:cart-outline" size="14" />
             {{ items.length }} {{ $t("items") }} · {{ totalQty }}
             {{ $t("units") }}
           </div>
-
-          <!-- Totals -->
           <div class="totals-block">
             <div
               v-for="item in items"
@@ -385,8 +365,6 @@
               <strong class="grand-val">{{ fmtSP(grandTotalSP) }}</strong>
             </div>
           </div>
-
-          <!-- Info box: payment happens after -->
           <div class="payment-info-box">
             <Icon name="mdi:information-outline" size="16" />
             <div class="payment-info-text">
@@ -394,15 +372,11 @@
               <span>{{ $t("paymentAfterCreateDesc") }}</span>
             </div>
           </div>
-
-          <!-- Validation errors -->
           <div v-if="validationErrors.length" class="validation-errors">
             <div v-for="err in validationErrors" :key="err" class="val-error">
-              <Icon name="mdi:alert-circle-outline" size="13" />
-              {{ err }}
+              <Icon name="mdi:alert-circle-outline" size="13" />{{ err }}
             </div>
           </div>
-
           <SharedUiButtonBase
             class="save-btn"
             size="lg"
@@ -413,7 +387,6 @@
           >
             {{ isEdit ? $t("saveChanges") : $t("createOrder") }}
           </SharedUiButtonBase>
-
           <div v-if="!items.length" class="save-hint">
             {{ $t("addItemsFirst") }}
           </div>
@@ -445,17 +418,13 @@ const {
   getOrderById,
   saveOrder,
 } = useStore();
-const { fmtSP, fmtTx, toSP, dollarRate, reportCurrency, loadSettings } =
-  useCurrency();
+const { fmtSP, fmtTx, toSP, loadSettings } = useCurrency();
 
 const isEdit = computed(
   () => !!route.params.id && route.path.includes("/edit"),
 );
-
-// ── Environment ───────────────────────────────────────────────────────────────
 const isElectronEnv = typeof window !== "undefined" && !!window.electronAPI;
 
-// ── Currency ──────────────────────────────────────────────────────────────────
 const currencyOpts = [
   { label: "SP (ل.س)", value: "SP" },
   { label: "USD ($)", value: "USD" },
@@ -466,8 +435,8 @@ const customerSearch = ref("");
 const customerSuggestions = ref([]);
 const customerLoading = ref(false);
 const selectedCustomer = ref(null);
-
 let customerTimer;
+
 const onCustomerSearch = (val) => {
   customerSearch.value = val;
   clearTimeout(customerTimer);
@@ -489,9 +458,7 @@ const onCreateCustomer = async (name) => {
     selectedCustomer.value = r.data;
     customerSearch.value = r.data.name;
     $toast.success($t("customerCreated"));
-  } else {
-    $toast.error(r.error);
-  }
+  } else $toast.error(r.error);
 };
 
 // ── Products ──────────────────────────────────────────────────────────────────
@@ -535,28 +502,24 @@ const onProductSelect = (idx, productId) => {
 
 const clampQty = (idx) => {
   const item = items.value[idx];
-  const max = item._maxStock;
   item.quantity = Math.max(
     1,
-    Math.min(item.quantity || 1, max > 0 ? max : 9999),
+    Math.min(item.quantity || 1, item._maxStock > 0 ? item._maxStock : 9999),
   );
 };
 
 // ── Totals ────────────────────────────────────────────────────────────────────
 const lineTotalSP = (item) =>
   toSP(item.sell_price_at_sale * (item.quantity || 1), item.currency_at_sale);
-
 const lineTotalDisplay = (item) =>
   fmtTx(
     item.sell_price_at_sale * (item.quantity || 1),
     item.currency_at_sale,
     lineTotalSP(item),
   );
-
 const grandTotalSP = computed(() =>
   items.value.reduce((s, i) => s + lineTotalSP(i), 0),
 );
-
 const totalQty = computed(() =>
   items.value.reduce((s, i) => s + (i.quantity || 0), 0),
 );
@@ -582,25 +545,21 @@ const validationErrors = computed(() => {
     errs.push($t("priceCannotBeZero"));
   return errs;
 });
-
 const canSave = computed(
   () => items.value.length > 0 && validationErrors.value.length === 0,
 );
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BARCODE SCANNER LOGIC
+// BARCODE SCANNER
 // ─────────────────────────────────────────────────────────────────────────────
-
 const barcodeInputRef = ref(null);
 const barcodeInput = ref("");
 const scanLoading = ref(false);
-// FIX: renamed from scanError to cameraError to avoid confusion with useScanner's scanError
 const cameraError = ref("");
 const webCameraOpen = ref(false);
-const videoEl = ref(null);
-const canvasEl = ref(null);
-const scanFeedback = ref(null); // { type: 'success'|'error', msg: string }
-
+const videoEl = ref(null); // always in DOM via v-show
+const canvasEl = ref(null); // always in DOM via v-show
+const scanFeedback = ref(null);
 let _feedbackTimer = null;
 
 const showFeedback = (type, msg) => {
@@ -611,15 +570,12 @@ const showFeedback = (type, msg) => {
   }, 2500);
 };
 
-// ── Core: handle a resolved barcode string ────────────────────────────────────
 const handleBarcode = (code) => {
   const barcode = (code ?? "").trim();
   if (!barcode) return;
-
   const product = allProducts.value.find(
     (p) => p.barcode && p.barcode.trim() === barcode,
   );
-
   if (!product) {
     showFeedback(
       "error",
@@ -628,12 +584,10 @@ const handleBarcode = (code) => {
     barcodeInput.value = barcode;
     return;
   }
-
   if (product.stock === 0) {
     showFeedback("error", `${product.name} — ${$t("outOfStock")}`);
     return;
   }
-
   const existing = items.value.find((i) => i.product_id === product.id);
   if (existing) {
     const newQty = (existing.quantity || 1) + 1;
@@ -656,36 +610,29 @@ const handleBarcode = (code) => {
       _fresh: true,
     };
     items.value.push(newItem);
-
     setTimeout(() => {
       const idx = items.value.findIndex((i) => i._key === newItem._key);
       if (idx !== -1) items.value[idx]._fresh = false;
     }, 1200);
-
     showFeedback("success", `${product.name} added`);
   }
-
   barcodeInput.value = "";
   nextTick(() => barcodeInputRef.value?.focus());
 };
 
-// ── Manual input (Enter key or Go button) ─────────────────────────────────────
 const onManualBarcode = () => {
   const code = barcodeInput.value.trim();
   if (!code) return;
   handleBarcode(code);
 };
 
-// ── Hardware scanner (Electron) — keydown buffer ──────────────────────────────
-let _hwBuffer = "";
-let _hwTimer = null;
-const HW_TIMEOUT_MS = 80;
-
+// ── HW scanner (Electron) ─────────────────────────────────────────────────────
+let _hwBuffer = "",
+  _hwTimer = null;
 const _onHwKey = (e) => {
   const tag = document.activeElement?.tagName?.toLowerCase();
   if (tag === "input" || tag === "textarea" || tag === "select") return;
   if (["Shift", "Control", "Alt", "Meta", "Tab"].includes(e.key)) return;
-
   if (e.key === "Enter") {
     const code = _hwBuffer.trim();
     _hwBuffer = "";
@@ -693,23 +640,22 @@ const _onHwKey = (e) => {
     if (code.length > 2) handleBarcode(code);
     return;
   }
-
   _hwBuffer += e.key;
   clearTimeout(_hwTimer);
   _hwTimer = setTimeout(() => {
     const code = _hwBuffer.trim();
     _hwBuffer = "";
     if (code.length > 2) handleBarcode(code);
-  }, HW_TIMEOUT_MS);
+  }, 80);
 };
 
-// ── Web camera — works on Electron WebView, Android WebView, desktop browsers ─
+// ── Web camera ────────────────────────────────────────────────────────────────
 const JSQR_CDN = "https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js";
-let _webStream = null;
-let _webRaf = null;
-let _webActive = false;
-let _barcodeDetector = null;
-let _lastFrameTime = 0;
+let _webStream = null,
+  _webRaf = null,
+  _webActive = false,
+  _barcodeDetector = null,
+  _lastFrameTime = 0;
 const FRAME_INTERVAL_MS = 200;
 
 const _loadJsQr = () =>
@@ -735,27 +681,28 @@ const _webScanFrame = async (ts) => {
     return;
   }
   _lastFrameTime = ts;
-
   const video = videoEl.value;
   const canvas = canvasEl.value;
-  if (!video || !canvas || video.readyState < 4 || video.videoWidth === 0) {
+  if (
+    !video ||
+    !canvas ||
+    !_webStream ||
+    video.readyState < 4 ||
+    video.videoWidth === 0
+  ) {
     _webRaf = requestAnimationFrame(_webScanFrame);
     return;
   }
-
-  const W = video.videoWidth;
-  const H = video.videoHeight;
+  const W = video.videoWidth,
+    H = video.videoHeight;
   const size = Math.min(W, H) * 0.75;
-  const sx = (W - size) / 2;
-  const sy = (H - size) / 2;
-
+  const sx = (W - size) / 2,
+    sy = (H - size) / 2;
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
-
   try {
     ctx.drawImage(video, sx, sy, size, size, 0, 0, size, size);
-
     if (_barcodeDetector) {
       const codes = await _barcodeDetector.detect(canvas);
       if (codes.length > 0) {
@@ -764,7 +711,6 @@ const _webScanFrame = async (ts) => {
         return;
       }
     }
-
     if (window.jsQR) {
       const imageData = ctx.getImageData(0, 0, size, size);
       const d = imageData.data;
@@ -790,7 +736,6 @@ const _webScanFrame = async (ts) => {
   } catch {
     /* ignore per-frame errors */
   }
-
   if (_webActive) _webRaf = requestAnimationFrame(_webScanFrame);
 };
 
@@ -803,8 +748,6 @@ const openWebCamera = async () => {
     cameraError.value = "";
     scanLoading.value = true;
 
-    // FIX: acquire stream BEFORE setting webCameraOpen so we don't show
-    // an empty panel if getUserMedia fails or is slow.
     _webStream = await navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: { ideal: "environment" },
@@ -813,16 +756,20 @@ const openWebCamera = async () => {
       },
     });
 
-    // Now open the panel and wait for <video> to mount
+    // KEY FIX: videoEl is always in DOM (v-show), no nextTick needed — attach immediately
     webCameraOpen.value = true;
-    await nextTick();
+    videoEl.value.srcObject = _webStream;
 
-    if (videoEl.value) {
-      videoEl.value.srcObject = _webStream;
-      await videoEl.value.play().catch(() => {});
-      // 1500ms stabilisation — proven reliable on Android WebView
-      await new Promise((r) => setTimeout(r, 1500));
-    }
+    // Wait for canplay — the real signal on Capacitor that frames are flowing
+    await new Promise((resolve) => {
+      const onCanPlay = () => {
+        videoEl.value?.removeEventListener("canplay", onCanPlay);
+        resolve();
+      };
+      videoEl.value.addEventListener("canplay", onCanPlay);
+      videoEl.value.play().catch(() => {});
+      setTimeout(resolve, 3000); // safety fallback
+    });
 
     await _loadJsQr().catch(() => {});
 
@@ -852,7 +799,6 @@ const openWebCamera = async () => {
       e.name === "NotAllowedError"
         ? $t("cameraPermissionDenied") || "Camera permission denied."
         : $t("cameraOpenFailed") || "Could not open camera.";
-    // Clean up stream if it was partially opened
     _webStream?.getTracks().forEach((t) => t.stop());
     _webStream = null;
     webCameraOpen.value = false;
@@ -863,7 +809,6 @@ const openWebCamera = async () => {
 
 const closeWebCamera = () => {
   _webActive = false;
-  // FIX: null out _webRaf after cancelling so stale frame callbacks don't fire
   if (_webRaf) {
     cancelAnimationFrame(_webRaf);
     _webRaf = null;
@@ -872,6 +817,7 @@ const closeWebCamera = () => {
     _webStream.getTracks().forEach((t) => t.stop());
     _webStream = null;
   }
+  if (videoEl.value) videoEl.value.srcObject = null;
   _barcodeDetector = null;
   webCameraOpen.value = false;
   cameraError.value = "";
@@ -891,9 +837,8 @@ const orderNotes = ref("");
 
 const save = async () => {
   if (!canSave.value) return;
-  if (!selectedCustomer.value && customerSearch.value.trim()) {
+  if (!selectedCustomer.value && customerSearch.value.trim())
     await onCreateCustomer(customerSearch.value.trim());
-  }
   saving.value = true;
   const r = await saveOrder({
     order: {
@@ -921,9 +866,7 @@ const save = async () => {
   if (r.ok) {
     $toast.success($t(isEdit.value ? "orderUpdated" : "orderCreated"));
     navigateTo("/dashboard/orders/" + r.id);
-  } else {
-    $toast.error(r.error);
-  }
+  } else $toast.error(r.error);
 };
 
 // ── Load for edit ─────────────────────────────────────────────────────────────
@@ -956,15 +899,8 @@ onMounted(async () => {
   const r = await getProducts({ limit: 500, activeOnly: true });
   if (r.ok) allProducts.value = r.data;
   await loadEdit();
-
-  if (isElectronEnv) {
-    window.addEventListener("keydown", _onHwKey);
-  }
-
-  // Pre-load jsQR in the background for faster first camera scan
-  if (!isElectronEnv) {
-    _loadJsQr().catch(() => {});
-  }
+  if (isElectronEnv) window.addEventListener("keydown", _onHwKey);
+  _loadJsQr().catch(() => {});
 });
 
 onUnmounted(() => {
@@ -978,30 +914,25 @@ onUnmounted(() => {
 </script>
 
 <style lang="scss" scoped>
-// ── Layout ────────────────────────────────────────────────────────────────────
 .order-layout {
   display: grid;
   grid-template-columns: 1fr 320px;
   gap: 1.5rem;
   align-items: start;
-
   @media (max-width: 991px) {
     grid-template-columns: 1fr;
   }
 }
-
 .order-main {
   display: flex;
   flex-direction: column;
   gap: 1.25rem;
 }
-
 .order-sidebar {
   position: sticky;
   top: 16px;
 }
 
-// ── Card shell ────────────────────────────────────────────────────────────────
 .form-card {
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
@@ -1015,7 +946,6 @@ onUnmounted(() => {
   gap: 8px;
   margin-bottom: 1.25rem;
   color: var(--text-sub);
-
   h4 {
     font-size: 0.95rem;
     font-weight: 700;
@@ -1024,7 +954,6 @@ onUnmounted(() => {
     color: var(--text-primary);
   }
 }
-
 .optional-badge {
   font-size: 0.7rem;
   background: var(--bg-elevated);
@@ -1032,7 +961,6 @@ onUnmounted(() => {
   padding: 2px 8px;
   border-radius: 20px;
 }
-
 .selected-badge {
   display: inline-flex;
   align-items: center;
@@ -1045,7 +973,6 @@ onUnmounted(() => {
   border-radius: 20px;
 }
 
-// ── Scanner card ──────────────────────────────────────────────────────────────
 .scanner-card {
   border-color: var(--primary);
   background: linear-gradient(
@@ -1054,7 +981,6 @@ onUnmounted(() => {
     color-mix(in srgb, var(--primary) 4%, var(--bg-surface)) 100%
   );
 }
-
 .hw-ready-badge {
   display: inline-flex;
   align-items: center;
@@ -1067,7 +993,6 @@ onUnmounted(() => {
   border-radius: 20px;
   white-space: nowrap;
 }
-
 .hw-dot {
   width: 6px;
   height: 6px;
@@ -1075,7 +1000,6 @@ onUnmounted(() => {
   background: #10b981;
   animation: pulse-dot 1.8s ease-in-out infinite;
 }
-
 @keyframes pulse-dot {
   0%,
   100% {
@@ -1088,7 +1012,6 @@ onUnmounted(() => {
   }
 }
 
-// Scan feedback flash
 .scan-feedback {
   display: flex;
   align-items: center;
@@ -1098,20 +1021,17 @@ onUnmounted(() => {
   font-size: 0.82rem;
   font-weight: 600;
   margin-bottom: 12px;
-
   &.success {
     background: rgba(16, 185, 129, 0.1);
     color: #10b981;
     border: 1px solid rgba(16, 185, 129, 0.25);
   }
-
   &.error {
     background: rgba(239, 68, 68, 0.08);
     color: #ef4444;
     border: 1px solid rgba(239, 68, 68, 0.2);
   }
 }
-
 .scan-flash-enter-active {
   transition: all 0.2s ease;
 }
@@ -1127,13 +1047,11 @@ onUnmounted(() => {
   transform: translateY(-4px);
 }
 
-// Scanner row
 .scanner-row {
   display: flex;
   align-items: center;
   gap: 8px;
 }
-
 .barcode-field {
   flex: 1;
   display: flex;
@@ -1143,23 +1061,19 @@ onUnmounted(() => {
   border-radius: 10px;
   overflow: hidden;
   transition: border-color 0.15s, box-shadow 0.15s;
-
   &:focus-within {
     border-color: var(--primary);
     box-shadow: 0 0 0 3px rgba(var(--primary-rgb, 211, 47, 47), 0.08);
   }
-
   &--scanning {
     border-color: var(--primary);
   }
 }
-
 .barcode-field-icon {
   padding: 0 10px;
   color: var(--text-muted);
   flex-shrink: 0;
 }
-
 .barcode-input {
   flex: 1;
   background: none;
@@ -1171,7 +1085,6 @@ onUnmounted(() => {
   font-family: monospace;
   letter-spacing: 0.04em;
   min-width: 0;
-
   &::placeholder {
     color: var(--text-muted);
     font-family: "Tajawal", sans-serif;
@@ -1179,8 +1092,6 @@ onUnmounted(() => {
     font-size: 0.82rem;
   }
 }
-
-// FIX: use border-inline-start instead of border-left for RTL support
 .barcode-cam-btn {
   background: none;
   border: none;
@@ -1194,33 +1105,27 @@ onUnmounted(() => {
   justify-content: center;
   flex-shrink: 0;
   transition: color 0.15s, background 0.15s;
-
   &:hover,
   &.active {
     background: var(--primary-soft);
     color: var(--primary);
   }
-
   &:disabled {
     opacity: 0.4;
     cursor: not-allowed;
   }
-
   .spin {
     animation: spin 0.8s linear infinite;
   }
 }
-
 @keyframes spin {
   to {
     transform: rotate(360deg);
   }
 }
-
 .barcode-go-btn {
   background: var(--primary);
   border: none;
-  // FIX: logical border-radius so corners flip correctly in RTL
   border-start-end-radius: 8px;
   border-end-end-radius: 8px;
   border-start-start-radius: 0;
@@ -1234,17 +1139,14 @@ onUnmounted(() => {
   justify-content: center;
   flex-shrink: 0;
   transition: opacity 0.15s;
-
   &:disabled {
     opacity: 0.35;
     cursor: not-allowed;
   }
-
   &:not(:disabled):hover {
     opacity: 0.85;
   }
 }
-
 .scanner-hint {
   font-size: 0.72rem;
   color: var(--text-muted);
@@ -1252,14 +1154,12 @@ onUnmounted(() => {
   line-height: 1.5;
 }
 
-// Camera panel
 .camera-panel {
   display: flex;
   flex-direction: column;
   gap: 10px;
   margin-top: 12px;
 }
-
 .camera-viewport {
   position: relative;
   border-radius: 12px;
@@ -1268,18 +1168,15 @@ onUnmounted(() => {
   aspect-ratio: 4 / 3;
   max-height: 300px;
 }
-
 .camera-video {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
 }
-
 .camera-canvas-hidden {
   display: none;
 }
-
 .scan-overlay {
   position: absolute;
   inset: 0;
@@ -1287,12 +1184,10 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
 }
-
 .scan-frame {
   position: relative;
   width: 60%;
   aspect-ratio: 1;
-
   &::before {
     content: "";
     position: absolute;
@@ -1302,7 +1197,6 @@ onUnmounted(() => {
     pointer-events: none;
   }
 }
-
 .scan-line {
   position: absolute;
   inset-inline: 0;
@@ -1310,7 +1204,6 @@ onUnmounted(() => {
   background: linear-gradient(90deg, transparent, var(--primary), transparent);
   animation: scanline 2s ease-in-out infinite;
 }
-
 @keyframes scanline {
   0%,
   100% {
@@ -1320,8 +1213,6 @@ onUnmounted(() => {
     top: 93%;
   }
 }
-
-// FIX: corner markers use logical inset-inline/inset-block properties for RTL
 .sf-corner {
   position: absolute;
   width: 18px;
@@ -1329,7 +1220,6 @@ onUnmounted(() => {
   border-color: var(--primary);
   border-style: solid;
 }
-
 .sf-tl {
   inset-block-start: 0;
   inset-inline-start: 0;
@@ -1354,7 +1244,6 @@ onUnmounted(() => {
   border-width: 0 3px 3px 0;
   border-end-end-radius: 3px;
 }
-
 .camera-hint {
   position: absolute;
   inset-block-end: 8px;
@@ -1365,7 +1254,6 @@ onUnmounted(() => {
   margin: 0;
   padding: 0 12px;
 }
-
 .camera-error {
   display: flex;
   align-items: center;
@@ -1377,7 +1265,6 @@ onUnmounted(() => {
   padding: 8px 12px;
   border: 1px solid rgba(239, 68, 68, 0.15);
 }
-
 .camera-close-btn {
   display: flex;
   align-items: center;
@@ -1391,23 +1278,11 @@ onUnmounted(() => {
   color: var(--text-muted);
   cursor: pointer;
   transition: color 0.15s;
-
   &:hover {
     color: var(--text-primary);
   }
 }
 
-.camera-slide-enter-active,
-.camera-slide-leave-active {
-  transition: all 0.25s ease;
-}
-.camera-slide-enter-from,
-.camera-slide-leave-to {
-  opacity: 0;
-  transform: translateY(-10px);
-}
-
-// ── Empty state ───────────────────────────────────────────────────────────────
 .items-empty {
   background: var(--bg-surface);
   border: 2px dashed var(--border-color);
@@ -1420,17 +1295,14 @@ onUnmounted(() => {
   align-items: center;
   gap: 12px;
   transition: border-color 0.2s;
-
   &:hover {
     border-color: var(--primary);
   }
-
   p {
     margin: 0;
     font-size: 0.9rem;
   }
 }
-
 .empty-icon-wrap {
   width: 72px;
   height: 72px;
@@ -1442,13 +1314,11 @@ onUnmounted(() => {
   color: var(--text-muted);
 }
 
-// ── Items list ────────────────────────────────────────────────────────────────
 .items-list {
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
-
 .item-card {
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
@@ -1458,24 +1328,20 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 12px;
   transition: border-color 0.15s, box-shadow 0.15s, background 0.4s;
-
   &:hover {
     border-color: var(--primary);
     box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
   }
-
   &--fresh {
     border-color: #10b981 !important;
     background: rgba(16, 185, 129, 0.04);
     box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.12);
   }
 }
-
 .item-top {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-
   .item-product {
     flex: 1;
     display: flex;
@@ -1483,13 +1349,11 @@ onUnmounted(() => {
     gap: 6px;
   }
 }
-
 .item-tags {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
 }
-
 .stock-tag {
   display: inline-flex;
   align-items: center;
@@ -1500,7 +1364,6 @@ onUnmounted(() => {
   border-radius: 20px;
   background: rgba(16, 185, 129, 0.1);
   color: #10b981;
-
   &.stock-out {
     background: rgba(239, 68, 68, 0.1);
     color: #ef4444;
@@ -1510,7 +1373,6 @@ onUnmounted(() => {
     color: #f59e0b;
   }
 }
-
 .error-tag {
   display: inline-flex;
   align-items: center;
@@ -1522,7 +1384,6 @@ onUnmounted(() => {
   background: rgba(239, 68, 68, 0.1);
   color: #ef4444;
 }
-
 .warn-tag {
   display: inline-flex;
   align-items: center;
@@ -1534,7 +1395,6 @@ onUnmounted(() => {
   background: rgba(245, 158, 11, 0.1);
   color: #f59e0b;
 }
-
 .scanned-tag {
   display: inline-flex;
   align-items: center;
@@ -1553,14 +1413,12 @@ onUnmounted(() => {
   gap: 10px;
   flex-wrap: wrap;
 }
-
 .item-field {
   display: flex;
   flex-direction: column;
   gap: 4px;
   flex: 1 1 90px;
   min-width: 80px;
-
   &--cur {
     flex: 0 1 105px;
   }
@@ -1568,7 +1426,6 @@ onUnmounted(() => {
     flex: 0 1 130px;
   }
 }
-
 .field-label {
   font-size: 0.68rem;
   font-weight: 600;
@@ -1577,7 +1434,6 @@ onUnmounted(() => {
   color: var(--text-muted);
   margin: 0;
 }
-
 .qty-control {
   display: flex;
   align-items: center;
@@ -1586,7 +1442,6 @@ onUnmounted(() => {
   overflow: hidden;
   background: var(--bg-elevated);
 }
-
 .qty-btn {
   width: 32px;
   height: 34px;
@@ -1599,18 +1454,15 @@ onUnmounted(() => {
   justify-content: center;
   transition: background 0.15s, color 0.15s;
   flex-shrink: 0;
-
   &:hover:not(:disabled) {
     background: var(--primary-soft);
     color: var(--primary);
   }
-
   &:disabled {
     opacity: 0.3;
     cursor: not-allowed;
   }
 }
-
 .qty-input {
   flex: 1;
   text-align: center;
@@ -1619,7 +1471,6 @@ onUnmounted(() => {
   background: transparent !important;
   min-width: 0;
 }
-
 .item-total {
   display: flex;
   flex-direction: column;
@@ -1627,7 +1478,6 @@ onUnmounted(() => {
   flex: 0 0 auto;
   text-align: end;
   min-width: 80px;
-
   strong {
     font-size: 0.95rem;
     font-weight: 700;
@@ -1635,11 +1485,9 @@ onUnmounted(() => {
     white-space: nowrap;
   }
 }
-
 .input-error {
   border-color: #ef4444 !important;
 }
-
 .add-item-btn {
   display: flex;
   align-items: center;
@@ -1655,14 +1503,12 @@ onUnmounted(() => {
   width: 100%;
   justify-content: center;
   transition: all 0.18s;
-
   &:hover {
     border-color: var(--primary);
     color: var(--primary);
     background: var(--primary-soft);
   }
 }
-
 .del-btn {
   flex-shrink: 0;
   width: 34px;
@@ -1677,19 +1523,16 @@ onUnmounted(() => {
   justify-content: center;
   transition: background 0.15s;
   margin-top: 2px;
-
   &:hover {
     background: rgba(239, 68, 68, 0.18);
   }
 }
 
-// ── Summary sidebar ───────────────────────────────────────────────────────────
 .summary-card {
   display: flex;
   flex-direction: column;
   gap: 1.1rem;
 }
-
 .summary-items-count {
   display: flex;
   align-items: center;
@@ -1700,7 +1543,6 @@ onUnmounted(() => {
   background: var(--bg-elevated);
   border-radius: 8px;
 }
-
 .totals-block {
   display: flex;
   flex-direction: column;
@@ -1708,7 +1550,6 @@ onUnmounted(() => {
   padding-bottom: 1rem;
   border-bottom: 1px solid var(--border-color);
 }
-
 .line-item-summary {
   display: flex;
   justify-content: space-between;
@@ -1717,7 +1558,6 @@ onUnmounted(() => {
   color: var(--text-sub);
   gap: 8px;
 }
-
 .lis-name {
   flex: 1;
   overflow: hidden;
@@ -1726,21 +1566,18 @@ onUnmounted(() => {
   color: var(--text-muted);
   font-size: 0.78rem;
 }
-
 .lis-val {
   font-weight: 600;
   color: var(--text-primary);
   white-space: nowrap;
   font-size: 0.8rem;
 }
-
 .total-line {
   display: flex;
   justify-content: space-between;
   align-items: center;
   font-size: 0.9rem;
   color: var(--text-sub);
-
   &--grand {
     font-size: 1rem;
     font-weight: 700;
@@ -1750,13 +1587,11 @@ onUnmounted(() => {
     margin-top: 4px;
   }
 }
-
 .grand-val {
   font-size: 1.25rem;
   color: var(--primary);
   font-weight: 800;
 }
-
 .payment-info-box {
   display: flex;
   gap: 10px;
@@ -1769,24 +1604,20 @@ onUnmounted(() => {
   font-size: 0.78rem;
   flex-shrink: 0;
 }
-
 .payment-info-text {
   display: flex;
   flex-direction: column;
   gap: 2px;
   line-height: 1.4;
-
   strong {
     font-size: 0.8rem;
     display: block;
   }
-
   span {
     color: var(--text-muted);
     font-size: 0.73rem;
   }
 }
-
 .validation-errors {
   display: flex;
   flex-direction: column;
@@ -1796,7 +1627,6 @@ onUnmounted(() => {
   border: 1px solid rgba(239, 68, 68, 0.2);
   border-radius: 10px;
 }
-
 .val-error {
   display: flex;
   align-items: center;
@@ -1805,11 +1635,9 @@ onUnmounted(() => {
   color: #ef4444;
   font-weight: 500;
 }
-
 .save-btn {
   width: 100%;
 }
-
 .save-hint {
   text-align: center;
   font-size: 0.72rem;
@@ -1817,7 +1645,6 @@ onUnmounted(() => {
   margin-top: -4px;
 }
 
-// ── Transitions ───────────────────────────────────────────────────────────────
 .item-anim-enter-active {
   transition: all 0.25s ease;
 }
