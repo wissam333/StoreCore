@@ -1,5 +1,13 @@
 <!-- components/Shared/Ui/Scanner/BarcodeInput.vue -->
 <!-- Usage: <SharedUiScannerBarcodeInput v-model="form.barcode" @scan="onScan" /> -->
+<!--
+  PRO SCANNER — ZXing-based multi-format decoder
+  Supports: QR, EAN-13, EAN-8, Code128, Code39, Code93, UPC-A, UPC-E,
+            ITF, Codabar, PDF417, DataMatrix, Aztec, RSS14, RSS-Expanded
+  Works reliably in: Capacitor WebView, Electron, Desktop browsers
+
+  Install: npm install @zxing/library
+-->
 <template>
   <div class="barcode-input-wrap">
     <!-- Input row -->
@@ -44,28 +52,46 @@
       </span>
     </div>
 
-    <!--
-      KEY FIX: v-show (not v-if) + NO <Transition> wrapper around the video.
-      On Capacitor WebView, <Transition> delays DOM insertion so videoEl.value
-      is still null after nextTick. v-show keeps <video> always mounted,
-      so srcObject can be attached immediately without waiting.
-    -->
+    <!-- Camera panel — v-show keeps <video> always in DOM (Capacitor fix) -->
     <div v-show="cameraOpen" class="camera-panel">
       <div class="camera-viewport">
         <video ref="videoEl" class="camera-video" autoplay playsinline muted />
-        <canvas ref="canvasEl" class="camera-canvas-hidden" />
-        <div class="scan-frame">
-          <div class="scan-line" />
+
+        <!-- Scan overlay UI -->
+        <div class="scan-overlay">
+          <div class="scan-frame">
+            <span class="sf-corner sf-tl" />
+            <span class="sf-corner sf-tr" />
+            <span class="sf-corner sf-bl" />
+            <span class="sf-corner sf-br" />
+            <div class="scan-line" />
+          </div>
         </div>
-        <div v-if="cameraWarmup" class="camera-warmup">
-          <Icon name="mdi:camera-outline" size="28" />
-          <span>{{ $t("startingCamera") || "Starting camera…" }}</span>
-        </div>
+
+        <!-- Warmup overlay -->
+        <Transition name="fade">
+          <div v-if="cameraWarmup" class="camera-warmup">
+            <Icon name="mdi:camera-outline" size="28" />
+            <span>{{ $t("startingCamera") || "Starting camera…" }}</span>
+          </div>
+        </Transition>
+
+        <!-- Last detected format badge -->
+        <Transition name="fade">
+          <div v-if="detectedFormat" class="format-badge">
+            <Icon name="mdi:barcode-scan" size="12" />
+            {{ detectedFormat }}
+          </div>
+        </Transition>
       </div>
+
+      <!-- Error -->
       <p v-if="scanError" class="camera-error">
         <Icon name="mdi:alert-circle-outline" size="14" />
         {{ scanError }}
       </p>
+
+      <!-- Close -->
       <button class="camera-close" @click="closeCamera">
         <Icon name="mdi:close-circle" size="16" />
         {{ $t("cancel") }}
@@ -88,16 +114,19 @@ const emit = defineEmits(["update:modelValue", "scan"]);
 
 const isElectronEnv = typeof window !== "undefined" && !!window.electronAPI;
 
+// ── State ─────────────────────────────────────────────────────────────────────
 const localValue = ref(props.modelValue);
 const cameraOpen = ref(false);
 const cameraWarmup = ref(false);
 const scanLoading = ref(false);
 const scanError = ref("");
 const isHwScanning = ref(false);
+const detectedFormat = ref("");
 
 const inputRef = ref(null);
-const videoEl = ref(null); // always in DOM via v-show — never null
-const canvasEl = ref(null); // always in DOM via v-show — never null
+const videoEl = ref(null); // always in DOM via v-show
+
+let _formatTimer = null;
 
 watch(
   () => props.modelValue,
@@ -106,110 +135,109 @@ watch(
   },
 );
 
-const emitScan = (code) => {
+// ── Emit helpers ──────────────────────────────────────────────────────────────
+const emitScan = (code, format = "") => {
   const clean = (code ?? "").trim();
   if (!clean) return;
   if (!props.directMode) {
     localValue.value = clean;
     emit("update:modelValue", clean);
   }
+  // Flash format badge
+  if (format) {
+    detectedFormat.value = format;
+    clearTimeout(_formatTimer);
+    _formatTimer = setTimeout(() => {
+      detectedFormat.value = "";
+    }, 2000);
+  }
   emit("scan", clean);
   closeCamera();
 };
 
-// ── Camera ────────────────────────────────────────────────────────────────────
-const JSQR_CDN = "https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js";
-const SCAN_INTERVAL_MS = 200;
+// ── ZXing loader (lazy CDN) ───────────────────────────────────────────────────
+// We load ZXing from CDN so we don't need a bundler step.
+// If you have npm installed: `npm install @zxing/library`
+// and replace the loader with: import { BrowserMultiFormatReader } from '@zxing/library'
+const ZXING_CDN = "https://unpkg.com/@zxing/library@0.21.2/umd/index.min.js";
 
-let _stream = null;
-let _raf = null;
-let _active = false;
-let _lastFrameTime = 0;
-let _barcodeDetector = null;
+let _zxingReader = null; // BrowserMultiFormatReader instance
+let _zxingLoading = false;
+let _zxingResolvers = [];
 
-const _loadJsQr = () =>
+const _loadZXing = () =>
   new Promise((resolve, reject) => {
-    if (window.jsQR) return resolve();
-    const existing = document.querySelector(`script[src="${JSQR_CDN}"]`);
+    // Already loaded
+    if (window.ZXing) {
+      resolve(window.ZXing);
+      return;
+    }
+    // Already loading — queue up
+    if (_zxingLoading) {
+      _zxingResolvers.push({ resolve, reject });
+      return;
+    }
+    // Check if script tag exists (e.g. duplicate mount)
+    const existing = document.querySelector(`script[src="${ZXING_CDN}"]`);
     if (existing) {
-      existing.addEventListener("load", resolve);
+      existing.addEventListener("load", () => resolve(window.ZXing));
       existing.addEventListener("error", reject);
       return;
     }
+    _zxingLoading = true;
+    _zxingResolvers.push({ resolve, reject });
     const s = document.createElement("script");
-    s.src = JSQR_CDN;
-    s.onload = resolve;
-    s.onerror = reject;
+    s.src = ZXING_CDN;
+    s.onload = () => {
+      _zxingLoading = false;
+      _zxingResolvers.forEach((r) => r.resolve(window.ZXing));
+      _zxingResolvers = [];
+    };
+    s.onerror = (e) => {
+      _zxingLoading = false;
+      _zxingResolvers.forEach((r) => r.reject(e));
+      _zxingResolvers = [];
+    };
     document.head.appendChild(s);
   });
 
-const _scanFrame = async (timestamp) => {
-  if (!_active) return;
-  if (timestamp - _lastFrameTime < SCAN_INTERVAL_MS) {
-    _raf = requestAnimationFrame(_scanFrame);
-    return;
-  }
-  _lastFrameTime = timestamp;
+// ── Camera / ZXing scan ───────────────────────────────────────────────────────
+let _stream = null;
 
-  const video = videoEl.value;
-  const canvas = canvasEl.value;
-  if (
-    !video ||
-    !canvas ||
-    !_stream ||
-    video.readyState < 4 ||
-    video.videoWidth === 0
-  ) {
-    _raf = requestAnimationFrame(_scanFrame);
-    return;
-  }
+/**
+ * ZXing hints — tell it to try every supported format.
+ * This covers: QR, EAN-8/13, UPC-A/E, Code39/93/128, ITF, Codabar,
+ *              PDF417, DataMatrix, Aztec, RSS14, RSS-Expanded.
+ */
+const _buildHints = (ZXing) => {
+  const hints = new Map();
+  const formats = [
+    ZXing.BarcodeFormat.QR_CODE,
+    ZXing.BarcodeFormat.EAN_13,
+    ZXing.BarcodeFormat.EAN_8,
+    ZXing.BarcodeFormat.CODE_128,
+    ZXing.BarcodeFormat.CODE_39,
+    ZXing.BarcodeFormat.CODE_93,
+    ZXing.BarcodeFormat.UPC_A,
+    ZXing.BarcodeFormat.UPC_E,
+    ZXing.BarcodeFormat.ITF,
+    ZXing.BarcodeFormat.CODABAR,
+    ZXing.BarcodeFormat.PDF_417,
+    ZXing.BarcodeFormat.DATA_MATRIX,
+    ZXing.BarcodeFormat.AZTEC,
+    ZXing.BarcodeFormat.RSS_14,
+    ZXing.BarcodeFormat.RSS_EXPANDED,
+  ].filter(Boolean); // guard against older ZXing versions
 
-  const W = video.videoWidth;
-  const H = video.videoHeight;
-  const size = Math.min(W, H) * 0.7;
-  const sx = (W - size) / 2;
-  const sy = (H - size) / 2;
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, formats);
 
-  try {
-    ctx.drawImage(video, sx, sy, size, size, 0, 0, size, size);
+  // Try harder — attempt decoding even if the image quality is poor
+  hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
 
-    if (_barcodeDetector) {
-      const codes = await _barcodeDetector.detect(canvas);
-      if (codes.length > 0) {
-        emitScan(codes[0].rawValue);
-        return;
-      }
-    }
+  // Enable pure barcode mode for printed codes in controlled environments
+  hints.set(ZXing.DecodeHintType.PURE_BARCODE, false);
 
-    if (window.jsQR) {
-      const imageData = ctx.getImageData(0, 0, size, size);
-      const d = imageData.data;
-      for (let i = 0; i < d.length; i += 4) {
-        let g = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
-        g = g < 128 ? g * 0.7 : 128 + (g - 128) * 1.3;
-        g = Math.max(0, Math.min(255, g));
-        d[i] = d[i + 1] = d[i + 2] = g;
-      }
-      ctx.putImageData(imageData, 0, 0);
-      const code = window.jsQR(
-        ctx.getImageData(0, 0, size, size).data,
-        size,
-        size,
-        { inversionAttempts: "attemptBoth" },
-      );
-      if (code?.data) {
-        emitScan(code.data);
-        return;
-      }
-    }
-  } catch {
-    /* ignore per-frame errors */
-  }
-
-  if (_active) _raf = requestAnimationFrame(_scanFrame);
+  return hints;
 };
 
 const openCamera = async () => {
@@ -221,20 +249,23 @@ const openCamera = async () => {
     scanError.value = "";
     scanLoading.value = true;
 
+    // 1. Request camera stream
     _stream = await navigator.mediaDevices.getUserMedia({
       video: {
-        facingMode: { ideal: "environment" },
+        facingMode: { ideal: "environment" }, // rear camera on mobile
         width: { ideal: 1280 },
         height: { ideal: 720 },
+        // Ask for a high frame rate so ZXing has more chances per second
+        frameRate: { ideal: 30, min: 15 },
       },
     });
 
-    // KEY FIX: videoEl is always mounted (v-show), attach stream directly — no nextTick needed
+    // 2. Attach stream — videoEl is always in DOM via v-show, no nextTick needed
     cameraOpen.value = true;
     cameraWarmup.value = true;
     videoEl.value.srcObject = _stream;
 
-    // Wait for canplay — the real signal frames are flowing on Capacitor
+    // 3. Wait for actual frames to flow (critical on Capacitor)
     await new Promise((resolve) => {
       const onCanPlay = () => {
         videoEl.value?.removeEventListener("canplay", onCanPlay);
@@ -242,62 +273,94 @@ const openCamera = async () => {
       };
       videoEl.value.addEventListener("canplay", onCanPlay);
       videoEl.value.play().catch(() => {});
-      setTimeout(resolve, 3000); // safety fallback — never hang forever
+      setTimeout(resolve, 3000); // fallback — never hang forever
     });
 
     cameraWarmup.value = false;
     scanLoading.value = false;
 
-    await _loadJsQr().catch(() => {});
+    // 4. Load ZXing
+    const ZXing = await _loadZXing();
+    const hints = _buildHints(ZXing);
 
-    if ("BarcodeDetector" in window && !_barcodeDetector) {
-      try {
-        _barcodeDetector = new window.BarcodeDetector({
-          formats: [
-            "qr_code",
-            "ean_13",
-            "ean_8",
-            "code_128",
-            "code_39",
-            "upc_a",
-            "upc_e",
-          ],
-        });
-      } catch {
-        _barcodeDetector = null;
-      }
-    }
+    // 5. Create reader — BrowserMultiFormatReader handles the decode loop
+    _zxingReader = new ZXing.BrowserMultiFormatReader(hints, {
+      // How long ZXing waits between decode attempts (ms)
+      // Lower = faster response, higher CPU; 150ms is a good balance
+      delayBetweenScanAttempts: 150,
+    });
 
-    _active = true;
-    _lastFrameTime = 0;
-    _raf = requestAnimationFrame(_scanFrame);
+    // 6. Start continuous decode from the live <video> element
+    // ZXing's decodeFromVideoElementContinuously handles its own rAF loop
+    await _zxingReader.decodeFromStream(
+      _stream,
+      videoEl.value,
+      (result, err) => {
+        if (!result) return; // err is thrown when no code found — ignore
+        const text = result.getText();
+        const format = result.getBarcodeFormat?.() ?? "";
+        const fmtName = _formatName(ZXing, format);
+        if (text) emitScan(text, fmtName);
+      },
+    );
   } catch (e) {
-    _stream?.getTracks().forEach((t) => t.stop());
-    _stream = null;
-    cameraOpen.value = false;
+    _cleanup();
     cameraWarmup.value = false;
     scanLoading.value = false;
-    scanError.value =
-      e.name === "NotAllowedError"
-        ? $t("cameraPermissionDenied") || "Camera permission denied."
-        : $t("cameraOpenFailed") || "Could not open camera.";
+    if (e?.name !== "NotFoundException") {
+      // NotFoundException is ZXing's "no code in frame" — not a real error
+      scanError.value =
+        e?.name === "NotAllowedError"
+          ? $t("cameraPermissionDenied") || "Camera permission denied."
+          : $t("cameraOpenFailed") || "Could not open camera.";
+    }
   }
 };
 
-const closeCamera = () => {
-  _active = false;
-  if (_raf) {
-    cancelAnimationFrame(_raf);
-    _raf = null;
+/** Map ZXing BarcodeFormat enum to a readable string */
+const _formatName = (ZXing, fmt) => {
+  const map = {
+    [ZXing.BarcodeFormat?.QR_CODE]: "QR Code",
+    [ZXing.BarcodeFormat?.EAN_13]: "EAN-13",
+    [ZXing.BarcodeFormat?.EAN_8]: "EAN-8",
+    [ZXing.BarcodeFormat?.CODE_128]: "Code 128",
+    [ZXing.BarcodeFormat?.CODE_39]: "Code 39",
+    [ZXing.BarcodeFormat?.CODE_93]: "Code 93",
+    [ZXing.BarcodeFormat?.UPC_A]: "UPC-A",
+    [ZXing.BarcodeFormat?.UPC_E]: "UPC-E",
+    [ZXing.BarcodeFormat?.ITF]: "ITF",
+    [ZXing.BarcodeFormat?.CODABAR]: "Codabar",
+    [ZXing.BarcodeFormat?.PDF_417]: "PDF 417",
+    [ZXing.BarcodeFormat?.DATA_MATRIX]: "Data Matrix",
+    [ZXing.BarcodeFormat?.AZTEC]: "Aztec",
+    [ZXing.BarcodeFormat?.RSS_14]: "RSS-14",
+    [ZXing.BarcodeFormat?.RSS_EXPANDED]: "RSS-Expanded",
+  };
+  return map[fmt] ?? String(fmt ?? "");
+};
+
+const _cleanup = () => {
+  if (_zxingReader) {
+    try {
+      _zxingReader.reset();
+    } catch {
+      /* ignore */
+    }
+    _zxingReader = null;
   }
   if (_stream) {
     _stream.getTracks().forEach((t) => t.stop());
     _stream = null;
   }
   if (videoEl.value) videoEl.value.srcObject = null;
+};
+
+const closeCamera = () => {
+  _cleanup();
   cameraOpen.value = false;
   cameraWarmup.value = false;
   scanLoading.value = false;
+  scanError.value = "";
 };
 
 const toggleCamera = async () => {
@@ -320,7 +383,7 @@ const _onHwKey = (e) => {
     const code = _hwBuffer.trim();
     _hwBuffer = "";
     clearTimeout(_hwTimer);
-    if (code.length > 2) emitScan(code);
+    if (code.length > 2) emitScan(code, "HW Scanner");
     return;
   }
   _hwBuffer += e.key;
@@ -328,29 +391,14 @@ const _onHwKey = (e) => {
   _hwTimer = setTimeout(() => {
     const code = _hwBuffer.trim();
     _hwBuffer = "";
-    if (code.length > 2) emitScan(code);
+    if (code.length > 2) emitScan(code, "HW Scanner");
   }, 80);
 };
 
+// ── Lifecycle ─────────────────────────────────────────────────────────────────
 onMounted(() => {
-  _loadJsQr().catch(() => {});
-  if ("BarcodeDetector" in window) {
-    try {
-      _barcodeDetector = new window.BarcodeDetector({
-        formats: [
-          "qr_code",
-          "ean_13",
-          "ean_8",
-          "code_128",
-          "code_39",
-          "upc_a",
-          "upc_e",
-        ],
-      });
-    } catch {
-      _barcodeDetector = null;
-    }
-  }
+  // Preload ZXing in background so first open is instant
+  _loadZXing().catch(() => {});
   if (isElectronEnv) {
     isHwScanning.value = true;
     window.addEventListener("keydown", _onHwKey);
@@ -359,6 +407,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   closeCamera();
+  clearTimeout(_formatTimer);
   if (isElectronEnv) {
     window.removeEventListener("keydown", _onHwKey);
     clearTimeout(_hwTimer);
@@ -373,6 +422,7 @@ onUnmounted(() => {
   gap: 10px;
 }
 
+/* ── Input row ── */
 .barcode-field {
   display: flex;
   align-items: center;
@@ -465,6 +515,7 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
+/* ── Camera panel ── */
 .camera-panel {
   display: flex;
   flex-direction: column;
@@ -485,43 +536,88 @@ onUnmounted(() => {
   object-fit: cover;
   display: block;
 }
-.camera-canvas-hidden {
-  display: none;
-}
 
-.scan-frame {
+/* ── Scan overlay ── */
+.scan-overlay {
   position: absolute;
   inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
+  pointer-events: none;
 }
+.scan-frame {
+  position: relative;
+  width: 62%;
+  aspect-ratio: 1;
+}
+/* Dimming outside the frame */
 .scan-frame::before {
   content: "";
   position: absolute;
-  width: 60%;
-  aspect-ratio: 1;
-  border: 2px solid var(--primary);
+  inset: -9999px;
+  box-shadow: inset 0 0 0 9999px rgba(0, 0, 0, 0.42);
   border-radius: 10px;
-  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
 }
+
+/* Corner brackets */
+.sf-corner {
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  border-color: var(--primary, #d32f2f);
+  border-style: solid;
+}
+.sf-tl {
+  inset-block-start: 0;
+  inset-inline-start: 0;
+  border-width: 3px 0 0 3px;
+  border-start-start-radius: 4px;
+}
+.sf-tr {
+  inset-block-start: 0;
+  inset-inline-end: 0;
+  border-width: 3px 3px 0 0;
+  border-start-end-radius: 4px;
+}
+.sf-bl {
+  inset-block-end: 0;
+  inset-inline-start: 0;
+  border-width: 0 0 3px 3px;
+  border-end-start-radius: 4px;
+}
+.sf-br {
+  inset-block-end: 0;
+  inset-inline-end: 0;
+  border-width: 0 3px 3px 0;
+  border-end-end-radius: 4px;
+}
+
+/* Scanning line */
 .scan-line {
   position: absolute;
-  width: 55%;
+  inset-inline: 0;
   height: 2px;
-  background: linear-gradient(90deg, transparent, var(--primary), transparent);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--primary, #d32f2f),
+    transparent
+  );
   animation: scanline 2s ease-in-out infinite;
 }
 @keyframes scanline {
   0%,
   100% {
-    top: 20%;
+    top: 4%;
   }
   50% {
-    top: 78%;
+    top: 94%;
   }
 }
 
+/* ── Warmup overlay ── */
 .camera-warmup {
   position: absolute;
   inset: 0;
@@ -535,6 +631,25 @@ onUnmounted(() => {
   font-size: 0.82rem;
 }
 
+/* ── Format badge ── */
+.format-badge {
+  position: absolute;
+  inset-block-end: 10px;
+  inset-inline-end: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(16, 185, 129, 0.85);
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 20px;
+  backdrop-filter: blur(4px);
+  pointer-events: none;
+}
+
+/* ── Error / Close ── */
 .camera-error {
   display: flex;
   align-items: center;
@@ -563,5 +678,15 @@ onUnmounted(() => {
 }
 .camera-close:hover {
   color: var(--text-primary);
+}
+
+/* ── Transitions ── */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.25s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
 }
 </style>
