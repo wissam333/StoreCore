@@ -1,4 +1,10 @@
 <!-- store-app/pages/dashboard/orders/new.vue -->
+<!--
+  PRO SCANNER — ZXing replaces jsQR + BarcodeDetector.
+  Supports: QR, EAN-13/8, UPC-A/E, Code128/93/39, ITF, Codabar,
+            PDF417, DataMatrix, Aztec, RSS14, RSS-Expanded.
+  Requires: npm install @zxing/library  (or loads from CDN automatically)
+-->
 <template>
   <div>
     <SharedUiHeaderPage
@@ -119,11 +125,10 @@
           </div>
 
           <!--
-            KEY FIX: v-show (not v-if) + NO <Transition> around the camera panel.
-            On Capacitor, <Transition name="camera-slide"> with v-if delays DOM
-            insertion past nextTick, so videoEl.value is null when we try to set
-            srcObject — stream is acquired but never attached, frames never flow.
-            v-show keeps <video> always in the DOM so we can attach immediately.
+            v-show (NOT v-if) keeps <video> always in the DOM.
+            Capacitor WebView needs srcObject attached before the element is
+            visible — v-if delays insertion past the point where we have the
+            stream ready, so frames never flow. v-show fixes this.
           -->
           <div v-show="webCameraOpen" class="camera-panel">
             <div class="camera-viewport">
@@ -134,7 +139,8 @@
                 playsinline
                 muted
               />
-              <canvas ref="canvasEl" class="camera-canvas-hidden" />
+
+              <!-- Scan overlay -->
               <div class="scan-overlay">
                 <div class="scan-frame">
                   <div class="scan-line" />
@@ -144,6 +150,23 @@
                   <span class="sf-corner sf-br" />
                 </div>
               </div>
+
+              <!-- Warmup overlay -->
+              <Transition name="fade">
+                <div v-if="cameraWarmup" class="camera-warmup-overlay">
+                  <Icon name="mdi:camera-outline" size="28" />
+                  <span>{{ $t("startingCamera") || "Starting camera…" }}</span>
+                </div>
+              </Transition>
+
+              <!-- Detected format badge -->
+              <Transition name="fade">
+                <div v-if="detectedFormat" class="format-badge">
+                  <Icon name="mdi:barcode-scan" size="12" />
+                  {{ detectedFormat }}
+                </div>
+              </Transition>
+
               <p class="camera-hint">
                 {{
                   $t("pointCameraAtBarcode") ||
@@ -550,18 +573,22 @@ const canSave = computed(
 );
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BARCODE SCANNER
+// BARCODE SCANNER — ZXing-based (replaces jsQR + BarcodeDetector)
 // ─────────────────────────────────────────────────────────────────────────────
 const barcodeInputRef = ref(null);
 const barcodeInput = ref("");
 const scanLoading = ref(false);
 const cameraError = ref("");
 const webCameraOpen = ref(false);
+const cameraWarmup = ref(false);
+const detectedFormat = ref("");
 const videoEl = ref(null); // always in DOM via v-show
-const canvasEl = ref(null); // always in DOM via v-show
 const scanFeedback = ref(null);
-let _feedbackTimer = null;
 
+let _feedbackTimer = null;
+let _formatTimer = null;
+
+// ── Feedback toast (inline) ───────────────────────────────────────────────────
 const showFeedback = (type, msg) => {
   scanFeedback.value = { type, msg };
   clearTimeout(_feedbackTimer);
@@ -570,6 +597,7 @@ const showFeedback = (type, msg) => {
   }, 2500);
 };
 
+// ── Product lookup after scan ─────────────────────────────────────────────────
 const handleBarcode = (code) => {
   const barcode = (code ?? "").trim();
   if (!barcode) return;
@@ -626,9 +654,221 @@ const onManualBarcode = () => {
   handleBarcode(code);
 };
 
+// ── ZXing loader ──────────────────────────────────────────────────────────────
+// CDN fallback — remove this block and use the import below if you have npm:
+//   import { BrowserMultiFormatReader, DecodeHintType, BarcodeFormat } from '@zxing/library'
+const ZXING_CDN = "https://unpkg.com/@zxing/library@0.21.2/umd/index.min.js";
+
+let _zxingLoading = false;
+let _zxingResolvers = [];
+
+const _loadZXing = () =>
+  new Promise((resolve, reject) => {
+    if (window.ZXing) {
+      resolve(window.ZXing);
+      return;
+    }
+    if (_zxingLoading) {
+      _zxingResolvers.push({ resolve, reject });
+      return;
+    }
+    const existing = document.querySelector(`script[src="${ZXING_CDN}"]`);
+    if (existing) {
+      existing.addEventListener("load", () => resolve(window.ZXing));
+      existing.addEventListener("error", reject);
+      return;
+    }
+    _zxingLoading = true;
+    _zxingResolvers.push({ resolve, reject });
+    const s = document.createElement("script");
+    s.src = ZXING_CDN;
+    s.onload = () => {
+      _zxingLoading = false;
+      _zxingResolvers.forEach((r) => r.resolve(window.ZXing));
+      _zxingResolvers = [];
+    };
+    s.onerror = (e) => {
+      _zxingLoading = false;
+      _zxingResolvers.forEach((r) => r.reject(e));
+      _zxingResolvers = [];
+    };
+    document.head.appendChild(s);
+  });
+
+// ── ZXing hints — every format, TRY_HARDER ───────────────────────────────────
+const _buildHints = (ZXing) => {
+  const hints = new Map();
+  const formats = [
+    ZXing.BarcodeFormat.QR_CODE,
+    ZXing.BarcodeFormat.EAN_13,
+    ZXing.BarcodeFormat.EAN_8,
+    ZXing.BarcodeFormat.CODE_128,
+    ZXing.BarcodeFormat.CODE_39,
+    ZXing.BarcodeFormat.CODE_93,
+    ZXing.BarcodeFormat.UPC_A,
+    ZXing.BarcodeFormat.UPC_E,
+    ZXing.BarcodeFormat.ITF,
+    ZXing.BarcodeFormat.CODABAR,
+    ZXing.BarcodeFormat.PDF_417,
+    ZXing.BarcodeFormat.DATA_MATRIX,
+    ZXing.BarcodeFormat.AZTEC,
+    ZXing.BarcodeFormat.RSS_14,
+    ZXing.BarcodeFormat.RSS_EXPANDED,
+  ].filter(Boolean);
+  hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, formats);
+  hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+  // ↓ KEY: tells ZXing to also attempt rotated/inverted decoding passes
+  hints.set(ZXing.DecodeHintType.ALSO_INVERTED, true);
+  return hints;
+};
+
+const _formatName = (ZXing, fmt) => {
+  const map = {
+    [ZXing.BarcodeFormat?.QR_CODE]: "QR Code",
+    [ZXing.BarcodeFormat?.EAN_13]: "EAN-13",
+    [ZXing.BarcodeFormat?.EAN_8]: "EAN-8",
+    [ZXing.BarcodeFormat?.CODE_128]: "Code 128",
+    [ZXing.BarcodeFormat?.CODE_39]: "Code 39",
+    [ZXing.BarcodeFormat?.CODE_93]: "Code 93",
+    [ZXing.BarcodeFormat?.UPC_A]: "UPC-A",
+    [ZXing.BarcodeFormat?.UPC_E]: "UPC-E",
+    [ZXing.BarcodeFormat?.ITF]: "ITF",
+    [ZXing.BarcodeFormat?.CODABAR]: "Codabar",
+    [ZXing.BarcodeFormat?.PDF_417]: "PDF 417",
+    [ZXing.BarcodeFormat?.DATA_MATRIX]: "Data Matrix",
+    [ZXing.BarcodeFormat?.AZTEC]: "Aztec",
+    [ZXing.BarcodeFormat?.RSS_14]: "RSS-14",
+    [ZXing.BarcodeFormat?.RSS_EXPANDED]: "RSS-Expanded",
+  };
+  return map[fmt] ?? String(fmt ?? "");
+};
+
+// ── Web camera open / close ───────────────────────────────────────────────────
+let _webStream = null;
+let _zxingReader = null;
+
+const _webCleanup = () => {
+  if (_zxingReader) {
+    try {
+      _zxingReader.reset();
+    } catch {
+      /* ignore */
+    }
+    _zxingReader = null;
+  }
+  if (_webStream) {
+    _webStream.getTracks().forEach((t) => t.stop());
+    _webStream = null;
+  }
+  if (videoEl.value) videoEl.value.srcObject = null;
+};
+
+const openWebCamera = async () => {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    cameraError.value = $t("cameraNotAvailable") || "Camera not available.";
+    return;
+  }
+  try {
+    cameraError.value = "";
+    scanLoading.value = true;
+
+    // 1. Acquire stream
+    _webStream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        frameRate: { ideal: 30, min: 15 },
+      },
+    });
+
+    // 2. Attach to <video> — element is always in DOM via v-show, no nextTick
+    webCameraOpen.value = true;
+    cameraWarmup.value = true;
+    videoEl.value.srcObject = _webStream;
+
+    // 3. Wait for canplay — the real signal frames are flowing on Capacitor
+    await new Promise((resolve) => {
+      const onCanPlay = () => {
+        videoEl.value?.removeEventListener("canplay", onCanPlay);
+        resolve();
+      };
+      videoEl.value.addEventListener("canplay", onCanPlay);
+      videoEl.value.play().catch(() => {});
+      setTimeout(resolve, 3000); // safety fallback
+    });
+
+    cameraWarmup.value = false;
+    scanLoading.value = false;
+
+    // 4. Load ZXing
+    const ZXing = await _loadZXing();
+    const hints = _buildHints(ZXing);
+
+    // 5. Create multi-format reader
+    _zxingReader = new ZXing.BrowserMultiFormatReader(hints, {
+      delayBetweenScanAttempts: 120,
+    });
+
+    // 6. Continuous decode loop — ZXing manages its own rAF internally
+    await _zxingReader.decodeFromStream(
+      _webStream,
+      videoEl.value,
+      (result, err) => {
+        // err fires every frame when nothing is found — ignore it
+        if (!result) return;
+
+        const text = result.getText();
+        const fmtName = _formatName(ZXing, result.getBarcodeFormat?.());
+
+        if (!text) return;
+
+        // Show format badge briefly
+        detectedFormat.value = fmtName;
+        clearTimeout(_formatTimer);
+        _formatTimer = setTimeout(() => {
+          detectedFormat.value = "";
+        }, 2000);
+
+        // Close camera first, then process (avoids decode loop collision)
+        closeWebCamera();
+        handleBarcode(text);
+      },
+    );
+  } catch (e) {
+    _webCleanup();
+    cameraWarmup.value = false;
+    scanLoading.value = false;
+    // ZXing throws NotFoundException every frame with no code — not a real error
+    if (e?.name !== "NotFoundException") {
+      cameraError.value =
+        e?.name === "NotAllowedError"
+          ? $t("cameraPermissionDenied") || "Camera permission denied."
+          : $t("cameraOpenFailed") || "Could not open camera.";
+    }
+  }
+};
+
+const closeWebCamera = () => {
+  _webCleanup();
+  webCameraOpen.value = false;
+  cameraWarmup.value = false;
+  scanLoading.value = false;
+  cameraError.value = "";
+};
+
+const toggleWebCamera = async () => {
+  if (webCameraOpen.value) {
+    closeWebCamera();
+    return;
+  }
+  await openWebCamera();
+};
+
 // ── HW scanner (Electron) ─────────────────────────────────────────────────────
 let _hwBuffer = "",
   _hwTimer = null;
+
 const _onHwKey = (e) => {
   const tag = document.activeElement?.tagName?.toLowerCase();
   if (tag === "input" || tag === "textarea" || tag === "select") return;
@@ -647,188 +887,6 @@ const _onHwKey = (e) => {
     _hwBuffer = "";
     if (code.length > 2) handleBarcode(code);
   }, 80);
-};
-
-// ── Web camera ────────────────────────────────────────────────────────────────
-const JSQR_CDN = "https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js";
-let _webStream = null,
-  _webRaf = null,
-  _webActive = false,
-  _barcodeDetector = null,
-  _lastFrameTime = 0;
-const FRAME_INTERVAL_MS = 200;
-
-const _loadJsQr = () =>
-  new Promise((resolve, reject) => {
-    if (window.jsQR) return resolve();
-    const existing = document.querySelector(`script[src="${JSQR_CDN}"]`);
-    if (existing) {
-      existing.addEventListener("load", resolve);
-      existing.addEventListener("error", reject);
-      return;
-    }
-    const s = document.createElement("script");
-    s.src = JSQR_CDN;
-    s.onload = resolve;
-    s.onerror = reject;
-    document.head.appendChild(s);
-  });
-
-const _webScanFrame = async (ts) => {
-  if (!_webActive) return;
-  if (ts - _lastFrameTime < FRAME_INTERVAL_MS) {
-    _webRaf = requestAnimationFrame(_webScanFrame);
-    return;
-  }
-  _lastFrameTime = ts;
-  const video = videoEl.value;
-  const canvas = canvasEl.value;
-  if (
-    !video ||
-    !canvas ||
-    !_webStream ||
-    video.readyState < 4 ||
-    video.videoWidth === 0
-  ) {
-    _webRaf = requestAnimationFrame(_webScanFrame);
-    return;
-  }
-  const W = video.videoWidth,
-    H = video.videoHeight;
-  const size = Math.min(W, H) * 0.75;
-  const sx = (W - size) / 2,
-    sy = (H - size) / 2;
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  try {
-    ctx.drawImage(video, sx, sy, size, size, 0, 0, size, size);
-    if (_barcodeDetector) {
-      const codes = await _barcodeDetector.detect(canvas);
-      if (codes.length > 0) {
-        closeWebCamera();
-        handleBarcode(codes[0].rawValue);
-        return;
-      }
-    }
-    if (window.jsQR) {
-      const imageData = ctx.getImageData(0, 0, size, size);
-      const d = imageData.data;
-      for (let i = 0; i < d.length; i += 4) {
-        let g = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
-        g = g < 128 ? g * 0.7 : 128 + (g - 128) * 1.3;
-        g = Math.max(0, Math.min(255, g));
-        d[i] = d[i + 1] = d[i + 2] = g;
-      }
-      ctx.putImageData(imageData, 0, 0);
-      const result = window.jsQR(
-        ctx.getImageData(0, 0, size, size).data,
-        size,
-        size,
-        { inversionAttempts: "attemptBoth" },
-      );
-      if (result?.data) {
-        closeWebCamera();
-        handleBarcode(result.data);
-        return;
-      }
-    }
-  } catch {
-    /* ignore per-frame errors */
-  }
-  if (_webActive) _webRaf = requestAnimationFrame(_webScanFrame);
-};
-
-const openWebCamera = async () => {
-  if (!navigator.mediaDevices?.getUserMedia) {
-    cameraError.value = $t("cameraNotAvailable") || "Camera not available.";
-    return;
-  }
-  try {
-    cameraError.value = "";
-    scanLoading.value = true;
-
-    _webStream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: "environment" },
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-      },
-    });
-
-    // KEY FIX: videoEl is always in DOM (v-show), no nextTick needed — attach immediately
-    webCameraOpen.value = true;
-    videoEl.value.srcObject = _webStream;
-
-    // Wait for canplay — the real signal on Capacitor that frames are flowing
-    await new Promise((resolve) => {
-      const onCanPlay = () => {
-        videoEl.value?.removeEventListener("canplay", onCanPlay);
-        resolve();
-      };
-      videoEl.value.addEventListener("canplay", onCanPlay);
-      videoEl.value.play().catch(() => {});
-      setTimeout(resolve, 3000); // safety fallback
-    });
-
-    await _loadJsQr().catch(() => {});
-
-    if ("BarcodeDetector" in window) {
-      try {
-        _barcodeDetector = new window.BarcodeDetector({
-          formats: [
-            "qr_code",
-            "ean_13",
-            "ean_8",
-            "code_128",
-            "code_39",
-            "upc_a",
-            "upc_e",
-          ],
-        });
-      } catch {
-        _barcodeDetector = null;
-      }
-    }
-
-    _webActive = true;
-    _lastFrameTime = 0;
-    _webRaf = requestAnimationFrame(_webScanFrame);
-  } catch (e) {
-    cameraError.value =
-      e.name === "NotAllowedError"
-        ? $t("cameraPermissionDenied") || "Camera permission denied."
-        : $t("cameraOpenFailed") || "Could not open camera.";
-    _webStream?.getTracks().forEach((t) => t.stop());
-    _webStream = null;
-    webCameraOpen.value = false;
-  } finally {
-    scanLoading.value = false;
-  }
-};
-
-const closeWebCamera = () => {
-  _webActive = false;
-  if (_webRaf) {
-    cancelAnimationFrame(_webRaf);
-    _webRaf = null;
-  }
-  if (_webStream) {
-    _webStream.getTracks().forEach((t) => t.stop());
-    _webStream = null;
-  }
-  if (videoEl.value) videoEl.value.srcObject = null;
-  _barcodeDetector = null;
-  webCameraOpen.value = false;
-  cameraError.value = "";
-};
-
-const toggleWebCamera = async () => {
-  if (webCameraOpen.value) {
-    closeWebCamera();
-    return;
-  }
-  await openWebCamera();
 };
 
 // ── Save ──────────────────────────────────────────────────────────────────────
@@ -900,7 +958,8 @@ onMounted(async () => {
   if (r.ok) allProducts.value = r.data;
   await loadEdit();
   if (isElectronEnv) window.addEventListener("keydown", _onHwKey);
-  _loadJsQr().catch(() => {});
+  // Preload ZXing so first camera open is instant
+  _loadZXing().catch(() => {});
 });
 
 onUnmounted(() => {
@@ -910,6 +969,7 @@ onUnmounted(() => {
   }
   closeWebCamera();
   clearTimeout(_feedbackTimer);
+  clearTimeout(_formatTimer);
 });
 </script>
 
@@ -1123,6 +1183,7 @@ onUnmounted(() => {
     transform: rotate(360deg);
   }
 }
+
 .barcode-go-btn {
   background: var(--primary);
   border: none;
@@ -1154,6 +1215,7 @@ onUnmounted(() => {
   line-height: 1.5;
 }
 
+/* ── Camera panel ── */
 .camera-panel {
   display: flex;
   flex-direction: column;
@@ -1174,19 +1236,19 @@ onUnmounted(() => {
   object-fit: cover;
   display: block;
 }
-.camera-canvas-hidden {
-  display: none;
-}
+
+/* ── Scan overlay ── */
 .scan-overlay {
   position: absolute;
   inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
+  pointer-events: none;
 }
 .scan-frame {
   position: relative;
-  width: 60%;
+  width: 62%;
   aspect-ratio: 1;
   &::before {
     content: "";
@@ -1207,7 +1269,7 @@ onUnmounted(() => {
 @keyframes scanline {
   0%,
   100% {
-    top: 5%;
+    top: 4%;
   }
   50% {
     top: 93%;
@@ -1244,6 +1306,39 @@ onUnmounted(() => {
   border-width: 0 3px 3px 0;
   border-end-end-radius: 3px;
 }
+
+/* ── Warmup overlay ── */
+.camera-warmup-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 0.82rem;
+}
+
+/* ── Format badge ── */
+.format-badge {
+  position: absolute;
+  inset-block-end: 32px;
+  inset-inline-end: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(16, 185, 129, 0.85);
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 20px;
+  backdrop-filter: blur(4px);
+  pointer-events: none;
+}
+
 .camera-hint {
   position: absolute;
   inset-block-end: 8px;
@@ -1283,6 +1378,17 @@ onUnmounted(() => {
   }
 }
 
+/* ── Transition helpers ── */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.25s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+/* ── Items ── */
 .items-empty {
   background: var(--bg-surface);
   border: 2px dashed var(--border-color);
@@ -1373,28 +1479,8 @@ onUnmounted(() => {
     color: #f59e0b;
   }
 }
-.error-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  font-size: 0.68rem;
-  font-weight: 600;
-  padding: 2px 7px;
-  border-radius: 20px;
-  background: rgba(239, 68, 68, 0.1);
-  color: #ef4444;
-}
-.warn-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  font-size: 0.68rem;
-  font-weight: 600;
-  padding: 2px 7px;
-  border-radius: 20px;
-  background: rgba(245, 158, 11, 0.1);
-  color: #f59e0b;
-}
+.error-tag,
+.warn-tag,
 .scanned-tag {
   display: inline-flex;
   align-items: center;
@@ -1403,6 +1489,16 @@ onUnmounted(() => {
   font-weight: 600;
   padding: 2px 7px;
   border-radius: 20px;
+}
+.error-tag {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+}
+.warn-tag {
+  background: rgba(245, 158, 11, 0.1);
+  color: #f59e0b;
+}
+.scanned-tag {
   background: rgba(99, 102, 241, 0.1);
   color: #6366f1;
 }
@@ -1528,6 +1624,7 @@ onUnmounted(() => {
   }
 }
 
+/* ── Summary sidebar ── */
 .summary-card {
   display: flex;
   flex-direction: column;
@@ -1645,6 +1742,7 @@ onUnmounted(() => {
   margin-top: -4px;
 }
 
+/* ── Item list animations ── */
 .item-anim-enter-active {
   transition: all 0.25s ease;
 }
