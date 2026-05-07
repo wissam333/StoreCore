@@ -1,4 +1,3 @@
-<!-- store-app/app.vue -->
 <template>
   <div>
     <template v-if="phase === 'loading'">
@@ -39,6 +38,9 @@ const router = useRouter();
 const phase = ref("loading");
 const error = ref("");
 const loadingMsg = ref("");
+
+const VERIFY_INTERVAL_MS = 3 * 60 * 60 * 1000; // 3 hours
+let lastVerifiedAt = 0;
 
 // ── Environment detection ─────────────────────────────────────────────────────
 const detectEnvironment = async () => {
@@ -85,44 +87,84 @@ const initDb = async () => {
   await initMobileSchema();
 };
 
-// ── After DB is ready, decide where to send the user ─────────────────────────
-// Uses isLoggedIn + restoreSession from top-level useAuth() call above.
-// Do NOT call useAuth() here — composables called after await lose Nuxt context.
 const navigateAfterInit = async () => {
-  // useAuth() is safe to call here — _session is now a plain module-level ref,
-  // not useState(), so it never needs a Nuxt context to exist
   const { isLoggedIn, restoreSession } = useAuth();
 
+  let targetPath = "/auth/login";
+
   if (isLoggedIn.value) {
-    router.replace("/dashboard");
-    return;
+    targetPath = "/dashboard";
+  } else {
+    let restored = false;
+    try {
+      const result = await restoreSession();
+      restored = result?.ok === true;
+    } catch {
+      restored = false;
+    }
+    if (restored) targetPath = "/dashboard";
   }
 
-  let restored = false;
-  try {
-    const result = await restoreSession();
-    restored = result?.ok === true;
-  } catch {
-    restored = false;
-  }
-
-  router.replace(restored ? "/dashboard" : "/auth/login");
+  await router.replace(targetPath);
 };
 
-const runBackgroundVerify = async () => {
+// ── Kick out — clear session and go to license page ───────────────────────────
+const kickOut = async (env) => {
+  // Clear auth session so they can't reopen and get back in
   try {
-    const { verify } = useMobileLicense();
-    const result = await verify();
-    if (!result.ok && result.reason !== "offline_grace_expired") {
-      console.warn("[app] Background verify failed:", result.reason);
-      try {
-        const { resetMobileDb } = await import("~/composables/useMobileDb");
-        resetMobileDb();
-      } catch {}
-      phase.value = "license";
+    const { logout } = useAuth();
+    await logout();
+  } catch {}
+
+  if (env === "electron") {
+    // Tell main process to close main window and open license window
+    try {
+      window.license.revoked();
+    } catch {}
+  } else {
+    // Mobile — clear stored license and show license page
+    try {
+      const { Preferences } = await import("@capacitor/preferences");
+      await Preferences.remove({ key: "license_key" });
+      await Preferences.remove({ key: "last_verified_at" });
+    } catch {}
+    try {
+      const { resetMobileDb } = await import("~/composables/useMobileDb");
+      resetMobileDb();
+    } catch {}
+    phase.value = "license";
+  }
+};
+
+// ── Background verify — called on focus/resume ────────────────────────────────
+const backgroundVerify = async () => {
+  // Skip if not enough time has passed
+  if (Date.now() - lastVerifiedAt < VERIFY_INTERVAL_MS) return;
+
+  // Skip if we're already on license or loading phase
+  if (phase.value !== "app") return;
+
+  const env = await detectEnvironment();
+
+  try {
+    if (env === "electron") {
+      const result = await window.license.verify();
+      if (!result.ok) {
+        await kickOut("electron");
+      } else {
+        lastVerifiedAt = Date.now();
+      }
+    } else if (env === "native") {
+      const { verify } = useMobileLicense();
+      const result = await verify();
+      if (!result.ok && result.reason !== "offline_grace_expired") {
+        await kickOut("native");
+      } else if (result.ok) {
+        lastVerifiedAt = Date.now();
+      }
     }
   } catch (err) {
-    console.warn("[app] Background verify threw:", err?.message ?? err);
+    console.warn("[app] backgroundVerify error:", err?.message ?? err);
   }
 };
 
@@ -132,8 +174,9 @@ const onLicenseActivated = async () => {
   error.value = "";
   try {
     await initDb();
-    phase.value = "app";
     await navigateAfterInit();
+    phase.value = "app";
+    lastVerifiedAt = Date.now();
   } catch (err) {
     error.value = `Database error: ${err?.message ?? err}`;
     phase.value = "error";
@@ -152,39 +195,52 @@ const init = async () => {
     const env = await detectEnvironment();
     console.log("[app] environment:", env);
 
-    if (env === "electron" || env === "web") {
+    if (env === "electron") {
+      const currentRoute = router.currentRoute.value.path;
+      if (currentRoute === "/license") {
+        phase.value = "app";
+        return;
+      }
+
       loadingMsg.value = "Opening database…";
       await initDb();
       loadingMsg.value = "";
-      // Navigate BEFORE showing app — prevents flash of content before redirect
+      await navigateAfterInit();
+      phase.value = "app";
+      lastVerifiedAt = Date.now();
+      return;
+    }
+
+    if (env === "web") {
+      loadingMsg.value = "Opening database…";
+      await initDb();
+      loadingMsg.value = "";
       await navigateAfterInit();
       phase.value = "app";
       return;
     }
 
-    // env === 'native' — enforce license
+    // ── NATIVE MOBILE ─────────────────────────────────────────────────────────
     try {
       const { resetMobileDb } = await import("~/composables/useMobileDb");
       resetMobileDb();
     } catch {}
 
-    loadingMsg.value = "Opening database…";
     const storedKey = await getStoredKey();
-
     if (!storedKey) {
       phase.value = "license";
-      loadingMsg.value = "";
       return;
     }
 
+    loadingMsg.value = "Opening database…";
     await initDb();
     loadingMsg.value = "";
-    // Navigate BEFORE showing app — prevents flash
     await navigateAfterInit();
     phase.value = "app";
+    lastVerifiedAt = Date.now();
 
-    // Fire-and-forget background verification
-    runBackgroundVerify();
+    // Initial background verify after boot
+    backgroundVerify();
   } catch (err) {
     error.value = err?.message || "Failed to initialize. Tap to retry.";
     phase.value = "error";
@@ -192,15 +248,32 @@ const init = async () => {
   }
 };
 
-onMounted(() => {
+onMounted(async () => {
+  await router.isReady();
+
   init();
+
+  // Mobile — verify on resume
+  document.addEventListener("resume", () => {
+    backgroundVerify();
+  });
 
   document.addEventListener("pause", async () => {
     try {
-      const { flushMobileDb } = await import("~/composables/useMobileDb");
-      await flushMobileDb();
+      const { flushMobileDb, flushMobileDbSync } = await import(
+        "~/composables/useMobileDb"
+      );
+      flushMobileDbSync();
+      flushMobileDb();
     } catch {}
   });
+
+  // Electron — listen for focus-triggered verify from main process
+  if (typeof window !== "undefined" && window.__ELECTRON__) {
+    window.license.onCheck(() => {
+      backgroundVerify();
+    });
+  }
 });
 </script>
 

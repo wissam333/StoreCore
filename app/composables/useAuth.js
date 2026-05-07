@@ -33,17 +33,6 @@ export const useAuth = () => {
     return result;
   };
 
-  // ── loginWithFingerprint ──────────────────────────────────────────────────
-  const loginWithFingerprint = async () => {
-    if (!isMobile()) return { ok: false, error: "Not supported on desktop" };
-    const auth = await getMobileAuth();
-    const result = await auth.loginWithFingerprint();
-    if (result.ok) {
-      _session.value = { token: result.token, ...result.staff };
-    }
-    return result;
-  };
-
   // ── restoreSession ────────────────────────────────────────────────────────
   const restoreSession = async () => {
     if (_session.value) return { ok: true };
@@ -57,22 +46,30 @@ export const useAuth = () => {
       return result;
     }
 
+    // Electron: no persistent session — always requires login
     return { ok: false };
   };
 
   // ── logout ────────────────────────────────────────────────────────────────
+  // Clears everything: in-memory session, Preferences token, and any cached
+  // state. Then navigates to login. This is a real logout.
   const logout = async () => {
     const token = _session.value?.token;
     _session.value = null;
+
     try {
       if (isMobile()) {
         const auth = await getMobileAuth();
         await auth.logout(token);
       } else {
-        await window.auth.logout(token);
+        // Electron IPC handler expects { token }, not a bare string
+        await window.auth.logout({ token });
       }
-    } catch {}
-    await navigateTo("/auth/login");
+    } catch (e) {
+      console.warn("[auth] logout error:", e?.message);
+    }
+
+    await navigateTo("/auth/login", { replace: true });
   };
 
   // ── Permission helpers ────────────────────────────────────────────────────
@@ -172,7 +169,6 @@ export const useAuth = () => {
     staff,
     isLoggedIn,
     login,
-    loginWithFingerprint,
     restoreSession,
     logout,
     can,

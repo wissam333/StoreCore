@@ -85,19 +85,6 @@
         >
           {{ $t("auth.loginButton") }}
         </SharedUiButtonBase>
-
-        <!-- Fingerprint button — mobile only -->
-        <SharedUiButtonBase
-          v-if="showFingerprintBtn"
-          variant="outline"
-          size="lg"
-          icon-left="mdi:fingerprint"
-          :disabled="loading"
-          class="btn-fingerprint"
-          @click="loginFingerprint"
-        >
-          {{ $t("auth.fingerprintLogin") }}
-        </SharedUiButtonBase>
       </div>
 
       <!-- Footer -->
@@ -113,7 +100,7 @@ definePageMeta({
 });
 
 const { locale, t } = useI18n();
-const { login, loginWithFingerprint, restoreSession, isLoggedIn } = useAuth();
+const { login, restoreSession, isLoggedIn } = useAuth();
 const router = useRouter();
 const route = useRoute();
 
@@ -122,14 +109,11 @@ const form = reactive({ username: "", password: "" });
 const loading = ref(false);
 const error = ref("");
 const passwordInputRef = ref(null);
-
-// Determine if running on mobile (not Electron)
-const isMobile = typeof window !== "undefined" && !window.__ELECTRON__;
-const showFingerprintBtn = ref(false);
 const storeName = ref("My Store");
 
+const isMobile = typeof window !== "undefined" && !window.__ELECTRON__;
+
 // ── Where to go after login ────────────────────────────────────────────────
-// Respects ?redirect=/dashboard/orders so deep links work after session expiry
 const redirectTo = computed(() =>
   typeof route.query.redirect === "string" &&
   route.query.redirect.startsWith("/dashboard")
@@ -144,30 +128,31 @@ const focusPassword = () => {
 
 // ── On mount ───────────────────────────────────────────────────────────────
 onMounted(async () => {
-  // Already logged in (e.g. hot reload) — skip login page
+  // Already logged in — skip login page
   if (isLoggedIn.value) {
     router.replace(redirectTo.value);
     return;
   }
 
-  // Load store name (best effort — don't block login on failure)
+  // On mobile: try to restore a saved session transparently.
+  // If successful the user never sees the login page.
+  if (isMobile) {
+    try {
+      const restore = await restoreSession();
+      if (restore?.ok) {
+        router.replace(redirectTo.value);
+        return;
+      }
+    } catch {}
+  }
+
+  // Load store name for display (best effort)
   try {
     const res = isMobile
       ? await useMobileStore().getSettings()
       : await window.store.getSettings();
     if (res?.ok) storeName.value = res.data?.store_name ?? "My Store";
   } catch {}
-
-  // On mobile: check if fingerprint is available and a saved username exists
-  if (isMobile) {
-    try {
-      const restore = await restoreSession();
-      if (restore?.canUseBiometric && restore?.username) {
-        showFingerprintBtn.value = true;
-        form.username = restore.username;
-      }
-    } catch {}
-  }
 });
 
 // ── Submit ─────────────────────────────────────────────────────────────────
@@ -190,28 +175,9 @@ const submit = async () => {
       await nextTick();
       passwordInputRef.value?.$el?.querySelector("input")?.focus();
     }
-  } catch (e) {
+  } catch {
     error.value = t("auth.invalidCredentials");
     form.password = "";
-  } finally {
-    loading.value = false;
-  }
-};
-
-// ── Fingerprint ────────────────────────────────────────────────────────────
-const loginFingerprint = async () => {
-  error.value = "";
-  loading.value = true;
-  try {
-    const result = await loginWithFingerprint();
-    if (result.ok) {
-      router.replace(redirectTo.value);
-    } else {
-      // Cancelled by user — stay on page silently
-      if (!result.error?.toLowerCase().includes("cancel")) {
-        error.value = result.error ?? t("auth.fingerprintFailed");
-      }
-    }
   } finally {
     loading.value = false;
   }
@@ -363,7 +329,7 @@ const loginFingerprint = async () => {
   gap: 1rem;
 }
 
-// ── Login button override (adds shadow and full width) ────────────────────
+// ── Login button ──────────────────────────────────────────────────────────
 .btn-login {
   margin-top: 0.25rem;
   width: 100%;
@@ -377,12 +343,6 @@ const loginFingerprint = async () => {
   &:active:not(:disabled) {
     transform: translateY(0);
   }
-}
-
-// ── Fingerprint button ────────────────────────────────────────────────────
-.btn-fingerprint {
-  width: 100%;
-  border-style: dashed;
 }
 
 // ── Footer ────────────────────────────────────────────────────────────────

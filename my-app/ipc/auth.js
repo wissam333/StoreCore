@@ -11,7 +11,7 @@
 //     It is never written to disk and is cleared when the app closes.
 //   - The session token is a random UUID returned to the renderer and kept in
 //     a Pinia store (not localStorage).
-
+import { ADMIN_PERMISSIONS } from "../db/schema.js";
 import { createHash, randomBytes } from "crypto";
 
 // ── Crypto helpers ─────────────────────────────────────────────────────────
@@ -114,6 +114,24 @@ export function registerAuthHandlers(db, ipcMain) {
         } catch {
           permissions = {};
         }
+      }
+      const isAdmin =
+        staff.role === "admin" ||
+        staff.role === "Administrator" ||
+        staff.username === "admin";
+      const isEmpty = Object.keys(permissions).length === 0;
+      if (isAdmin && isEmpty) {
+        const adminRole = db
+          .prepare(
+            `SELECT id FROM roles WHERE name = 'Administrator' AND is_system = 1 LIMIT 1`,
+          )
+          .get();
+        if (adminRole) {
+          db.prepare(
+            `UPDATE staff SET role_id = ?, role = 'Administrator', updated_at = datetime('now') WHERE id = ?`,
+          ).run(adminRole.id, staff.id);
+        }
+        permissions = ADMIN_PERMISSIONS;
       }
 
       const session = createSession(staff, permissions);

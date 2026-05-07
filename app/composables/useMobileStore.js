@@ -64,6 +64,7 @@ export const useMobileStore = () => {
 
   const EDITABLE_FIELDS = {
     categories: ["name", "description"],
+    roles: ["name", "permissions"],
     products: [
       "name",
       "description",
@@ -1448,6 +1449,77 @@ export const useMobileStore = () => {
     }
   };
 
+  // ── ROLES ──────────────────────────────────────────────────────────────────
+  const getRoles = async () => {
+    try {
+      const db = await ensureDb();
+      return {
+        ok: true,
+        data:
+          (await db.query(`SELECT * FROM roles WHERE _deleted=0 ORDER BY name`))
+            .values ?? [],
+      };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  };
+
+  const saveRole = async (role) => {
+    try {
+      const db = await getMobileDb();
+      const permsStr =
+        typeof role.permissions === "string"
+          ? role.permissions
+          : JSON.stringify(role.permissions);
+
+      if (role.id) {
+        const before = await freshRow("roles", role.id);
+        await db.run(
+          `UPDATE roles SET name=?, permissions=?, version=version+1,
+         updated_at=datetime('now') WHERE id=?`,
+          [role.name, permsStr, role.id],
+        );
+        const fresh = await freshRow("roles", role.id);
+        await enqueue(
+          "roles",
+          "update",
+          role.id,
+          fresh,
+          diffFields("roles", before, fresh),
+        );
+        return { ok: true, id: role.id };
+      } else {
+        const id = generateUuid();
+        await db.run(
+          `INSERT INTO roles (id, name, permissions, is_system) VALUES (?, ?, ?, ?)`,
+          [id, role.name, permsStr, role.is_system ? 1 : 0],
+        );
+        await enqueue("roles", "insert", id, await freshRow("roles", id), null);
+        return { ok: true, id };
+      }
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  };
+
+  const deleteRole = async (id) => {
+    try {
+      const db = await getMobileDb();
+      const role = await freshRow("roles", id);
+      if (role?.is_system)
+        return { ok: false, error: "Cannot delete system role" };
+      await db.run(
+        `UPDATE roles SET _deleted=1, version=version+1,
+       updated_at=datetime('now') WHERE id=?`,
+        [id],
+      );
+      await enqueue("roles", "delete", id, null, null);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  };
+
   // ── REPORTS ────────────────────────────────────────────────────────────────
   // ── REVENUE REPORT ────────────────────────────────────────────────────────────
   const getRevenueReport = async ({ dateFrom, dateTo } = {}) => {
@@ -2031,5 +2103,8 @@ export const useMobileStore = () => {
     getLastSyncedAt,
     setLastSyncedAt,
     applyRemoteRow,
+    getRoles,
+    saveRole,
+    deleteRole,
   };
 };

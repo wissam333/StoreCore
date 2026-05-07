@@ -149,9 +149,6 @@ export function initSchema(db) {
       synced_at   TEXT
     );
 
-    -- ── ROLES ─────────────────────────────────────────────────────────────────
-    -- permissions: JSON blob — flat key/value e.g. {"products.view":true, ...}
-    -- is_system: 1 = built-in role that cannot be deleted (admin only)
     CREATE TABLE IF NOT EXISTS roles (
       id          TEXT    PRIMARY KEY,
       name        TEXT    NOT NULL UNIQUE,
@@ -164,12 +161,8 @@ export function initSchema(db) {
       synced_at   TEXT
     );
 
-    -- ── STAFF ─────────────────────────────────────────────────────────────────
-    -- role_id: FK → roles.id  (replaces the old plain-text role column)
-    -- pin:     optional 4-6 digit PIN stored as salt:sha256hash, used for
-    --          quick re-auth and fingerprint-backed login on mobile
-    -- password: salt:sha256hash after first login (plain 'admin' only on seed)
-    -- last_login: ISO datetime of most recent successful login
+    -- staff.role is free-text (role name label) — NO CHECK constraint.
+    -- The actual permission source is role_id → roles.permissions JSON.
     CREATE TABLE IF NOT EXISTS staff (
       id          TEXT    PRIMARY KEY,
       full_name   TEXT    NOT NULL,
@@ -224,7 +217,7 @@ export function initSchema(db) {
     INSERT OR IGNORE INTO sync_meta (key, value) VALUES ('last_synced_at', NULL);
   `);
 
-  // ── Migrations (safe to re-run) ───────────────────────────────────────────
+  // ── Column migrations (safe to re-run — errors swallowed) ─────────────────
   const migrations = [
     `ALTER TABLE categories  ADD COLUMN version INTEGER NOT NULL DEFAULT 1`,
     `ALTER TABLE products    ADD COLUMN version INTEGER NOT NULL DEFAULT 1`,
@@ -234,9 +227,8 @@ export function initSchema(db) {
     `ALTER TABLE dues        ADD COLUMN version INTEGER NOT NULL DEFAULT 1`,
     `ALTER TABLE staff       ADD COLUMN version INTEGER NOT NULL DEFAULT 1`,
     `ALTER TABLE sync_queue  ADD COLUMN changed_fields TEXT`,
-    // New columns added in this version
-    `ALTER TABLE staff ADD COLUMN pin       TEXT`,
-    `ALTER TABLE staff ADD COLUMN role_id   TEXT REFERENCES roles(id)`,
+    `ALTER TABLE staff ADD COLUMN pin        TEXT`,
+    `ALTER TABLE staff ADD COLUMN role_id    TEXT REFERENCES roles(id)`,
     `ALTER TABLE staff ADD COLUMN last_login TEXT`,
     `CREATE TABLE IF NOT EXISTS order_payments (
       id          TEXT    PRIMARY KEY,
@@ -269,14 +261,86 @@ export function initSchema(db) {
     try {
       db.exec(sql);
     } catch {
-      /* already exists — expected */
+      /* column/table already exists — expected */
     }
   }
 
+  // ── CRITICAL MIGRATION: remove CHECK constraint from staff.role ────────────
+  // Older versions of the schema had:
+  //   role TEXT CHECK(role IN ('admin','cashier','manager'))
+  // This blocks assigning any custom role. We detect the old definition via
+  // sqlite_master and rebuild the table without it.
+  // Safe to run repeatedly — the condition is false after the first run.
+  try {
+    const tableSql =
+      db
+        .prepare(
+          `SELECT sql FROM sqlite_master WHERE type='table' AND name='staff'`,
+        )
+        .get()?.sql ?? "";
+
+    const hasOldConstraint =
+      tableSql.includes("CHECK") &&
+      (tableSql.includes("'admin'") || tableSql.includes('"admin"'));
+
+    if (hasOldConstraint) {
+      console.log(
+        "[schema] Detected old CHECK constraint on staff.role — rebuilding table...",
+      );
+
+      // better-sqlite3 supports multi-statement exec inside a transaction
+      db.exec(`
+        PRAGMA foreign_keys = OFF;
+
+        CREATE TABLE staff_new (
+          id          TEXT    PRIMARY KEY,
+          full_name   TEXT    NOT NULL,
+          username    TEXT    UNIQUE,
+          password    TEXT,
+          pin         TEXT,
+          role_id     TEXT    REFERENCES roles(id),
+          role        TEXT,
+          phone       TEXT,
+          email       TEXT,
+          is_active   INTEGER DEFAULT 1,
+          last_login  TEXT,
+          version     INTEGER NOT NULL DEFAULT 1,
+          created_at  TEXT    DEFAULT (datetime('now')),
+          updated_at  TEXT    DEFAULT (datetime('now')),
+          _deleted    INTEGER DEFAULT 0,
+          synced_at   TEXT
+        );
+
+        INSERT INTO staff_new
+          SELECT
+            id, full_name, username, password,
+            NULL        AS pin,
+            NULL        AS role_id,
+            role,
+            phone, email, is_active,
+            NULL        AS last_login,
+            COALESCE(version, 1),
+            created_at, updated_at,
+            COALESCE(_deleted, 0),
+            synced_at
+          FROM staff;
+
+        DROP TABLE staff;
+        ALTER TABLE staff_new RENAME TO staff;
+
+        PRAGMA foreign_keys = ON;
+      `);
+
+      console.log("[schema] staff.role CHECK constraint removed successfully.");
+    }
+  } catch (e) {
+    console.error("[schema] CHECK constraint migration failed:", e.message);
+  }
+
+  // ── Seed roles & staff ─────────────────────────────────────────────────────
   const uuid = () => crypto.randomUUID();
 
-  // ── Seed admin role ───────────────────────────────────────────────────────
-  // is_system = 1 means it cannot be deleted from the UI
+  // Seed Administrator role (is_system = 1 — cannot be deleted from UI)
   const adminRoleRow = db
     .prepare(`SELECT id FROM roles WHERE name = 'Administrator' LIMIT 1`)
     .get();
@@ -286,20 +350,16 @@ export function initSchema(db) {
   if (!adminRoleId) {
     adminRoleId = uuid();
     db.prepare(
-      `
-      INSERT INTO roles (id, name, permissions, is_system)
-      VALUES (?, 'Administrator', ?, 1)
-    `,
+      `INSERT INTO roles (id, name, permissions, is_system) VALUES (?, 'Administrator', ?, 1)`,
     ).run(adminRoleId, JSON.stringify(ADMIN_PERMISSIONS));
   }
 
-  // ── Seed cashier role (all false — admin customises later) ────────────────
+  // Seed Cashier role with sensible defaults
   const cashierRoleExists = db
     .prepare(`SELECT id FROM roles WHERE name = 'Cashier' LIMIT 1`)
     .get();
 
   if (!cashierRoleExists) {
-    // Sensible cashier defaults: can view+add orders, view products/customers
     const cashierPerms = {
       ...DEFAULT_PERMISSIONS,
       "products.view": true,
@@ -310,31 +370,21 @@ export function initSchema(db) {
       "dues.view": true,
     };
     db.prepare(
-      `
-      INSERT INTO roles (id, name, permissions, is_system)
-      VALUES (?, 'Cashier', ?, 0)
-    `,
+      `INSERT INTO roles (id, name, permissions, is_system) VALUES (?, 'Cashier', ?, 0)`,
     ).run(uuid(), JSON.stringify(cashierPerms));
   }
 
-  // ── Seed admin staff account ──────────────────────────────────────────────
-  // password = 'admin' stored plain — IPC login handler hashes it on first use
-  // and replaces this value. It never stays plain after the first login.
+  // Seed admin staff account (password = 'admin', hashed on first login)
   const staffCount = db.prepare(`SELECT COUNT(*) as n FROM staff`).get();
   if (staffCount.n === 0) {
     db.prepare(
-      `
-      INSERT INTO staff (id, full_name, username, password, role, role_id, is_active)
-      VALUES (?, 'Admin', 'admin', 'admin', 'admin', ?, 1)
-    `,
+      `INSERT INTO staff (id, full_name, username, password, role, role_id, is_active)
+       VALUES (?, 'Admin', 'admin', 'admin', 'Administrator', ?, 1)`,
     ).run(uuid(), adminRoleId);
   } else {
-    // Backfill role_id for existing admin accounts that pre-date this migration
+    // Backfill role_id for accounts that pre-date the roles table
     db.prepare(
-      `
-      UPDATE staff SET role_id = ?
-      WHERE role = 'admin' AND role_id IS NULL
-    `,
+      `UPDATE staff SET role_id = ? WHERE (role = 'admin' OR role = 'Administrator') AND role_id IS NULL`,
     ).run(adminRoleId);
   }
 
@@ -342,11 +392,9 @@ export function initSchema(db) {
   try {
     const paidOrders = db
       .prepare(
-        `
-      SELECT id, paid_amount, display_currency, total_sp
-      FROM orders
-      WHERE paid_amount > 0 AND _deleted = 0
-    `,
+        `SELECT id, paid_amount, display_currency, total_sp
+         FROM orders
+         WHERE paid_amount > 0 AND _deleted = 0`,
       )
       .all();
 
@@ -362,10 +410,8 @@ export function initSchema(db) {
               .get()?.value ?? "15000",
           ) || 15000;
         db.prepare(
-          `
-          INSERT INTO order_payments (id, order_id, amount, currency, amount_sp, note, paid_at)
-          VALUES (?, ?, ?, ?, ?, 'Migrated payment', datetime('now'))
-        `,
+          `INSERT INTO order_payments (id, order_id, amount, currency, amount_sp, note, paid_at)
+           VALUES (?, ?, ?, ?, ?, 'Migrated payment', datetime('now'))`,
         ).run(
           uuid(),
           o.id,

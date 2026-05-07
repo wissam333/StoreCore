@@ -62,5 +62,8 @@ export const useStore = () => {
     applyRemoteRow: (p) => s().applyRemoteRow(p),
     getAllOrderItems: () => s().getAllOrderItems(),
     getRawTable: (table) => s().getRawTable(table),
+    getRoles: () => s().getRoles(),
+    saveRole: (role) => s().saveRole(role),
+    deleteRole: (id) => s().deleteRole(id),
   };
 };

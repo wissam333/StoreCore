@@ -97,11 +97,13 @@ export const useStoreSyncManager = () => {
   const PUSH_ORDER = {
     categories: 1,
     customers: 2,
-    staff: 3,
-    products: 4,
-    orders: 5,
-    order_items: 6,
-    dues: 7,
+    roles: 3,
+    staff: 4,
+    products: 5,
+    orders: 6,
+    order_items: 7,
+    order_payments: 8,
+    dues: 9,
   };
 
   // ── PHASE 1: Push ─────────────────────────────────────────────────────────
@@ -198,8 +200,12 @@ export const useStoreSyncManager = () => {
       }
 
       const rows = json.rows ?? [];
-      for (const { table, row } of rows) {
-        await applyRemoteRow({ table, row });
+      for (const { table, row, changed_fields } of rows) {
+        await applyRemoteRow({
+          table,
+          row,
+          changedFields: changed_fields ?? null,
+        });
       }
 
       hasMore = json.hasMore ?? false;

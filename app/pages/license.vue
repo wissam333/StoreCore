@@ -58,7 +58,7 @@
 </template>
 
 <script setup>
-definePageMeta({ layout: false });
+definePageMeta({ layout: false, middleware: false });
 
 const { locale } = useI18n();
 const licenseKey = ref("");

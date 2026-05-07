@@ -4,7 +4,9 @@
   </div>
 </template>
 
-<script setup></script>
+<script setup>
+definePageMeta({ middleware: false });
+</script>
 
 <style lang="scss" scoped>
 .splash {

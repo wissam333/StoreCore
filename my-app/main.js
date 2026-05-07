@@ -69,7 +69,7 @@ const isDev = process.env.NODE_ENV === "development";
 
 const loadWindow = async (win, route = "") => {
   const url = isDev
-    ? `http://localhost:3000${route}`
+    ? `http://localhost:3000/${route ? "#" + route : ""}`
     : `app://./index.html${route ? "#" + route : ""}`;
   await win.loadURL(url);
 };
@@ -207,6 +207,34 @@ ipcMain.on("license:activated", async () => {
 });
 
 ipcMain.on("app:quit", () => app.quit());
+
+// Renderer-callable verify — used by backgroundVerify() in app.vue
+ipcMain.handle("license:verify", async () => {
+  const result = await verifyLicense();
+  return result;
+});
+
+// Called by renderer when server revokes the license mid-session
+ipcMain.on("license:revoked", async () => {
+  log("[main] license revoked — closing main window, opening license window");
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.close();
+    mainWindow = null;
+  }
+  await createLicenseWindow();
+});
+
+// Trigger background verify when window gains focus
+app.on("browser-window-focus", (_, win) => {
+  if (mainWindow && !mainWindow.isDestroyed() && win.id === mainWindow.id) {
+    mainWindow.webContents.send("license:check");
+  }
+});
+
+app.on("browser-window-focus", async () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send("license:check");
+});
 
 // ── App ready ─────────────────────────────────────────────────────────────────
 app.whenReady().then(async () => {

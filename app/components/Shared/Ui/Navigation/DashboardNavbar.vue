@@ -235,20 +235,20 @@
             <!-- <div class="dropdown-divider" /> -->
 
             <!-- Logout — opens confirm modal -->
-            <!-- <button
+            <button
               class="dropdown-item logout-item"
               @click="openLogoutConfirm"
             >
               <Icon name="mdi:logout" size="18" />
               <span>{{ $t("logout") }}</span>
-            </button> -->
+            </button>
           </div>
         </Transition>
       </div>
     </div>
 
     <!-- ── Logout confirm modal ───────────────────────────────────────────────── -->
-    <!-- <SharedUiDialogAppModal
+    <SharedUiDialogAppModal
       v-model="showLogoutModal"
       :title="$t('confirmLogout')"
       max-width="400px"
@@ -278,7 +278,7 @@
           </SharedUiButtonBase>
         </div>
       </template>
-    </SharedUiDialogAppModal> -->
+    </SharedUiDialogAppModal>
   </header>
   <P2PSyncModal v-model="showP2P" @synced="refreshData" />
 </template>
@@ -287,6 +287,7 @@
 const NuxtLink = resolveComponent("NuxtLink");
 const { locale, setLocale } = useI18n();
 const showP2P = ref(false);
+const { logout } = useAuth();
 const props = defineProps({
   sidebarCollapsed: { type: Boolean, default: false },
   sidebarWidth: { type: Number, default: 260 },
@@ -421,13 +422,8 @@ const openLogoutConfirm = () => {
 const handleLogout = async () => {
   isLoggingOut.value = true;
   try {
-    ["userInfo", "role"].forEach((k) => localStorage.removeItem(k));
-    useCookie("token").value = null;
-    useAuth().value.isAuthenticated = false;
-    useAccountType().value = null;
-    useUserInfo().value = null;
-    emit("logout");
-    await navigateTo("/");
+    console.log("logging out.....");
+    await logout(); // clears session + Preferences + navigates to /auth/login
   } finally {
     isLoggingOut.value = false;
     showLogoutModal.value = false;

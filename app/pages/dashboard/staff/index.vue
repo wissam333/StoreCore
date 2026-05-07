@@ -6,18 +6,22 @@
       :subtitle="$t('staffSubtitle')"
       icon="mdi:account-group-outline"
       :is-rtl="locale === 'ar'"
-      :actions="[
-        {
-          label: $t('staff.manageRoles'),
-          icon: 'mdi:shield-account-outline',
-          variant: 'outline',
-        },
-        {
-          label: $t('staff.addStaff'),
-          icon: 'mdi:account-plus-outline',
-          variant: 'primary',
-        },
-      ]"
+      :actions="
+        can('staff.manage').value
+          ? [
+              {
+                label: $t('staff.manageRoles'),
+                icon: 'mdi:shield-account-outline',
+                variant: 'outline',
+              },
+              {
+                label: $t('staff.addStaff'),
+                icon: 'mdi:account-plus-outline',
+                variant: 'primary',
+              },
+            ]
+          : []
+      "
       @action-click="onHeaderAction"
     />
 
@@ -104,14 +108,14 @@
           </button>
           <button
             class="action-btn"
-            :title="$t('common.edit')"
+            :title="$t('edit')"
             @click.stop="navigateTo(`/dashboard/staff/${row.id}`)"
           >
             <Icon name="mdi:pencil-outline" />
           </button>
           <button
             class="action-btn danger"
-            :title="$t('common.delete')"
+            :title="$t('delete')"
             :disabled="row.id === currentStaff?.id"
             @click.stop="confirmDelete(row)"
           >
@@ -134,7 +138,7 @@
             variant="outline"
             @click="showDeleteModal = false"
           >
-            {{ $t("common.cancel") }}
+            {{ $t("cancel") }}
           </SharedUiButtonBase>
           <SharedUiButtonBase
             variant="error"
@@ -142,7 +146,7 @@
             icon-left="mdi:trash-can-outline"
             @click="doDelete"
           >
-            {{ $t("common.delete") }}
+            {{ $t("delete") }}
           </SharedUiButtonBase>
         </div>
       </template>
@@ -213,9 +217,10 @@ const onHeaderAction = (action) => {
 
 // ── Toggle active ─────────────────────────────────────────────────────────
 const toggleActive = async (member) => {
+  const raw = toRaw(member);
   const res = await saveStaff({
-    ...member,
-    is_active: member.is_active ? 0 : 1,
+    ...raw,
+    is_active: raw.is_active ? 0 : 1,
   });
   if (res.ok) {
     $toast.success(
@@ -228,7 +233,6 @@ const toggleActive = async (member) => {
     $toast.error(res.error);
   }
 };
-
 // ── Delete ────────────────────────────────────────────────────────────────
 const confirmDelete = (row) => {
   toDelete.value = row;

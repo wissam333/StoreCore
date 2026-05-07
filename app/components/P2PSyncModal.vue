@@ -320,14 +320,14 @@ const scanError = ref("");
 // ── Template refs ─────────────────────────────────────────────────────────────
 const qrEl = ref(null);
 const videoEl = ref(null);
-const canvasEl = ref(null);
 
 // ── Debug log ─────────────────────────────────────────────────────────────────
 const debugLogs = ref([]);
 const MAX_LOGS = 12;
 
-let _origLog = null,
-  _origError = null;
+let _origLog = null;
+let _origError = null;
+
 const hookConsole = () => {
   _origLog = console.log.bind(console);
   _origError = console.error.bind(console);
@@ -350,6 +350,7 @@ const hookConsole = () => {
     }
   };
 };
+
 const unhookConsole = () => {
   if (_origLog) {
     console.log = _origLog;
@@ -361,57 +362,36 @@ const unhookConsole = () => {
   }
 };
 
-// ── Scan internals ────────────────────────────────────────────────────────────
-let _qrInstance = null;
-let _videoStream = null;
-let _scanRaf = null;
-let _scanActive = false;
-let _lastScanTime = 0;
-let _barcodeDetector = null;
-const SCAN_INTERVAL_MS = 200;
-
+// ── Progress ──────────────────────────────────────────────────────────────────
 const progressPct = computed(() =>
   progress.value.total > 0
     ? Math.round((progress.value.current / progress.value.total) * 100)
     : 0,
 );
 
-// ── jsQR loader ───────────────────────────────────────────────────────────────
-const JSQR_CDN = "https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js";
-const loadScript = (src) =>
+// ── ZXing ─────────────────────────────────────────────────────────────────────
+const ZXING_CDN = "https://unpkg.com/@zxing/library@0.21.2/umd/index.min.js";
+let _zxingReader = null;
+let _videoStream = null;
+
+const _loadZXing = () =>
   new Promise((resolve, reject) => {
-    if (window.jsQR && src === JSQR_CDN) return resolve();
-    const existing = document.querySelector(`script[src="${src}"]`);
+    if (window.ZXing) return resolve(window.ZXing);
+    const existing = document.querySelector(`script[src="${ZXING_CDN}"]`);
     if (existing) {
-      if (window.jsQR) return resolve();
-      existing.addEventListener("load", resolve);
+      existing.addEventListener("load", () => resolve(window.ZXing));
       existing.addEventListener("error", reject);
       return;
     }
     const s = document.createElement("script");
-    s.src = src;
-    s.onload = resolve;
+    s.src = ZXING_CDN;
+    s.onload = () => resolve(window.ZXing);
     s.onerror = reject;
     document.head.appendChild(s);
   });
 
-onMounted(() => {
-  // Pre-load jsQR and init BarcodeDetector if available
-  loadScript(JSQR_CDN).catch(() => {});
-  if ("BarcodeDetector" in window) {
-    try {
-      _barcodeDetector = new window.BarcodeDetector({ formats: ["qr_code"] });
-    } catch {}
-  }
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// HOST — generate QR code
-// ─────────────────────────────────────────────────────────────────────────────
-const chooseMode = async (m) => {
-  mode.value = m;
-  if (m === "host") await startHost();
-};
+// ── QR code generation ────────────────────────────────────────────────────────
+let _qrInstance = null;
 
 watch([() => status.value, qrEl], async ([s, el]) => {
   if (s !== "ready" || !el) return;
@@ -430,16 +410,20 @@ watch([() => status.value, qrEl], async ([s, el]) => {
       height: 160,
       colorDark: "#0f172a",
       colorLight: "#f8fafc",
-      correctLevel: window.QRCode.CorrectLevel.M, // was H, now M
+      correctLevel: window.QRCode.CorrectLevel.M,
     });
   } catch (e) {
     console.warn("[P2P] QR generation failed:", e);
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GUEST — manual connect
-// ─────────────────────────────────────────────────────────────────────────────
+// ── HOST ──────────────────────────────────────────────────────────────────────
+const chooseMode = async (m) => {
+  mode.value = m;
+  if (m === "host") await startHost();
+};
+
+// ── GUEST — manual connect ────────────────────────────────────────────────────
 const connectManual = () => {
   const id = manualId.value.trim();
   if (!id) return;
@@ -449,9 +433,7 @@ const connectManual = () => {
   connectToHost(id);
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// GUEST — startScan() — always uses WebView camera (works on Android + desktop)
-// ─────────────────────────────────────────────────────────────────────────────
+// ── GUEST — camera scan ───────────────────────────────────────────────────────
 const startScan = async () => {
   if (scanLoading.value) return;
   scanError.value = "";
@@ -472,6 +454,7 @@ const startWebScan = async () => {
         facingMode: { ideal: "environment" },
         width: { ideal: 1280 },
         height: { ideal: 720 },
+        frameRate: { ideal: 30, min: 15 },
       },
     });
 
@@ -480,120 +463,65 @@ const startWebScan = async () => {
 
     if (videoEl.value) {
       videoEl.value.srcObject = _videoStream;
-      await videoEl.value.play().catch(() => {});
-      // Wait for video to fully stabilize on Android
-      await new Promise((r) => setTimeout(r, 1500));
+      await new Promise((resolve) => {
+        const onCanPlay = () => {
+          videoEl.value?.removeEventListener("canplay", onCanPlay);
+          resolve();
+        };
+        videoEl.value.addEventListener("canplay", onCanPlay);
+        videoEl.value.play().catch(() => {});
+        setTimeout(resolve, 3000);
+      });
     }
 
-    await loadScript(JSQR_CDN).catch(() => {});
+    const ZXing = await _loadZXing();
 
-    _scanActive = true;
-    scheduleScan();
+    const hints = new Map();
+    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+      ZXing.BarcodeFormat.QR_CODE,
+    ]);
+    hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+
+    _zxingReader = new ZXing.BrowserMultiFormatReader(hints, {
+      delayBetweenScanAttempts: 120,
+    });
+
+    await _zxingReader.decodeFromStream(
+      _videoStream,
+      videoEl.value,
+      (result) => {
+        if (!result) return;
+        const text = result.getText();
+        if (text) handleScannedId(text);
+      },
+    );
   } catch (e) {
-    if (e.name === "NotAllowedError") {
+    stopWebScan();
+    if (e?.name === "NotAllowedError") {
       scanError.value =
-        "Camera permission denied. Please allow camera access and try again.";
-    } else {
+        "Camera permission denied. Please type the ID manually.";
+    } else if (e?.name !== "NotFoundException") {
       scanError.value = "Could not open camera. Please type the ID manually.";
     }
   }
 };
 
 const stopWebScan = () => {
-  _scanActive = false;
-  if (_scanRaf) {
-    cancelAnimationFrame(_scanRaf);
-    _scanRaf = null;
+  if (_zxingReader) {
+    try {
+      _zxingReader.reset();
+    } catch {}
+    _zxingReader = null;
   }
   if (_videoStream) {
     _videoStream.getTracks().forEach((t) => t.stop());
     _videoStream = null;
   }
+  if (videoEl.value) videoEl.value.srcObject = null;
   if (guestStep.value === "scan") guestStep.value = "enter";
 };
 
-const scheduleScan = () => {
-  if (_scanActive) _scanRaf = requestAnimationFrame(scanFrame);
-};
-
-const scanFrame = async (timestamp) => {
-  if (!_scanActive) return;
-  if (timestamp - _lastScanTime < SCAN_INTERVAL_MS) {
-    scheduleScan();
-    return;
-  }
-  _lastScanTime = timestamp;
-
-  const video = videoEl.value;
-  const canvas = canvasEl.value;
-  if (
-    !video ||
-    !canvas ||
-    !_videoStream ||
-    video.readyState < 4 ||
-    video.videoWidth === 0
-  ) {
-    scheduleScan();
-    return;
-  }
-
-  const W = video.videoWidth;
-  const H = video.videoHeight;
-
-  // Crop center square (where the QR frame is shown to the user)
-  const size = Math.min(W, H) * 0.7;
-  const sx = (W - size) / 2;
-  const sy = (H - size) / 2;
-
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-
-  try {
-    // Draw only the center crop
-    ctx.drawImage(video, sx, sy, size, size, 0, 0, size, size);
-
-    // Try BarcodeDetector first (native, most reliable on Android)
-    if (_barcodeDetector) {
-      const codes = await _barcodeDetector.detect(canvas);
-      if (codes.length > 0) {
-        handleScannedId(codes[0].rawValue);
-        return;
-      }
-    }
-
-    // jsQR fallback
-    if (window.jsQR) {
-      const imageData = ctx.getImageData(0, 0, size, size);
-      const d = imageData.data;
-      for (let i = 0; i < d.length; i += 4) {
-        let g = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
-        g = g < 128 ? g * 0.7 : 128 + (g - 128) * 1.3;
-        g = Math.max(0, Math.min(255, g));
-        d[i] = d[i + 1] = d[i + 2] = g;
-      }
-      ctx.putImageData(imageData, 0, 0);
-      const code = window.jsQR(
-        ctx.getImageData(0, 0, size, size).data,
-        size,
-        size,
-        { inversionAttempts: "attemptBoth" },
-      );
-      if (code?.data) {
-        handleScannedId(code.data);
-        return;
-      }
-    }
-  } catch {
-    /* ignore per-frame errors */
-  }
-
-  scheduleScan();
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Shared: handle a scanned or entered peer ID
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Shared: handle scanned ID ─────────────────────────────────────────────────
 const handleScannedId = (id) => {
   if (!id?.trim()) return;
   stopWebScan();
@@ -604,9 +532,7 @@ const handleScannedId = (id) => {
   connectToHost(id.trim());
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Navigation
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Navigation ────────────────────────────────────────────────────────────────
 const goBack = async () => {
   stopWebScan();
   unhookConsole();
@@ -638,6 +564,12 @@ const handleClose = async () => {
   _qrInstance = null;
   emit("update:modelValue", false);
 };
+
+// ── Lifecycle ─────────────────────────────────────────────────────────────────
+onMounted(() => {
+  // Preload ZXing in background so first open is instant
+  _loadZXing().catch(() => {});
+});
 
 onUnmounted(() => {
   stopWebScan();

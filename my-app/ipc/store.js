@@ -37,6 +37,7 @@ export function registerStoreHandlers(db, ipcMain) {
 
   const EDITABLE_FIELDS = {
     categories: ["name", "description"],
+    roles: ["name", "permissions"],
     products: [
       "name",
       "description",
@@ -1236,6 +1237,83 @@ export function registerStoreHandlers(db, ipcMain) {
         `UPDATE staff SET _deleted=1, version=version+1, updated_at=datetime('now') WHERE id=?`,
       ).run(id);
       enqueue("staff", "delete", id, null, null);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  // ── ROLES ─────────────────────────────────────────────────────────────────
+
+  ipcMain.handle("store:getRoles", () => {
+    try {
+      return {
+        ok: true,
+        data: db
+          .prepare(`SELECT * FROM roles WHERE _deleted=0 ORDER BY name`)
+          .all(),
+      };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle("store:saveRole", (_, role) => {
+    try {
+      if (role.id) {
+        const before = freshRow("roles", role.id);
+        db.prepare(
+          `UPDATE roles SET name=@name, permissions=@permissions,
+         version=version+1, updated_at=datetime('now') WHERE id=@id`,
+        ).run({
+          id: role.id,
+          name: role.name,
+          permissions:
+            typeof role.permissions === "string"
+              ? role.permissions
+              : JSON.stringify(role.permissions),
+        });
+        const fresh = freshRow("roles", role.id);
+        enqueue(
+          "roles",
+          "update",
+          role.id,
+          fresh,
+          diffFields("roles", before, fresh),
+        );
+        return { ok: true, id: role.id };
+      } else {
+        const id = uuid();
+        db.prepare(
+          `INSERT INTO roles (id, name, permissions, is_system)
+         VALUES (?, ?, ?, ?)`,
+        ).run(
+          id,
+          role.name,
+          typeof role.permissions === "string"
+            ? role.permissions
+            : JSON.stringify(role.permissions),
+          role.is_system ? 1 : 0,
+        );
+        enqueue("roles", "insert", id, freshRow("roles", id), null);
+        return { ok: true, id };
+      }
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle("store:deleteRole", (_, id) => {
+    try {
+      // Prevent deleting system roles
+      const role = freshRow("roles", id);
+      if (role?.is_system)
+        return { ok: false, error: "Cannot delete system role" };
+      db.prepare(
+        `UPDATE roles SET _deleted=1, version=version+1,
+       updated_at=datetime('now') WHERE id=?`,
+      ).run(id);
+      enqueue("roles", "delete", id, null, null);
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message };

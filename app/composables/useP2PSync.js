@@ -3,7 +3,7 @@
 // Protocol v4 unchanged — only table lists updated.
 
 const PEERJS_CDN =
-  "https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js";
+  "https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.5/peerjs.min.js";
 const QRCODE_CDN =
   "https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js";
 
@@ -12,9 +12,10 @@ const ALL_TABLES = [
   "categories",
   "products",
   "customers",
+  "roles",
   "orders",
   "order_items",
-  "order_payments", // ← NEW
+  "order_payments",
   "dues",
   "staff",
 ];
@@ -22,11 +23,12 @@ const ALL_TABLES = [
 const APPLY_ORDER = [
   "categories",
   "customers",
+  "roles",
   "staff",
   "products",
   "orders",
   "order_items",
-  "order_payments", // ← NEW: after orders + order_items (FK constraint)
+  "order_payments",
   "dues",
 ];
 
@@ -215,7 +217,13 @@ export const useP2PSync = () => {
     try {
       const Peer = await loadPeer();
       _peer = new Peer(undefined, {
-        config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] },
+        config: {
+          iceServers: [
+            { urls: "stun:stun.l.google.com:19302" },
+            { urls: "stun:stun1.l.google.com:19302" }, // ← add fallback
+            { urls: "stun:stun.cloudflare.com:3478" }, // ← add fallback
+          ],
+        },
       });
 
       _peer.on("open", (id) => {
@@ -305,7 +313,13 @@ export const useP2PSync = () => {
     try {
       const Peer = await loadPeer();
       _peer = new Peer(undefined, {
-        config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] },
+        config: {
+          iceServers: [
+            { urls: "stun:stun.l.google.com:19302" },
+            { urls: "stun:stun1.l.google.com:19302" }, // ← add fallback
+            { urls: "stun:stun.cloudflare.com:3478" }, // ← add fallback
+          ],
+        },
       });
 
       _peer.on("open", () => {

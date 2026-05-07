@@ -1,5 +1,4 @@
 <!-- store-app/pages/dashboard/staff/[id].vue -->
-<!-- Handles both create (/staff/new) and edit (/staff/:id/edit) -->
 <template>
   <div>
     <SharedUiHeaderPage
@@ -19,7 +18,6 @@
           <span>{{ $t("staff.identity") }}</span>
         </div>
 
-        <!-- Avatar / initials preview -->
         <div class="avatar-preview">
           <div class="avatar-preview__circle" :data-initials="initials">
             {{ initials }}
@@ -35,70 +33,47 @@
         </div>
 
         <div class="fields">
-          <!-- Full name -->
-          <div class="field" :class="{ 'field--error': errors.full_name }">
-            <label class="field__label">{{ $t("staff.fullName") }} *</label>
-            <div class="field__wrap">
-              <Icon name="mdi:account-outline" class="field__icon" size="17" />
-              <input
-                v-model="form.full_name"
-                type="text"
-                class="field__input"
-                :placeholder="$t('staff.fullNamePlaceholder')"
-                @input="errors.full_name = ''"
-              />
-            </div>
-            <span v-if="errors.full_name" class="field__error">{{
-              errors.full_name
-            }}</span>
-          </div>
+          <SharedUiFormBaseInput
+            v-model="form.full_name"
+            :label="$t('staff.fullName') + ' *'"
+            :placeholder="$t('staff.fullNamePlaceholder')"
+            icon-left="mdi:account-outline"
+            :error="!!errors.full_name"
+            :error-message="errors.full_name"
+            size="md"
+            @update:model-value="errors.full_name = ''"
+          />
 
-          <!-- Username -->
-          <div class="field" :class="{ 'field--error': errors.username }">
-            <label class="field__label">{{ $t("staff.username") }} *</label>
-            <div class="field__wrap">
-              <Icon name="mdi:at" class="field__icon" size="17" />
-              <input
-                v-model="form.username"
-                type="text"
-                class="field__input"
-                :placeholder="$t('staff.usernamePlaceholder')"
-                autocapitalize="none"
-                @input="errors.username = ''"
-              />
-            </div>
-            <span v-if="errors.username" class="field__error">{{
-              errors.username
-            }}</span>
-          </div>
+          <SharedUiFormBaseInput
+            v-model="form.username"
+            :label="$t('staff.username') + ' *'"
+            :placeholder="$t('staff.usernamePlaceholder')"
+            icon-left="mdi:at"
+            :error="!!errors.username"
+            :error-message="errors.username"
+            autocomplete="off"
+            autocapitalize="none"
+            size="md"
+            @update:model-value="errors.username = ''"
+          />
 
-          <!-- Phone (optional) -->
-          <div class="field">
-            <label class="field__label">{{ $t("staff.phone") }}</label>
-            <div class="field__wrap">
-              <Icon name="mdi:phone-outline" class="field__icon" size="17" />
-              <input
-                v-model="form.phone"
-                type="tel"
-                class="field__input"
-                :placeholder="$t('staff.phonePlaceholder')"
-              />
-            </div>
-          </div>
+          <SharedUiFormBaseInput
+            v-model="form.phone"
+            :label="$t('staff.phone')"
+            :placeholder="$t('staff.phonePlaceholder')"
+            icon-left="mdi:phone-outline"
+            type="tel"
+            size="md"
+          />
 
-          <!-- Email (optional) -->
-          <div class="field">
-            <label class="field__label">{{ $t("staff.email") }}</label>
-            <div class="field__wrap">
-              <Icon name="mdi:email-outline" class="field__icon" size="17" />
-              <input
-                v-model="form.email"
-                type="email"
-                class="field__input"
-                :placeholder="$t('staff.emailPlaceholder')"
-              />
-            </div>
-          </div>
+          <SharedUiFormBaseInput
+            v-model="form.email"
+            :label="$t('staff.email')"
+            :placeholder="$t('staff.emailPlaceholder')"
+            icon-left="mdi:email-outline"
+            type="email"
+            size="md"
+          />
 
           <!-- Active toggle -->
           <div class="field field--inline">
@@ -130,30 +105,19 @@
           </div>
 
           <div class="fields">
-            <div class="field" :class="{ 'field--error': errors.role_id }">
-              <label class="field__label">{{ $t("staff.assignRole") }}</label>
-              <div class="field__wrap field__wrap--select">
-                <Icon name="mdi:shield-outline" class="field__icon" size="17" />
-                <select
-                  v-model="form.role_id"
-                  class="field__input field__input--select"
-                  @change="errors.role_id = ''"
-                >
-                  <option value="">{{ $t("staff.noRole") }}</option>
-                  <option v-for="role in roles" :key="role.id" :value="role.id">
-                    {{ role.name }}
-                  </option>
-                </select>
-                <Icon
-                  name="mdi:chevron-down"
-                  class="field__chevron"
-                  size="17"
-                />
-              </div>
-              <span v-if="errors.role_id" class="field__error">{{
-                errors.role_id
-              }}</span>
-            </div>
+            <SharedUiFormBaseSelect
+              v-model="form.role_id"
+              :label="$t('staff.assignRole')"
+              icon-left="mdi:shield-outline"
+              :error="!!errors.role_id"
+              :error-message="errors.role_id"
+              :options="[
+                { label: $t('staff.noRole'), value: '' },
+                ...roles.map((r) => ({ label: r.name, value: r.id })),
+              ]"
+              size="md"
+              @change="errors.role_id = ''"
+            />
 
             <!-- Permission preview for selected role -->
             <Transition name="fade">
@@ -205,70 +169,35 @@
           </p>
 
           <div class="fields">
-            <div class="field" :class="{ 'field--error': errors.password }">
-              <label class="field__label">
-                {{ $t("auth.password") }}
-                <span v-if="isNew">*</span>
-              </label>
-              <div class="field__wrap">
-                <Icon name="mdi:lock-outline" class="field__icon" size="17" />
-                <input
-                  v-model="form.password"
-                  :type="showPassword ? 'text' : 'password'"
-                  class="field__input"
-                  :placeholder="
-                    isNew
-                      ? $t('staff.passwordPlaceholder')
-                      : $t('staff.passwordOptional')
-                  "
-                  autocomplete="new-password"
-                  @input="errors.password = ''"
-                />
-                <button
-                  type="button"
-                  class="field__toggle"
-                  tabindex="-1"
-                  @click="showPassword = !showPassword"
-                >
-                  <Icon
-                    :name="
-                      showPassword ? 'mdi:eye-off-outline' : 'mdi:eye-outline'
-                    "
-                    size="17"
-                  />
-                </button>
-              </div>
-              <span v-if="errors.password" class="field__error">{{
-                errors.password
-              }}</span>
-            </div>
+            <SharedUiFormBaseInput
+              v-model="form.password"
+              :label="$t('auth.password') + (isNew ? ' *' : '')"
+              :placeholder="
+                isNew
+                  ? $t('staff.passwordPlaceholder')
+                  : $t('staff.passwordOptional')
+              "
+              icon-left="mdi:lock-outline"
+              type="password"
+              :error="!!errors.password"
+              :error-message="errors.password"
+              autocomplete="new-password"
+              size="md"
+              @update:model-value="errors.password = ''"
+            />
 
-            <div
-              class="field"
-              :class="{ 'field--error': errors.password_confirm }"
-            >
-              <label class="field__label">{{
-                $t("staff.confirmPassword")
-              }}</label>
-              <div class="field__wrap">
-                <Icon
-                  name="mdi:lock-check-outline"
-                  class="field__icon"
-                  size="17"
-                />
-                <input
-                  v-model="form.password_confirm"
-                  :type="showPassword ? 'text' : 'password'"
-                  class="field__input"
-                  :placeholder="$t('staff.confirmPasswordPlaceholder')"
-                  autocomplete="new-password"
-                  @input="errors.password_confirm = ''"
-                />
-              </div>
-              <span v-if="errors.password_confirm" class="field__error">{{
-                errors.password_confirm
-              }}</span>
-            </div>
+            <SharedUiFormBaseInput
+              v-model="form.password_confirm"
+              :label="$t('staff.confirmPassword')"
+              :placeholder="$t('staff.confirmPasswordPlaceholder')"
+              icon-left="mdi:lock-check-outline"
+              type="password"
+              :error="!!errors.password_confirm"
+              :error-message="errors.password_confirm"
+              autocomplete="new-password"
+              size="md"
+              @update:model-value="errors.password_confirm = ''"
+            />
           </div>
         </div>
 
@@ -278,7 +207,7 @@
             variant="outline"
             @click="navigateTo('/dashboard/staff')"
           >
-            {{ $t("common.cancel") }}
+            {{ $t("cancel") }}
           </SharedUiButtonBase>
           <SharedUiButtonBase
             variant="primary"
@@ -286,7 +215,7 @@
             icon-left="mdi:content-save-outline"
             @click="submit"
           >
-            {{ isNew ? $t("staff.createStaff") : $t("common.save") }}
+            {{ isNew ? $t("staff.createStaff") : $t("save") }}
           </SharedUiButtonBase>
         </div>
       </div>
@@ -387,7 +316,6 @@ const selectedRole = computed(
 
 const selectedRoleName = computed(() => selectedRole.value?.name ?? "");
 
-// Group permissions by module for the preview panel
 const permissionsByModule = computed(() => {
   if (!selectedRole.value) return {};
   const perms = selectedRole.value.permissions ?? {};
@@ -442,7 +370,6 @@ const submit = async () => {
       role_id: form.role_id || null,
       is_active: form.is_active,
     };
-    // Only send password if provided
     if (form.password.trim()) {
       payload.password = form.password.trim();
     }
@@ -591,7 +518,9 @@ const submit = async () => {
     margin-top: 1px;
   }
 
+  /* ── Input wrap ── */
   &__wrap {
+    position: relative; /* ensures absolute children are contained */
     display: flex;
     align-items: center;
     background: var(--bg-elevated);
@@ -605,18 +534,25 @@ const submit = async () => {
     }
 
     &--select {
-      position: relative;
+      /* chevron positioned absolutely on the end side */
     }
   }
 
+  /* ── Icon — pinned to the start side of the wrap ── */
   &__icon {
+    /* Use absolute positioning so the icon floats over the input */
     position: absolute;
     inset-inline-start: 0.75rem;
+    top: 50%;
+    transform: translateY(-50%);
     color: var(--text-muted);
     pointer-events: none;
     flex-shrink: 0;
+    line-height: 0; /* prevent extra height from icon component */
+    z-index: 1;
   }
 
+  /* ── Input — left pad to clear the icon ── */
   &__input {
     flex: 1;
     background: transparent;
@@ -625,39 +561,59 @@ const submit = async () => {
     color: var(--text-primary);
     font-size: 0.9rem;
     font-family: inherit;
+    /* Always leave start-side room for the icon */
     padding: 0.6875rem 0.75rem 0.6875rem 2.5rem;
     width: 100%;
+    min-width: 0;
 
     &::placeholder {
       color: var(--text-muted);
     }
 
+    /* Select needs end-side room for chevron too */
     &--select {
       appearance: none;
       cursor: pointer;
-      padding-inline-end: 2rem;
+      padding-inline-end: 2.25rem;
+    }
+
+    /* Password with visibility toggle needs end-side room */
+    &--with-toggle {
+      padding-inline-end: 2.5rem;
     }
   }
 
+  /* ── Password visibility toggle ── */
   &__toggle {
+    position: absolute;
+    inset-inline-end: 0.5rem;
+    top: 50%;
+    transform: translateY(-50%);
     background: none;
     border: none;
     cursor: pointer;
     color: var(--text-muted);
-    padding: 0 0.75rem;
+    padding: 0.2rem;
     display: flex;
     align-items: center;
+    border-radius: 4px;
     transition: color 0.15s;
+    z-index: 1;
+
     &:hover {
       color: var(--text-primary);
     }
   }
 
+  /* ── Select chevron ── */
   &__chevron {
     position: absolute;
     inset-inline-end: 0.75rem;
+    top: 50%;
+    transform: translateY(-50%);
     color: var(--text-muted);
     pointer-events: none;
+    z-index: 1;
   }
 
   &__error {
@@ -669,7 +625,7 @@ const submit = async () => {
   }
 }
 
-/* Toggle switch */
+/* ── Active / status toggle switch ── */
 .toggle {
   width: 44px;
   height: 24px;
@@ -686,20 +642,34 @@ const submit = async () => {
     border-color: var(--primary);
   }
 
+  /* Knob */
   &__knob {
     position: absolute;
     top: 2px;
-    inset-inline-start: 2px;
+    /* LTR: start from left */
+    left: 2px;
     width: 16px;
     height: 16px;
     border-radius: 50%;
     background: white;
     transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1);
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+
+    /* RTL: mirror — start from right */
+    [dir="rtl"] & {
+      left: auto;
+      right: 2px;
+    }
   }
 
+  /* LTR on: slide right */
   &--on &__knob {
     transform: translateX(20px);
+  }
+
+  /* RTL on: slide left */
+  [dir="rtl"] &--on &__knob {
+    transform: translateX(-20px);
   }
 }
 

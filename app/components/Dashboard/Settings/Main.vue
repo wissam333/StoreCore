@@ -176,22 +176,26 @@ const currencyOptions = [
 // ── License key ────────────────────────────────────────────────────────────
 const loadLicenseKey = async () => {
   try {
-    if (
-      typeof window !== "undefined" &&
-      window.__ELECTRON__ &&
-      window.license?.getKey
-    ) {
-      licenseKey.value = (await window.license.getKey()) ?? "";
-      return;
+    // Electron
+    if (typeof window !== "undefined" && window.__ELECTRON__) {
+      if (window.license?.getKey) {
+        const k = await window.license.getKey();
+        licenseKey.value = k ?? "";
+        return;
+      }
     }
+
+    // Native mobile
     if (
       typeof window !== "undefined" &&
       window?.Capacitor?.isNativePlatform?.()
     ) {
-      const { getKey } = useMobileLicense();
-      licenseKey.value = (await getKey()) ?? "";
+      const { Preferences } = await import("@capacitor/preferences");
+      const r = await Preferences.get({ key: "license_key" });
+      licenseKey.value = r?.value?.trim() ?? "";
       return;
     }
+
     licenseKey.value = "";
   } catch (err) {
     console.warn("[settings] loadLicenseKey failed:", err?.message ?? err);
@@ -216,12 +220,22 @@ const ensureDefaultsWritten = async (key) => {
 const load = async () => {
   const r = await getSettings();
   if (r.ok) {
+    // Never pull license_key from SQLite into reactive state
     const { license_key, ...rest } = r.data ?? {};
     Object.assign(s, rest);
   }
   if (!s.sync_base?.trim()) s.sync_base = DEFAULT_SYNC_BASE;
+
+  // Load license key from authoritative source (license.json on Electron, Preferences on mobile)
   await loadLicenseKey();
-  await ensureDefaultsWritten(licenseKey.value);
+
+  // Only write defaults — never overwrite the license key back to SQLite
+  if (!s.sync_base?.trim()) {
+    s.sync_base = DEFAULT_SYNC_BASE;
+    await setSetting({ key: "sync_base", value: DEFAULT_SYNC_BASE }).catch(
+      () => {},
+    );
+  }
 };
 
 // ── Actions ────────────────────────────────────────────────────────────────

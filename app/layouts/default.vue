@@ -181,7 +181,7 @@
 <script setup>
 const { init, primaryColor } = useTheme();
 const { setLocale, locale } = useI18n();
-
+const { logout, can } = useAuth();
 onMounted(() => {
   init();
   const saved = localStorage.getItem("locale");
@@ -230,11 +230,8 @@ const openLogoutConfirm = () => {
 const handleLogout = async () => {
   isLoggingOut.value = true;
   try {
-    localStorage.removeItem("userInfo");
-    localStorage.removeItem("role");
-    useAuth().value.isAuthenticated = false;
-    useUserInfo().value = null;
-    await navigateTo("/");
+    console.log("logging out.....");
+    await logout(); // clears session + Preferences + navigates to /auth/login
   } finally {
     isLoggingOut.value = false;
     showLogoutModal.value = false;
@@ -246,88 +243,129 @@ const handleUserClick = () => {};
 const handleSearch = () => {};
 const handleMenuItemClick = () => {};
 
-const menuItems = computed(() => [
-  {
+const menuItems = computed(() => {
+  const items = [];
+
+  // Dashboard — always visible
+  items.push({
     key: "dashboard",
     label: "sidebar.dashboard",
     icon: "mdi:view-dashboard-outline",
     to: "/dashboard",
-  },
-  {
-    key: "orders",
-    label: "sidebar.orders",
-    icon: "mdi:receipt-text-outline",
-    to: "/dashboard/orders",
-  },
-  {
-    key: "products",
-    label: "sidebar.products",
-    icon: "mdi:package-variant-closed",
-    children: [
+  });
+
+  // Orders
+  if (can("orders.view").value) {
+    items.push({
+      key: "orders",
+      label: "sidebar.orders",
+      icon: "mdi:receipt-text-outline",
+      to: "/dashboard/orders",
+    });
+  }
+
+  // Products — show parent only if user can view products
+  if (can("products.view").value) {
+    const productChildren = [
       {
         key: "products-list",
         label: "sidebar.allProducts",
         icon: "mdi:format-list-bulleted",
         to: "/dashboard/products",
       },
-      {
+    ];
+
+    if (can("products.add").value) {
+      productChildren.push({
         key: "products-new",
         label: "sidebar.addProduct",
         icon: "mdi:plus-circle-outline",
         to: "/dashboard/products/new",
-      },
-      {
+      });
+    }
+
+    if (can("products.edit").value) {
+      productChildren.push({
         key: "products-categories",
         label: "sidebar.categories",
         icon: "mdi:tag-multiple-outline",
         to: "/dashboard/products/categories",
-      },
-    ],
-  },
-  {
-    key: "customers",
-    label: "sidebar.customers",
-    icon: "mdi:account-group-outline",
-    to: "/dashboard/customers",
-  },
-  {
-    key: "dues",
-    label: "sidebar.dues",
-    icon: "mdi:cash-clock",
-    to: "/dashboard/dues",
-  },
-  {
-    key: "reports",
-    label: "sidebar.reports",
-    icon: "mdi:chart-bar",
-    children: [
-      {
-        key: "reports-revenue",
-        label: "sidebar.revenueReport",
-        icon: "mdi:cash-multiple",
-        to: "/dashboard/reports/revenue",
-      },
-      {
-        key: "reports-dues",
-        label: "sidebar.duesReport",
-        icon: "mdi:currency-usd-off",
-        to: "/dashboard/reports/dues",
-      },
-    ],
-  },
-  {
-    key: "staff",
-    label: "sidebar.staff",
-    icon: "mdi:doctor",
-    to: "/dashboard/staff",
-  },
-  {
-    key: "settings",
-    label: "sidebar.settings",
-    icon: "mdi:cog-outline",
-    to: "/dashboard/settings",
-  },
-]);
+      });
+    }
+
+    items.push({
+      key: "products",
+      label: "sidebar.products",
+      icon: "mdi:package-variant-closed",
+      children: productChildren,
+    });
+  }
+
+  // Customers
+  if (can("customers.view").value) {
+    items.push({
+      key: "customers",
+      label: "sidebar.customers",
+      icon: "mdi:account-group-outline",
+      to: "/dashboard/customers",
+    });
+  }
+
+  // Dues
+  if (can("dues.view").value) {
+    items.push({
+      key: "dues",
+      label: "sidebar.dues",
+      icon: "mdi:cash-clock",
+      to: "/dashboard/dues",
+    });
+  }
+
+  // Reports — both children need reports.view
+  if (can("reports.view").value) {
+    items.push({
+      key: "reports",
+      label: "sidebar.reports",
+      icon: "mdi:chart-bar",
+      children: [
+        {
+          key: "reports-revenue",
+          label: "sidebar.revenueReport",
+          icon: "mdi:cash-multiple",
+          to: "/dashboard/reports/revenue",
+        },
+        {
+          key: "reports-dues",
+          label: "sidebar.duesReport",
+          icon: "mdi:currency-usd-off",
+          to: "/dashboard/reports/dues",
+        },
+      ],
+    });
+  }
+
+  // Staff
+  if (can("staff.view").value) {
+    items.push({
+      key: "staff",
+      label: "sidebar.staff",
+      icon: "mdi:doctor",
+      to: "/dashboard/staff",
+    });
+  }
+
+  // Settings
+  if (can("settings.view").value) {
+    items.push({
+      key: "settings",
+      label: "sidebar.settings",
+      icon: "mdi:cog-outline",
+      to: "/dashboard/settings",
+    });
+  }
+
+  return items;
+});
 
 const separatorIcon = computed(() =>
   locale.value === "ar" ? "mdi:chevron-left" : "mdi:chevron-right",

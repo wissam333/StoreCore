@@ -82,7 +82,6 @@ contextBridge.exposeInMainWorld("auth", {
   getSession: (token) => invoke("auth:getSession", { token }),
   checkPermission: (token, permission) =>
     invoke("auth:checkPermission", { token, permission }),
-
   // Password management
   changePassword: (token, currentPassword, newPassword) =>
     invoke("auth:changePassword", { token, currentPassword, newPassword }),
@@ -107,9 +106,11 @@ contextBridge.exposeInMainWorld("license", {
   deactivate: () => ipcRenderer.invoke("license:deactivate"),
   getKey: () => ipcRenderer.invoke("license:getKey"),
   getMachineId: () => ipcRenderer.invoke("license:getMachineId"),
+  verify: () => ipcRenderer.invoke("license:verify"),
   onActivated: () => ipcRenderer.send("license:activated"),
+  onCheck: (cb) => ipcRenderer.on("license:check", cb),
+  revoked: () => ipcRenderer.send("license:revoked"),
 });
-
 contextBridge.exposeInMainWorld("electronAPI", {
   nativeFetch: (url) => ipcRenderer.invoke("native-fetch", url),
   p2pStartServer: () => ipcRenderer.invoke("p2p:start-server"),

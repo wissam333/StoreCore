@@ -4,8 +4,11 @@
 // Session token is persisted in @capacitor/preferences so the user
 // stays logged in across app restarts.
 //
-// Biometric package: @capgo/capacitor-native-biometric
-// Install: npm install @capgo/capacitor-native-biometric
+// CHANGES:
+// - Removed all fingerprint/biometric code (no longer needed)
+// - restoreSession now fully rebuilds the in-memory session from Preferences
+//   so the user doesn't have to log in every time they open the app
+// - logout properly clears both Preferences and the in-memory sessions Map
 
 import { getMobileDb } from "./useMobileDb";
 import { generateUuid } from "./useUuid";
@@ -44,82 +47,72 @@ export const verifyPassword = async (plain, stored) => {
 
 // ── Preferences keys ───────────────────────────────────────────────────────
 const PREF_TOKEN = "auth_token";
-const PREF_USERNAME = "auth_username"; // saved for biometric re-auth
+const PREF_SESSION = "auth_session"; // persisted full session payload
 
 // ── In-memory sessions ─────────────────────────────────────────────────────
+// Keyed by token string. Rebuilt from Preferences on restoreSession.
 const sessions = new Map();
 
 // ── Preferences helpers ────────────────────────────────────────────────────
-const savePrefs = async (token, username) => {
+const savePrefs = async (token, sessionPayload) => {
   try {
     const { Preferences } = await import("@capacitor/preferences");
     await Preferences.set({ key: PREF_TOKEN, value: token });
-    await Preferences.set({ key: PREF_USERNAME, value: username });
-  } catch {}
+    // Persist the full session (without password) so we can restore it
+    // without hitting the DB when the app is reopened
+    await Preferences.set({
+      key: PREF_SESSION,
+      value: JSON.stringify(sessionPayload),
+    });
+  } catch (e) {
+    console.warn("[mobileAuth] savePrefs error:", e?.message);
+  }
 };
 
 const loadPrefs = async () => {
   try {
     const { Preferences } = await import("@capacitor/preferences");
-    const [t, u] = await Promise.all([
+    const [t, s] = await Promise.all([
       Preferences.get({ key: PREF_TOKEN }),
-      Preferences.get({ key: PREF_USERNAME }),
+      Preferences.get({ key: PREF_SESSION }),
     ]);
-    return { token: t.value ?? null, username: u.value ?? null };
+    return {
+      token: t.value ?? null,
+      session: s.value ? JSON.parse(s.value) : null,
+    };
   } catch {
-    return { token: null, username: null };
+    return { token: null, session: null };
   }
 };
 
 const clearPrefs = async () => {
   try {
     const { Preferences } = await import("@capacitor/preferences");
-    await Preferences.remove({ key: PREF_TOKEN });
-    await Preferences.remove({ key: PREF_USERNAME });
+    await Promise.all([
+      Preferences.remove({ key: PREF_TOKEN }),
+      Preferences.remove({ key: PREF_SESSION }),
+    ]);
   } catch {}
-};
-
-// ── Biometric helpers ──────────────────────────────────────────────────────
-// Returns true if biometric hardware exists and is enrolled on the device.
-const isBiometricAvailable = async () => {
-  try {
-    const { NativeBiometric } = await import(
-      "@capgo/capacitor-native-biometric"
-    );
-    const result = await NativeBiometric.isAvailable();
-    return result.isAvailable === true;
-  } catch {
-    return false;
-  }
-};
-
-// Triggers the native biometric prompt.
-// Resolves if authenticated, throws if cancelled or failed.
-const triggerBiometric = async () => {
-  const { NativeBiometric } = await import("@capgo/capacitor-native-biometric");
-  await NativeBiometric.verifyIdentity({
-    reason: "Confirm your identity to log in",
-    title: "Biometric Login",
-    subtitle: "Use your fingerprint or face to continue",
-    cancelTitle: "Use Password",
-  });
 };
 
 // ── Session builder ────────────────────────────────────────────────────────
 const buildSession = (staffRow, permissions) => {
   const token = randomHex(32);
-  const session = {
-    token,
+  const staffPayload = {
     id: staffRow.id,
     full_name: staffRow.full_name,
     username: staffRow.username,
     role: staffRow.role,
     role_id: staffRow.role_id,
     permissions,
+  };
+  const session = {
+    token,
+    ...staffPayload,
     created_at: Date.now(),
   };
   sessions.set(token, session);
-  return session;
+  return { token, staff: staffPayload };
 };
 
 // ── Staff + permissions loader ─────────────────────────────────────────────
@@ -141,6 +134,30 @@ const loadStaffWithPermissions = async (username) => {
   try {
     permissions = JSON.parse(staff.role_permissions ?? "{}");
   } catch {}
+
+  // Fallback for admin accounts where role_id wasn't backfilled yet
+  const isAdmin =
+    staff.role === "admin" ||
+    staff.role === "Administrator" ||
+    staff.username === "admin";
+  const isEmpty = Object.keys(permissions).length === 0;
+  if (isAdmin && isEmpty) {
+    // Backfill role_id on the fly
+    const db2 = await getMobileDb();
+    const adminRole = (
+      await db2.query(
+        `SELECT id FROM roles WHERE name = 'Administrator' AND is_system = 1 LIMIT 1`,
+      )
+    ).values?.[0];
+    if (adminRole) {
+      await db2.run(
+        `UPDATE staff SET role_id = ?, role = 'Administrator', updated_at = datetime('now') WHERE username = ?`,
+        [adminRole.id, staff.username],
+      );
+    }
+    const { ADMIN_PERMISSIONS } = await import("./useMobileSchema");
+    permissions = ADMIN_PERMISSIONS;
+  }
 
   return { staff, permissions };
 };
@@ -177,127 +194,67 @@ export const useMobileAuth = () => {
         [staff.id],
       );
 
-      const session = buildSession(staff, permissions);
-      await savePrefs(session.token, staff.username);
+      const { token, staff: staffPayload } = buildSession(staff, permissions);
+      // Save full session to Preferences — enables auto-restore on next open
+      await savePrefs(token, staffPayload);
 
-      return {
-        ok: true,
-        token: session.token,
-        staff: {
-          id: session.id,
-          full_name: session.full_name,
-          username: session.username,
-          role: session.role,
-          role_id: session.role_id,
-          permissions: session.permissions,
-        },
-      };
+      return { ok: true, token, staff: staffPayload };
     } catch (err) {
       return { ok: false, error: err.message };
     }
   };
 
-  // ── loginWithFingerprint ─────────────────────────────────────────────────
-  // 1. Load saved username from Preferences
-  // 2. Check biometric is available on this device
-  // 3. Trigger native biometric prompt
-  // 4. On success → create session without password re-check
-  const loginWithFingerprint = async () => {
-    try {
-      const { username } = await loadPrefs();
-      if (!username)
-        return { ok: false, error: "No saved user for biometric login" };
-
-      // Check hardware availability
-      const available = await isBiometricAvailable();
-      if (!available)
-        return {
-          ok: false,
-          error: "Biometric authentication not available on this device",
-        };
-
-      // Trigger native prompt — throws on cancel/failure
-      await triggerBiometric();
-
-      // Biometric passed — load staff and create session
-      const result = await loadStaffWithPermissions(username);
-      if (!result) return { ok: false, error: "Account not found or disabled" };
-
-      const { staff, permissions } = result;
-      const db = await getMobileDb();
-      await db.run(
-        `UPDATE staff SET last_login = datetime('now') WHERE id = ?`,
-        [staff.id],
-      );
-
-      const session = buildSession(staff, permissions);
-      await savePrefs(session.token, staff.username);
-
-      return {
-        ok: true,
-        token: session.token,
-        staff: {
-          id: session.id,
-          full_name: session.full_name,
-          username: session.username,
-          role: session.role,
-          role_id: session.role_id,
-          permissions: session.permissions,
-        },
-      };
-    } catch (err) {
-      // NativeBiometric throws on cancel/failure
-      const msg = err.message ?? "";
-      return {
-        ok: false,
-        error: msg.toLowerCase().includes("cancel")
-          ? "cancel"
-          : msg || "Biometric authentication failed",
-      };
-    }
-  };
-
   // ── restoreSession ───────────────────────────────────────────────────────
+  // Called on app open. Loads the persisted session from Preferences and
+  // rebuilds the in-memory Map entry so all subsequent auth checks work.
+  // Returns { ok: true, token, staff } if a valid saved session exists,
+  // { ok: false } otherwise (user must log in).
   const restoreSession = async () => {
     try {
-      const { token, username } = await loadPrefs();
-      if (!token || !username) return { ok: false };
+      const { token, session } = await loadPrefs();
 
-      // Token still alive in this JS session (same WebView — rare after kill)
-      if (sessions.has(token)) {
-        const s = sessions.get(token);
-        return {
-          ok: true,
-          token,
-          staff: {
-            id: s.id,
-            full_name: s.full_name,
-            username: s.username,
-            role: s.role,
-            role_id: s.role_id,
-            permissions: s.permissions,
-          },
-        };
-      }
+      if (!token || !session) return { ok: false };
 
-      // App was killed — token gone from memory.
-      // Check if biometric is available so the login page can show the button.
-      const canUseBiometric = await isBiometricAvailable();
-      const staffExists = !!(await loadStaffWithPermissions(username));
-
-      if (!staffExists) {
+      // Verify the account still exists and is active in the DB
+      const result = await loadStaffWithPermissions(session.username);
+      if (!result) {
+        // Account deleted or deactivated — clear stale prefs
         await clearPrefs();
         return { ok: false };
       }
 
-      // Return hint — login page shows fingerprint button pre-filled
-      return { ok: false, canUseBiometric, username };
-    } catch {
+      // Rebuild in-memory session with latest permissions from DB
+      const { staff, permissions } = result;
+      const restoredSession = {
+        token,
+        id: staff.id,
+        full_name: staff.full_name,
+        username: staff.username,
+        role: staff.role,
+        role_id: staff.role_id,
+        permissions,
+        created_at: Date.now(),
+      };
+      sessions.set(token, restoredSession);
+
+      const staffPayload = {
+        id: restoredSession.id,
+        full_name: restoredSession.full_name,
+        username: restoredSession.username,
+        role: restoredSession.role,
+        role_id: restoredSession.role_id,
+        permissions: restoredSession.permissions,
+      };
+
+      return { ok: true, token, staff: staffPayload };
+    } catch (err) {
+      console.warn("[mobileAuth] restoreSession error:", err?.message);
       return { ok: false };
     }
   };
 
   // ── logout ───────────────────────────────────────────────────────────────
+  // Clears Preferences AND in-memory session Map. A real logout.
   const logout = async (token) => {
     if (token) sessions.delete(token);
     await clearPrefs();
@@ -636,7 +593,6 @@ export const useMobileAuth = () => {
 
   return {
     login,
-    loginWithFingerprint,
     restoreSession,
     logout,
     getSession,

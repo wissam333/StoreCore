@@ -103,7 +103,7 @@
               <button
                 v-if="!editingRole.is_system && editingRole.id"
                 class="role-action-btn role-action-btn--danger"
-                :title="$t('common.delete')"
+                :title="$t('delete')"
                 @click="confirmDeleteRole"
               >
                 <Icon name="mdi:trash-can-outline" size="16" />
@@ -116,7 +116,7 @@
                 size="sm"
                 @click="saveRole"
               >
-                {{ $t("common.save") }}
+                {{ $t("save") }}
               </SharedUiButtonBase>
             </div>
           </div>
@@ -235,7 +235,7 @@
             variant="outline"
             @click="showDeleteModal = false"
           >
-            {{ $t("common.cancel") }}
+            {{ $t("cancel") }}
           </SharedUiButtonBase>
           <SharedUiButtonBase
             variant="error"
@@ -243,7 +243,7 @@
             icon-left="mdi:trash-can-outline"
             @click="doDeleteRole"
           >
-            {{ $t("common.delete") }}
+            {{ $t("delete") }}
           </SharedUiButtonBase>
         </div>
       </template>
@@ -333,12 +333,10 @@ onMounted(load);
 // ── Select role ────────────────────────────────────────────────────────────
 const selectRole = (role) => {
   activeRoleId.value = role.id;
-  // Clone so edits don't mutate the list until saved
   editingRole.value = {
     id: role.id,
     name: role.name,
     is_system: role.is_system,
-    // Merge stored permissions with full schema — fills in any missing keys
     permissions: {
       ...buildEmptyPermissions(false),
       ...(role.permissions ?? {}),
@@ -402,18 +400,18 @@ const saveRole = async () => {
 
   saving.value = true;
   try {
+    const raw = toRaw(editingRole.value);
     const res = await saveRoleApi({
-      id: editingRole.value.id ?? undefined,
-      name: editingRole.value.name.trim(),
-      permissions: editingRole.value.permissions,
+      id: raw.id ?? undefined,
+      name: raw.name.trim(),
+      permissions: { ...toRaw(raw.permissions) },
     });
 
     if (res.ok) {
       $toast.success(t("staff.roleSaved"));
       await load();
-      // Re-select the saved role
       const saved = roles.value.find(
-        (r) => r.id === (res.id ?? editingRole.value.id),
+        (r) => r.id === (res.id ?? editingRole.value?.id),
       );
       if (saved) selectRole(saved);
     } else {
@@ -849,7 +847,7 @@ const doDeleteRole = async () => {
   }
 }
 
-/* Permission toggle (bigger than the active-toggle since it's the main control) */
+/* ── Permission toggle ── */
 .perm-toggle {
   width: 40px;
   height: 22px;
@@ -870,20 +868,34 @@ const doDeleteRole = async () => {
     cursor: not-allowed;
   }
 
+  /* Knob — LTR: slides right when on, RTL: slides left when on */
   &__knob {
     position: absolute;
     top: 2px;
-    inset-inline-start: 2px;
+    /* LTR default: start at left edge */
+    left: 2px;
     width: 14px;
     height: 14px;
     border-radius: 50%;
     background: white;
     transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+
+    /* RTL: mirror the knob to start from right edge */
+    [dir="rtl"] & {
+      left: auto;
+      right: 2px;
+    }
   }
 
+  /* LTR: slide right */
   &--on &__knob {
     transform: translateX(18px);
+  }
+
+  /* RTL: slide left (negative) */
+  [dir="rtl"] &--on &__knob {
+    transform: translateX(-18px);
   }
 }
 

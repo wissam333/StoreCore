@@ -4,12 +4,15 @@
 // Capacitor bundles public/ into the APK — works fully offline on mobile.
 // Electron/web also work since they serve from the same public/ folder.
 //
-// Preferences stores the DB as base64 under key "sqlitedb".
+// FIX: Removed debounced save — every write now triggers an immediate
+// synchronous persist to Preferences. This eliminates the 600ms race
+// condition where killing the app before the debounce fires would wipe
+// all data entered since the last save.
 
 let _db = null;
 let _initPromise = null;
-let _saveTimer = null;
 let _SQL = null;
+let _saving = false; // guard against concurrent saves
 
 const PREF_KEY = "sqlitedb";
 
@@ -51,30 +54,48 @@ const loadSQL = () => {
   });
 };
 
-// ── Save DB bytes → base64 → Preferences (debounced) ─────────────────────────
-const scheduleSave = (rawDb) => {
-  if (_saveTimer) clearTimeout(_saveTimer);
-  _saveTimer = setTimeout(async () => {
-    try {
-      const bytes = rawDb.export();
-      const b64 = btoa(String.fromCharCode(...bytes));
-      await prefSet(PREF_KEY, b64);
-    } catch (e) {
-      console.warn("[mobileDb] save error:", e?.message);
+// ── Save DB bytes → base64 → Preferences (immediate, no debounce) ─────────────
+// Called after every write. Using a simple mutex (_saving) so rapid
+// back-to-back writes queue one additional save rather than spawning many.
+let _pendingSave = false;
+
+// REPLACE persistDb with this — uses chunked btoa, no stack overflow
+const persistDb = async (rawDb) => {
+  if (_saving) {
+    _pendingSave = true;
+    return;
+  }
+  _saving = true;
+  try {
+    const bytes = rawDb.export();
+    // Chunked base64 encoding — safe for any DB size
+    let b64 = "";
+    const CHUNK = 8192;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      b64 += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
     }
-  }, 600);
+    await prefSet(PREF_KEY, btoa(b64));
+  } catch (e) {
+    console.warn("[mobileDb] persist error:", e?.message);
+  } finally {
+    _saving = false;
+    if (_pendingSave) {
+      _pendingSave = false;
+      persistDb(rawDb);
+    }
+  }
 };
 
 // ── Wrapper — identical API to useMobileStore expectations ────────────────────
 const wrap = (rawDb) => ({
   execute: async (sql) => {
     rawDb.run(sql);
-    scheduleSave(rawDb);
+    await persistDb(rawDb); // immediate persist
     return { changes: {} };
   },
   run: async (sql, params = []) => {
     rawDb.run(sql, params);
-    scheduleSave(rawDb);
+    await persistDb(rawDb); // immediate persist
     return { changes: { changes: rawDb.getRowsModified() } };
   },
   query: async (sql, params = []) => {
@@ -87,6 +108,25 @@ const wrap = (rawDb) => ({
   },
   _raw: rawDb,
 });
+
+export const flushMobileDbSync = () => {
+  if (!_db?._raw) return;
+  try {
+    const bytes = _db._raw.export();
+    let b64 = "";
+    const CHUNK = 8192;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      b64 += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+    }
+    const encoded = btoa(b64);
+    // Fire-and-forget but don't await — gets queued before thread dies
+    import("@capacitor/preferences").then(({ Preferences }) => {
+      Preferences.set({ key: PREF_KEY, value: encoded });
+    });
+  } catch (e) {
+    console.warn("[mobileDb] sync flush error:", e?.message);
+  }
+};
 
 // ── Main export ───────────────────────────────────────────────────────────────
 export const getMobileDb = async () => {
@@ -104,6 +144,7 @@ export const getMobileDb = async () => {
         const bytes = new Uint8Array(binary.length);
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
         rawDb = new SQL.Database(bytes);
+        // ↑ This part is actually fine already — charCodeAt loop is safe
       } else {
         rawDb = new SQL.Database();
       }
@@ -122,7 +163,8 @@ export const getMobileDb = async () => {
 };
 
 export const resetMobileDb = () => {
-  if (_saveTimer) clearTimeout(_saveTimer);
+  _saving = false;
+  _pendingSave = false;
   try {
     _db?._raw?.close();
   } catch {}
@@ -130,13 +172,23 @@ export const resetMobileDb = () => {
   _initPromise = null;
 };
 
+// flushMobileDb: kept for compatibility (app pause event in app.vue).
+// With immediate saves this is mostly a no-op but still exports bytes as a
+// safety net for the "pause" event.
 export const flushMobileDb = async () => {
   if (!_db?._raw) return;
-  if (_saveTimer) {
-    clearTimeout(_saveTimer);
-    _saveTimer = null;
+  // Wait for any in-flight save to finish
+  let retries = 0;
+  while (_saving && retries < 20) {
+    await new Promise((r) => setTimeout(r, 50));
+    retries++;
   }
-  const bytes = _db._raw.export();
-  const b64 = btoa(String.fromCharCode(...bytes));
-  await prefSet(PREF_KEY, b64);
+  // Do one final explicit save regardless
+  try {
+    const bytes = _db._raw.export();
+    const b64 = btoa(String.fromCharCode(...bytes));
+    await prefSet(PREF_KEY, b64);
+  } catch (e) {
+    console.warn("[mobileDb] flush error:", e?.message);
+  }
 };
