@@ -11,17 +11,14 @@ export const useProductCategories = () => useState(() => []);
 export const useUserInfo = () => useState(() => []);
 export const useAccountType = () => useState(() => []);
 export const useLang = () => useState(() => []);
-export const useSyncTick = () => useState('syncTick', () => 0);
+export const useSyncTick = () => useState("syncTick", () => 0);
 export const useCart = () =>
   useState(() => ({
     items: new Array(),
     totalQty: 0,
     totalPrice: 0,
   }));
-export const useAuth = () =>
-  useState(() => ({
-    isAuthenticated: false,
-  }));
+
 export const useImageLouded = () =>
   useState(() => ({
     loaded: false,

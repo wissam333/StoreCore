@@ -33,7 +33,7 @@ contextBridge.exposeInMainWorld("store", {
   updateOrderPayment: (opts) => invoke("store:updateOrderPayment", opts),
   deleteOrder: (id) => invoke("store:deleteOrder", id),
 
-  // ── Order Payments (new) ─────────────────────────────────────────────────
+  // Order Payments
   getOrderPayments: (orderId) => invoke("store:getOrderPayments", orderId),
   addOrderPayment: (opts) => invoke("store:addOrderPayment", opts),
   deleteOrderPayment: (paymentId) =>
@@ -46,7 +46,7 @@ contextBridge.exposeInMainWorld("store", {
   markDuePaid: (id) => invoke("store:markDuePaid", id),
   deleteDue: (id) => invoke("store:deleteDue", id),
 
-  // Staff
+  // Staff (legacy generic CRUD — kept for backwards compat)
   getStaff: (opts) => invoke("store:getStaff", opts),
   saveStaff: (s) => invoke("store:saveStaff", s),
   deleteStaff: (id) => invoke("store:deleteStaff", id),
@@ -70,6 +70,36 @@ contextBridge.exposeInMainWorld("store", {
   // P2P sync
   getRawTable: (table) => invoke("store:getRawTable", table),
   getAllOrderItems: () => invoke("store:getAllOrderItems"),
+});
+
+// ── Auth bridge ──────────────────────────────────────────────────────────────
+// The renderer never touches the session token directly — it only passes it
+// back to these calls. The token is held in a Pinia store (memory only).
+contextBridge.exposeInMainWorld("auth", {
+  // Login / logout
+  login: (credentials) => invoke("auth:login", credentials),
+  logout: (token) => invoke("auth:logout", { token }),
+  getSession: (token) => invoke("auth:getSession", { token }),
+  checkPermission: (token, permission) =>
+    invoke("auth:checkPermission", { token, permission }),
+
+  // Password management
+  changePassword: (token, currentPassword, newPassword) =>
+    invoke("auth:changePassword", { token, currentPassword, newPassword }),
+  resetPassword: (token, staffId, newPassword) =>
+    invoke("auth:resetPassword", { token, staffId, newPassword }),
+
+  // Roles (admin only)
+  getRoles: (token) => invoke("auth:getRoles", { token }),
+  saveRole: (token, role) => invoke("auth:saveRole", { token, role }),
+  deleteRole: (token, roleId) => invoke("auth:deleteRole", { token, roleId }),
+
+  // Staff management (admin only — uses auth layer, not raw store:saveStaff)
+  getStaffWithRoles: (token, search) =>
+    invoke("auth:getStaffWithRoles", { token, search }),
+  saveStaff: (token, staff) => invoke("auth:saveStaff", { token, staff }),
+  deleteStaff: (token, staffId) =>
+    invoke("auth:deleteStaff", { token, staffId }),
 });
 
 contextBridge.exposeInMainWorld("license", {

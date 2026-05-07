@@ -9,7 +9,6 @@ export default defineNuxtPlugin((nuxtApp) => {
       if (Date.now() - parseInt(startActivity) > threeHours) {
         localStorage.clear();
         localStorage.setItem("startActivity", Date.now().toString());
-        useAuth().value.isAuthenticated = false;
         useToken().value = null;
         useMainToken().value = null;
         useUserInfo().value = null;
@@ -25,13 +24,11 @@ export default defineNuxtPlugin((nuxtApp) => {
         : null;
 
     if (token && userInfo && role) {
-      useAuth().value.isAuthenticated = true;
       useToken().value = token;
       useMainToken().value = token;
       useUserInfo().value = userInfo;
       useRole().value = role;
     } else {
-      useAuth().value.isAuthenticated = false;
       useToken().value = null;
       useMainToken().value = null;
       useUserInfo().value = null;

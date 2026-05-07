@@ -31,8 +31,8 @@
               isSyncing
                 ? 'mdi:sync'
                 : isOnline
-                  ? 'mdi:cloud-check-outline'
-                  : 'mdi:cloud-off-outline'
+                ? 'mdi:cloud-check-outline'
+                : 'mdi:cloud-off-outline'
             "
             size="16"
             :class="{ spin: isSyncing }"
@@ -206,9 +206,9 @@ const currentUser = computed(
 );
 
 const roleLabel = (role) =>
-  ({ admin: "مدير", cashier: "كاشير", manager: "مشرف" })[role] ??
+  ({ admin: "مدير", cashier: "كاشير", manager: "مشرف" }[role] ??
   role ??
-  "Staff";
+  "Staff");
 
 const navbarUser = computed(() => ({
   name: currentUser.value?.full_name ?? "Admin",
@@ -314,6 +314,12 @@ const menuItems = computed(() => [
         to: "/dashboard/reports/dues",
       },
     ],
+  },
+  {
+    key: "staff",
+    label: "sidebar.staff",
+    icon: "mdi:doctor",
+    to: "/dashboard/staff",
   },
   {
     key: "settings",
@@ -571,9 +577,7 @@ onUnmounted(() => window.removeEventListener("resize", checkMobile));
 <style lang="scss">
 .page-enter-active,
 .page-leave-active {
-  transition:
-    opacity 0.25s ease,
-    transform 0.25s ease;
+  transition: opacity 0.25s ease, transform 0.25s ease;
 }
 .page-enter-from {
   opacity: 0;

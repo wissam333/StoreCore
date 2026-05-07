@@ -391,5 +391,124 @@
   "cameraNotAvailable": "Camera not available.",
   "cameraPermissionDenied": "Camera permission denied.",
   "cameraOpenFailed": "Could not open camera.",
-  "scanned": "Scanned"
+  "scanned": "Scanned",
+  "auth": {
+    "subtitle": "Staff Login",
+    "username": "Username",
+    "usernamePlaceholder": "Enter your username",
+    "password": "Password",
+    "passwordPlaceholder": "Enter your password",
+    "showPassword": "Show password",
+    "hidePassword": "Hide password",
+    "loginButton": "Sign In",
+    "fingerprintLogin": "Sign in with Fingerprint",
+    "fingerprintFailed": "Biometric authentication failed",
+    "invalidCredentials": "Invalid username or password",
+    "footer": "Access restricted to authorised staff only."
+  },
+  "staff": {
+    "addStaff": "Add Staff",
+    "editStaff": "Edit Staff",
+    "addStaffSubtitle": "Create a new staff account",
+    "manageRoles": "Manage Roles",
+    "rolesSubtitle": "Define what each role can access",
+    "newRole": "New Role",
+    "roleNamePlaceholder": "e.g. Cashier, Supervisor",
+    "systemRole": "System Role",
+    "selectOrCreateRole": "Select a role or create a new one",
+    "permissionsPreview": "Permissions preview",
+    "permissionsEnabled": "permissions enabled",
+    "assignRole": "Assign Role",
+    "identity": "Identity",
+    "fullName": "Full name",
+    "fullNamePlaceholder": "e.g. Wissam Hassan",
+    "username": "Username",
+    "usernamePlaceholder": "e.g. wissam",
+    "namePlaceholder": "Staff name",
+    "phone": "Phone",
+    "phonePlaceholder": "+963...",
+    "email": "Email",
+    "emailPlaceholder": "optional",
+    "status": "Status",
+    "activeHint": "Inactive staff cannot log in",
+    "role": "Role",
+    "setPassword": "Set Password",
+    "changePassword": "Change Password",
+    "passwordLeaveBlank": "Leave blank to keep the current password.",
+    "passwordPlaceholder": "Min. 4 characters",
+    "passwordOptional": "Leave blank to keep current",
+    "confirmPassword": "Confirm password",
+    "confirmPasswordPlaceholder": "Repeat password",
+    "createStaff": "Create Staff",
+    "active": "Active",
+    "inactive": "Inactive",
+    "noRole": "No role",
+    "notFound": "Staff member not found",
+    "created": "Staff member created",
+    "updated": "Staff member updated",
+    "roleSaved": "Role saved",
+    "deleteRoleTitle": "Delete Role",
+    "deleteRoleConfirm": "Are you sure you want to delete \"{name}\"?",
+    "deleteRoleWarning": "Staff assigned to this role will lose their permissions.",
+    "permissions": "Permissions",
+    "allowAll": "Allow all",
+    "denyAll": "Deny all",
+    "toggleModule": "Toggle all in module",
+    "on": "ON",
+    "off": "OFF",
+    "errors": {
+      "nameRequired": "Full name is required",
+      "usernameRequired": "Username is required",
+      "passwordRequired": "Password is required for new staff",
+      "passwordTooShort": "Password must be at least 4 characters",
+      "passwordMismatch": "Passwords do not match",
+      "roleNameRequired": "Role name is required"
+    }
+  },
+  "permModules": {
+    "products": "Products",
+    "orders": "Orders",
+    "customers": "Customers",
+    "dues": "Dues",
+    "reports": "Reports",
+    "settings": "Settings",
+    "staff": "Staff"
+  },
+  "permDesc": {
+    "products": {
+      "view": "Browse and search products",
+      "add": "Create new products",
+      "edit": "Modify existing products",
+      "delete": "Remove products"
+    },
+    "orders": {
+      "view": "View order history",
+      "add": "Create new orders",
+      "edit": "Modify orders",
+      "delete": "Delete orders"
+    },
+    "customers": {
+      "view": "Browse customer list",
+      "add": "Add new customers",
+      "edit": "Edit customer info",
+      "delete": "Remove customers"
+    },
+    "dues": {
+      "view": "View dues",
+      "add": "Create dues",
+      "edit": "Edit dues",
+      "delete": "Delete dues"
+    },
+    "reports": {
+      "view": "Access reports"
+    },
+    "settings": {
+      "view": "View settings",
+      "edit": "Change settings"
+    },
+    "staff": {
+      "view": "View staff list",
+      "manage": "Full staff & roles management"
+    }
+  }
 }

@@ -3,6 +3,7 @@ import { app, BrowserWindow, ipcMain, protocol, net } from "electron";
 import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { registerStoreHandlers } from "./ipc/store.js";
+import { registerAuthHandlers } from "./ipc/auth.js";
 import { getDb } from "./db/connection.js";
 import { initSchema } from "./db/schema.js";
 import {
@@ -136,6 +137,7 @@ const createLicenseWindow = async () => {
 const db = getDb();
 initSchema(db);
 registerStoreHandlers(db, ipcMain);
+registerAuthHandlers(db, ipcMain);
 
 // ── License IPC ───────────────────────────────────────────────────────────────
 

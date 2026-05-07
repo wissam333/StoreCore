@@ -34,31 +34,20 @@
 
 <script setup>
 const { t: $t } = useI18n();
+const router = useRouter();
 
 const phase = ref("loading");
 const error = ref("");
 const loadingMsg = ref("");
 
 // ── Environment detection ─────────────────────────────────────────────────────
-//
-// Capacitor's window.Capacitor is injected by the NATIVE LAYER — it cannot be
-// faked by any JS bundle. We check it FIRST as the ground truth. Only after
-// Capacitor confirms we are NOT on a native platform do we trust __ELECTRON__.
-//
-// Returns: 'electron' | 'native' | 'web'
 const detectEnvironment = async () => {
-  // Fast path — Capacitor bridge already registered synchronously
-  if (window?.Capacitor?.isNativePlatform?.()) {
-    return "native";
-  }
+  if (window?.Capacitor?.isNativePlatform?.()) return "native";
 
-  // Slow path — on some Android versions the bridge registers slightly
-  // after the first JS tick. Poll for up to 1500ms before giving up.
   const nativeConfirmed = await new Promise((resolve) => {
     const MAX_WAIT = 1500;
     const INTERVAL = 60;
     let elapsed = 0;
-
     const timer = setInterval(async () => {
       elapsed += INTERVAL;
       try {
@@ -77,18 +66,10 @@ const detectEnvironment = async () => {
   });
 
   if (nativeConfirmed) return "native";
-
-  // Only check __ELECTRON__ AFTER Capacitor has confirmed we are not native.
-  if (typeof window !== "undefined" && !!window.__ELECTRON__) {
-    return "electron";
-  }
-
+  if (typeof window !== "undefined" && !!window.__ELECTRON__) return "electron";
   return "web";
 };
 
-// ── Read the stored license key directly from Preferences ────────────────────
-// This is a fast local read — no network. Used to decide whether to show
-// the license screen before the background verify() completes.
 const getStoredKey = async () => {
   try {
     const { Preferences } = await import("@capacitor/preferences");
@@ -99,36 +80,41 @@ const getStoredKey = async () => {
   }
 };
 
-// ── DB init ───────────────────────────────────────────────────────────────────
 const initDb = async () => {
   const { initMobileSchema } = await import("~/composables/useMobileSchema");
   await initMobileSchema();
 };
 
-// ── Background verify — runs AFTER the app is already open ───────────────────
-//
-// KEY DESIGN:
-// We do NOT block app startup on network verification. Render's free tier
-// cold-starts in 50-90s, making a blocking verify feel completely broken.
-//
-// Instead:
-//   1. If a license key exists in Preferences → open the app immediately.
-//   2. Kick off verify() in the background (up to 100s timeout as before).
-//   3. If verify() comes back invalid (4xx) → force back to license screen.
-//   4. If verify() fails due to network/timeout → grace period logic in
-//      useMobileLicense handles it (7-day grace offline).
-//
-// The user experience: app opens in ~2s instead of ~90s.
+// ── After DB is ready, decide where to send the user ─────────────────────────
+// Uses isLoggedIn + restoreSession from top-level useAuth() call above.
+// Do NOT call useAuth() here — composables called after await lose Nuxt context.
+const navigateAfterInit = async () => {
+  // useAuth() is safe to call here — _session is now a plain module-level ref,
+  // not useState(), so it never needs a Nuxt context to exist
+  const { isLoggedIn, restoreSession } = useAuth();
+
+  if (isLoggedIn.value) {
+    router.replace("/dashboard");
+    return;
+  }
+
+  let restored = false;
+  try {
+    const result = await restoreSession();
+    restored = result?.ok === true;
+  } catch {
+    restored = false;
+  }
+
+  router.replace(restored ? "/dashboard" : "/auth/login");
+};
+
 const runBackgroundVerify = async () => {
   try {
     const { verify } = useMobileLicense();
     const result = await verify();
-
-    // Only act on hard rejections (wrong device, invalid key, expired).
-    // Network failures are already handled by grace period inside verify().
     if (!result.ok && result.reason !== "offline_grace_expired") {
       console.warn("[app] Background verify failed:", result.reason);
-      // Reset DB and force license screen
       try {
         const { resetMobileDb } = await import("~/composables/useMobileDb");
         resetMobileDb();
@@ -136,12 +122,10 @@ const runBackgroundVerify = async () => {
       phase.value = "license";
     }
   } catch (err) {
-    // Never crash the app over a background check failure
     console.warn("[app] Background verify threw:", err?.message ?? err);
   }
 };
 
-// ── After activation ──────────────────────────────────────────────────────────
 const onLicenseActivated = async () => {
   phase.value = "loading";
   loadingMsg.value = "Opening database…";
@@ -149,6 +133,7 @@ const onLicenseActivated = async () => {
   try {
     await initDb();
     phase.value = "app";
+    await navigateAfterInit();
   } catch (err) {
     error.value = `Database error: ${err?.message ?? err}`;
     phase.value = "error";
@@ -170,8 +155,10 @@ const init = async () => {
     if (env === "electron" || env === "web") {
       loadingMsg.value = "Opening database…";
       await initDb();
-      phase.value = "app";
       loadingMsg.value = "";
+      // Navigate BEFORE showing app — prevents flash of content before redirect
+      await navigateAfterInit();
+      phase.value = "app";
       return;
     }
 
@@ -181,31 +168,20 @@ const init = async () => {
       resetMobileDb();
     } catch {}
 
-    // ── Fast path: check for a stored key WITHOUT hitting the network ────────
-    //
-    // Old approach: await verify() → blocks for up to 100s on cold start.
-    // New approach:
-    //   • Read the key from Preferences (instant, local).
-    //   • If no key → show license screen immediately (unchanged).
-    //   • If key exists → open the DB and show the app immediately,
-    //     then verify in the background. If the background check fails
-    //     with a hard error, we push back to the license screen.
-    //
     loadingMsg.value = "Opening database…";
-
     const storedKey = await getStoredKey();
 
     if (!storedKey) {
-      // No key at all — must activate first
       phase.value = "license";
       loadingMsg.value = "";
       return;
     }
 
-    // Key exists locally → open the app now, verify quietly in background
     await initDb();
-    phase.value = "app";
     loadingMsg.value = "";
+    // Navigate BEFORE showing app — prevents flash
+    await navigateAfterInit();
+    phase.value = "app";
 
     // Fire-and-forget background verification
     runBackgroundVerify();

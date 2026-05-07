@@ -390,5 +390,124 @@
   "cameraNotAvailable": "الكاميرا غير متاحة.",
   "cameraPermissionDenied": "تم رفض إذن الكاميرا.",
   "cameraOpenFailed": "تعذّر فتح الكاميرا.",
-  "scanned": "تم المسح"
+  "scanned": "تم المسح",
+  "auth": {
+    "subtitle": "تسجيل دخول الموظفين",
+    "username": "اسم المستخدم",
+    "usernamePlaceholder": "أدخل اسم المستخدم",
+    "password": "كلمة المرور",
+    "passwordPlaceholder": "أدخل كلمة المرور",
+    "showPassword": "إظهار كلمة المرور",
+    "hidePassword": "إخفاء كلمة المرور",
+    "loginButton": "تسجيل الدخول",
+    "fingerprintLogin": "الدخول ببصمة الإصبع",
+    "fingerprintFailed": "فشل التحقق البيومتري",
+    "invalidCredentials": "اسم المستخدم أو كلمة المرور غير صحيحة",
+    "footer": "الوصول مقيد للموظفين المخوّلين فقط."
+  },
+  "staff": {
+    "addStaff": "إضافة موظف",
+    "editStaff": "تعديل موظف",
+    "addStaffSubtitle": "إنشاء حساب موظف جديد",
+    "manageRoles": "إدارة الأدوار",
+    "rolesSubtitle": "حدد صلاحيات كل دور",
+    "newRole": "دور جديد",
+    "roleNamePlaceholder": "مثل: كاشير، مشرف",
+    "systemRole": "دور النظام",
+    "selectOrCreateRole": "اختر دوراً أو أنشئ دوراً جديداً",
+    "permissionsPreview": "معاينة الصلاحيات",
+    "permissionsEnabled": "صلاحية مفعّلة",
+    "assignRole": "تعيين دور",
+    "identity": "المعلومات الشخصية",
+    "fullName": "الاسم الكامل",
+    "fullNamePlaceholder": "مثل: وسام حسن",
+    "username": "اسم المستخدم",
+    "usernamePlaceholder": "مثل: wissam",
+    "namePlaceholder": "اسم الموظف",
+    "phone": "الهاتف",
+    "phonePlaceholder": "+963...",
+    "email": "البريد الإلكتروني",
+    "emailPlaceholder": "اختياري",
+    "status": "الحالة",
+    "activeHint": "الموظفون غير النشطين لا يمكنهم تسجيل الدخول",
+    "role": "الدور",
+    "setPassword": "تعيين كلمة المرور",
+    "changePassword": "تغيير كلمة المرور",
+    "passwordLeaveBlank": "اتركها فارغة للإبقاء على كلمة المرور الحالية.",
+    "passwordPlaceholder": "٤ أحرف على الأقل",
+    "passwordOptional": "اتركها فارغة للإبقاء على الحالية",
+    "confirmPassword": "تأكيد كلمة المرور",
+    "confirmPasswordPlaceholder": "أعد كتابة كلمة المرور",
+    "createStaff": "إنشاء الموظف",
+    "active": "نشط",
+    "inactive": "غير نشط",
+    "noRole": "بدون دور",
+    "notFound": "لم يتم العثور على الموظف",
+    "created": "تم إنشاء الموظف",
+    "updated": "تم تحديث بيانات الموظف",
+    "roleSaved": "تم حفظ الدور",
+    "deleteRoleTitle": "حذف الدور",
+    "deleteRoleConfirm": "هل أنت متأكد من حذف \"{name}\"؟",
+    "deleteRoleWarning": "سيفقد الموظفون المعينون لهذا الدور صلاحياتهم.",
+    "permissions": "الصلاحيات",
+    "allowAll": "السماح بالكل",
+    "denyAll": "رفض الكل",
+    "toggleModule": "تبديل القسم كله",
+    "on": "مفعّل",
+    "off": "معطّل",
+    "errors": {
+      "nameRequired": "الاسم الكامل مطلوب",
+      "usernameRequired": "اسم المستخدم مطلوب",
+      "passwordRequired": "كلمة المرور مطلوبة للموظف الجديد",
+      "passwordTooShort": "كلمة المرور يجب أن تكون ٤ أحرف على الأقل",
+      "passwordMismatch": "كلمتا المرور غير متطابقتين",
+      "roleNameRequired": "اسم الدور مطلوب"
+    }
+  },
+  "permModules": {
+    "products": "المنتجات",
+    "orders": "الطلبات",
+    "customers": "العملاء",
+    "dues": "الديون",
+    "reports": "التقارير",
+    "settings": "الإعدادات",
+    "staff": "الموظفون"
+  },
+  "permDesc": {
+    "products": {
+      "view": "تصفح وبحث المنتجات",
+      "add": "إضافة منتجات جديدة",
+      "edit": "تعديل المنتجات",
+      "delete": "حذف المنتجات"
+    },
+    "orders": {
+      "view": "عرض سجل الطلبات",
+      "add": "إنشاء طلبات جديدة",
+      "edit": "تعديل الطلبات",
+      "delete": "حذف الطلبات"
+    },
+    "customers": {
+      "view": "تصفح قائمة العملاء",
+      "add": "إضافة عملاء جدد",
+      "edit": "تعديل بيانات العملاء",
+      "delete": "حذف العملاء"
+    },
+    "dues": {
+      "view": "عرض الديون",
+      "add": "إضافة ديون",
+      "edit": "تعديل الديون",
+      "delete": "حذف الديون"
+    },
+    "reports": {
+      "view": "الوصول للتقارير"
+    },
+    "settings": {
+      "view": "عرض الإعدادات",
+      "edit": "تعديل الإعدادات"
+    },
+    "staff": {
+      "view": "عرض قائمة الموظفين",
+      "manage": "إدارة الموظفين والأدوار كاملاً"
+    }
+  }
 }
